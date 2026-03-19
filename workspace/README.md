@@ -31,7 +31,8 @@
 - `Node.js`
 - `Codex CLI`
 - macOS
-  - 当前后台任务依赖 `launchd`
+  - 当前正式支持平台是 macOS
+  - 后台自动任务依赖 `launchd`
 
 ### 可选但强烈建议
 
@@ -243,7 +244,7 @@ npm run workspace
 
 增加：
 
-- CoCo Feishu 对话
+- 你自己命名的 Feishu 机器人对话
 - Feishu 对象操作
 - 远程项目协作
 
@@ -267,7 +268,7 @@ npm run workspace
 
 1. 平时直接在 `workspace/` 下使用 `Codex`
 2. 需要记忆时让系统自动读写 `memory/`
-3. 需要远程协作时用 Feishu 找 CoCo
+3. 需要远程协作时用 Feishu 找你自己创建的机器人
 4. 需要看项目和任务可视化时看 Feishu Bitable
 5. 需要本地控制台时打开 Electron
 
@@ -325,3 +326,4 @@ npm run bridge:status
 - 默认不带任何真实飞书资源和 token
 - 默认不带真实长期记忆
 - Feishu 权限审核和第一次 OAuth 无法完全自动化，只能做到“少量人工授权后长期自动续期”
+- 当前正式支持平台是 macOS；Windows 尚未完成后台任务、常驻 bridge、通知与保活适配
