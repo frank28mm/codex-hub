@@ -1,0 +1,12 @@
+.DS_Store
+**/.DS_Store
+workspace/logs/
+workspace/runtime/
+workspace/reports/ops/
+workspace/reports/system/product-acceptance-latest.md
+workspace/.codex/config.toml
+workspace/node_modules/
+workspace/**/.next/
+workspace/**/__pycache__/
+workspace/**/.pytest_cache/
+workspace/**/.mypy_cache/

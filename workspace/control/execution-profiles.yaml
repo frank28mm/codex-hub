@@ -1,0 +1,15 @@
+version: 1
+profiles:
+  interactive:
+    requires_user_present: true
+    background: false
+    allow_confirmation: true
+  noninteractive:
+    requires_user_present: false
+    background: true
+    allow_confirmation: false
+  dry-run-capable:
+    requires_user_present: false
+    background: true
+    allow_confirmation: false
+    default_dry_run: true

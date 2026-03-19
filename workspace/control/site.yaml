@@ -1,0 +1,10 @@
+version: 1
+site:
+  product_name: Codex Hub
+  workspace_root: auto
+  memory_root: auto
+  operator_name: ""
+  timezone: Asia/Shanghai
+  launchagent_prefix: com.codexhub
+  feishu_enabled: false
+  electron_enabled: true

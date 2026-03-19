@@ -1,0 +1,70 @@
+version: 1
+defaults:
+  owner_open_id: ""
+  calendar_id: ""
+  doc_folder_token: ""
+  doc_access_scope: folder-root
+  doc_access_note: Configure a folder root or explicitly switch to full_account after deployment.
+  oauth_scopes:
+    - bitable:app
+    - base:record:create
+    - base:record:update
+    - base:record:delete
+    - contact:contact.base:readonly
+    - task:task:write
+    - task:tasklist:read
+    - task:tasklist:write
+  meeting:
+    calendar_id: ""
+    timezone: Asia/Shanghai
+    duration_minutes: 30
+    attendee_ability: can_modify_event
+    visibility: default
+aliases:
+  chats: {}
+  users: {}
+  calendars: {}
+  doc_folders: {}
+  tables: {}
+  tasklists: {}
+projection:
+  app:
+    alias: codex_hub_projection
+    name: Codex Hub 项目任务看板
+    app_token: ""
+    folder_token: ""
+  tables:
+    projects_overview:
+      alias: codex_hub_projects_overview
+      name: 项目总览
+      table_id: ""
+      default_view_name: 全部项目
+    tasks_current:
+      alias: codex_hub_tasks_current
+      name: 当前任务
+      table_id: ""
+      default_view_name: 全部任务
+  views:
+    projects_overview:
+      - name: 全部项目
+        type: grid
+      - name: 按状态看板
+        type: kanban
+      - name: 按优先级
+        type: grid
+      - name: 最近更新
+        type: grid
+      - name: 需关注项目
+        type: grid
+    tasks_current:
+      - name: 全部任务
+        type: grid
+      - name: 按状态看板
+        type: kanban
+      - name: 按项目分组
+        type: kanban
+      - name: 阻塞项
+        type: grid
+      - name: 最近更新任务
+        type: grid
+

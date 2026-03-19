@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workspace Hub Console</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <p class="eyebrow">Codex Control Console</p>
+          <h1>Workspace Hub</h1>
+        </div>
+        <nav class="nav">
+          <button class="nav-link active" data-panel="overview">Overview</button>
+          <button class="nav-link" data-panel="command">Command Center</button>
+          <button class="nav-link" data-panel="projects">Projects</button>
+          <button class="nav-link" data-panel="review">Review Inbox</button>
+          <button class="nav-link" data-panel="coordination">Coordination Inbox</button>
+          <button class="nav-link" data-panel="health">Health / Alerts</button>
+        </nav>
+        <section class="status-card">
+          <h2>Execution Model</h2>
+          <p>Console-first shell. Codex remains the execution engine; this app does not replace the Codex desktop chat UI.</p>
+          <ul id="metadata-list" class="metadata-list"></ul>
+        </section>
+      </aside>
+
+      <main class="content">
+        <header class="header">
+          <div>
+            <p class="eyebrow">Operator View</p>
+            <h2 id="panel-title">Overview</h2>
+          </div>
+          <button id="refresh-panel" class="ghost-button">Refresh Panel</button>
+        </header>
+        <div id="panel-feedback" class="panel-feedback" hidden></div>
+
+        <section id="panel-overview" class="panel active">
+          <div id="overview-cards" class="card-grid"></div>
+          <div class="stack">
+            <article class="detail-card">
+              <h3>Current Posture</h3>
+              <p id="overview-note"></p>
+            </article>
+            <div id="overview-highlights" class="highlight-grid"></div>
+          </div>
+        </section>
+
+        <section id="panel-command" class="panel">
+          <article class="detail-card">
+            <h3>Command Center</h3>
+            <p>Launch Codex tasks through the shared Workspace Hub substrate. `codex exec` and `codex resume` are broker-backed; `codex app` opens the shared workspace target.</p>
+            <div id="command-hint" class="inline-note"></div>
+            <div id="command-readiness" class="readiness-grid"></div>
+            <form id="command-form" class="command-form">
+              <label>
+                <span>Action</span>
+                <select name="action">
+                  <option value="codex-exec">codex exec</option>
+                  <option value="codex-resume">codex resume</option>
+                  <option value="open-codex-app">codex app</option>
+                </select>
+              </label>
+              <label>
+                <span>Project</span>
+                <input name="project_name" placeholder="Codex Obsidian记忆与行动系统" />
+              </label>
+              <label>
+                <span>Prompt</span>
+                <textarea name="prompt" rows="4" placeholder="Describe the task for codex exec."></textarea>
+              </label>
+              <label>
+                <span>Session ID</span>
+                <input name="session_id" placeholder="Only used for codex resume." />
+              </label>
+              <div class="button-row">
+                <button type="submit" class="primary-button">Run</button>
+                <button type="button" id="open-workspace" class="ghost-button">Open Workspace</button>
+                <button type="button" id="open-broker" class="ghost-button">Open Broker</button>
+              </div>
+            </form>
+            <div id="command-status" class="panel-feedback inline-feedback" hidden></div>
+            <pre id="command-output" class="terminal"></pre>
+            <div class="stack">
+              <article class="detail-card sub-card">
+                <div class="section-head">
+                  <h4>Recent Command Results</h4>
+                  <button type="button" id="clear-command-history" class="ghost-button small-button">Clear</button>
+                </div>
+                <div id="command-history" class="signal-stack"></div>
+              </article>
+            </div>
+          </article>
+        </section>
+
+        <section id="panel-projects" class="panel">
+          <article class="detail-card">
+            <div class="section-head">
+              <h3>Projects</h3>
+              <button class="ghost-button" data-load-panel="projects">Reload</button>
+            </div>
+            <div class="projects-layout">
+              <div id="projects-list" class="project-list"></div>
+              <div id="project-detail" class="project-detail"></div>
+            </div>
+          </article>
+        </section>
+
+        <section id="panel-review" class="panel">
+          <article class="detail-card">
+            <div class="section-head">
+              <h3>Review Inbox</h3>
+              <button class="ghost-button" data-load-panel="review">Reload</button>
+            </div>
+            <div id="review-scope" class="scope-bar"></div>
+            <div id="review-summary" class="summary-bar"></div>
+            <div id="review-table" class="stack"></div>
+          </article>
+        </section>
+
+        <section id="panel-coordination" class="panel">
+          <article class="detail-card">
+            <div class="section-head">
+              <h3>Coordination Inbox</h3>
+              <button class="ghost-button" data-load-panel="coordination">Reload</button>
+            </div>
+            <div id="coordination-scope" class="scope-bar"></div>
+            <div id="coordination-summary" class="summary-bar"></div>
+            <div id="coordination-table" class="stack"></div>
+          </article>
+        </section>
+
+        <section id="panel-health" class="panel">
+          <article class="detail-card">
+            <div class="section-head">
+              <h3>Health / Alerts</h3>
+              <button class="ghost-button" data-load-panel="health">Reload</button>
+            </div>
+            <div id="health-stack" class="stack"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

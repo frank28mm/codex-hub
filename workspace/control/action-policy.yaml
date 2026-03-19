@@ -1,0 +1,143 @@
+version: 1
+action_classes:
+  read:
+    aliases:
+      - read
+      - browse
+      - search
+      - fetch
+      - screenshot
+      - export-text
+  session-establish:
+    aliases:
+      - login
+      - authorize
+      - switch-account
+      - session-establish
+  reversible-write-business:
+    aliases:
+      - open-pr
+      - edit-issue
+      - edit-wiki
+      - update-board
+      - create-draft
+  reversible-write-system:
+    aliases:
+      - deploy-preview
+      - restart-service
+      - update-config
+      - run-migration-preview
+  privileged-or-irreversible:
+    aliases:
+      - delete-resource
+      - change-iam
+      - change-billing
+      - payment
+      - withdraw
+      - publish-production
+matrix:
+  - id: public-read
+    target_classes: [public]
+    action_classes: [read]
+    execution_profiles: [interactive, noninteractive, dry-run-capable]
+    decision: allow
+    audit_required: false
+    requires_dry_run: false
+    reason_code: public_read_allowed
+  - id: owned-low-read
+    target_classes: [owned-low]
+    action_classes: [read]
+    execution_profiles: [interactive, noninteractive, dry-run-capable]
+    decision: allow
+    audit_required: true
+    requires_dry_run: false
+    reason_code: owned_low_read_allowed
+  - id: owned-high-read
+    target_classes: [owned-high]
+    action_classes: [read]
+    execution_profiles: [interactive, noninteractive, dry-run-capable]
+    decision: allow
+    audit_required: true
+    requires_dry_run: false
+    reason_code: owned_high_read_allowed
+  - id: session-establish-default
+    target_classes: ["*"]
+    action_classes: [session-establish]
+    execution_profiles: [interactive, noninteractive, dry-run-capable]
+    decision: confirm
+    audit_required: true
+    requires_dry_run: false
+    reason_code: session_establish_requires_confirmation
+  - id: reversible-business-interactive
+    target_classes: ["*"]
+    action_classes: [reversible-write-business]
+    execution_profiles: [interactive]
+    decision: allow
+    audit_required: true
+    requires_dry_run: false
+    reason_code: reversible_business_interactive_allowed
+  - id: reversible-business-noninteractive
+    target_classes: ["*"]
+    action_classes: [reversible-write-business]
+    execution_profiles: [noninteractive, dry-run-capable]
+    decision: confirm
+    audit_required: true
+    requires_dry_run: false
+    reason_code: reversible_business_noninteractive_requires_confirmation
+  - id: reversible-system-default
+    target_classes: ["*"]
+    action_classes: [reversible-write-system]
+    execution_profiles: [interactive, noninteractive, dry-run-capable]
+    decision: confirm
+    audit_required: true
+    requires_dry_run: true
+    reason_code: reversible_system_requires_dry_run_and_confirmation
+  - id: irreversible-default
+    target_classes: ["*"]
+    action_classes: [privileged-or-irreversible]
+    execution_profiles: [interactive, noninteractive, dry-run-capable]
+    decision: deny
+    audit_required: true
+    requires_dry_run: false
+    reason_code: privileged_or_irreversible_denied
+defaults:
+  decision: deny
+  audit_required: true
+  requires_dry_run: false
+  reason_code: no_policy_match
+command_prefix_exports:
+  - id: allow-readonly-local
+    decision: allow
+    justification: Workspace-scoped read helpers and repo-safe inspection commands are safe to run without prompting.
+    patterns:
+      - ["git", "status"]
+      - ["git", "diff"]
+      - ["git", "log"]
+      - ["git", "show"]
+      - ["git", "rev-parse"]
+      - ["python3", "ops/codex_retrieval.py", "search"]
+      - ["python3", "ops/codex_retrieval.py", "status"]
+      - ["python3", "ops/codex_context.py", "suggest"]
+  - id: prompt-external-write
+    decision: prompt
+    justification: External writes or remote mutations require explicit review before execution.
+    patterns:
+      - ["git", "push"]
+      - ["gh", "pr", "create"]
+      - ["gh", "pr", "merge"]
+      - ["gh", "issue", "edit"]
+      - ["ssh"]
+      - ["scp"]
+      - ["rsync"]
+      - ["python3", "ops/controlled_git.py"]
+      - ["python3", "ops/controlled_gh.py"]
+      - ["python3", "ops/controlled_ssh.py"]
+      - ["python3", "ops/controlled_browser.py"]
+  - id: forbid-destructive
+    decision: forbidden
+    justification: Destructive commands are blocked; use safer reviewable alternatives.
+    patterns:
+      - ["rm", "-rf"]
+      - ["git", "reset", "--hard"]
+      - ["git", "clean", "-fd"]
+      - ["git", "clean", "-fdx"]

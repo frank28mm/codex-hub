@@ -1,0 +1,31 @@
+version: 1
+defaults:
+  workspace:
+    model: gpt-5.4
+    reasoning_effort: xhigh
+  feishu:
+    model: gpt-5.4
+    reasoning_effort: xhigh
+  electron:
+    model: gpt-5.4
+    reasoning_effort: xhigh
+choices:
+- id: gpt-5-codex
+  label: GPT-5 Codex
+  note: 当前 Codex CLI 默认模型
+- id: gpt-5.4
+  label: GPT-5.4
+  note: 与 Codex App 常用模型对齐
+reasoning_choices:
+- id: low
+  label: 低
+  note: 更快，适合轻任务和直接查询
+- id: medium
+  label: 中
+  note: 平衡速度与推理深度
+- id: high
+  label: 高
+  note: 更深推理，适合复杂任务
+- id: xhigh
+  label: 超高
+  note: 最深推理，适合复杂分析和长链任务

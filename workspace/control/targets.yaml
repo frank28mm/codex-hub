@@ -1,0 +1,42 @@
+version: 1
+defaults:
+  fallback_web_target_class: public
+  fallback_nonweb_target_class: restricted
+  web_schemes:
+    - http
+    - https
+targets:
+  - id: github
+    target_class: owned-low
+    hosts:
+      - github.com
+      - api.github.com
+  - id: openai-docs
+    target_class: public
+    hosts:
+      - developers.openai.com
+      - platform.openai.com
+  - id: workspace-local
+    target_class: owned-low
+    target_prefixes:
+      - "file://__WORKSPACE_ROOT__"
+      - "local://codex-hub"
+  - id: ssh-endpoints
+    target_class: owned-high
+    target_prefixes:
+      - "ssh://"
+      - "ssh:"
+  - id: cloud-console
+    target_class: owned-high
+    hosts:
+      - console.aliyun.com
+    host_suffixes:
+      - .aliyuncs.com
+      - .console.aliyun.com
+      - .console.aws.amazon.com
+  - id: partner-platforms
+    target_class: partner
+    host_contains:
+      - taobao
+      - tmall
+      - alibaba

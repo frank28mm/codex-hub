@@ -1,0 +1,31 @@
+{
+  "name": "workspace-hub-electron-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Console-first Electron shell for the Codex Obsidian action system.",
+  "main": "main.js",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "renderer:dev": "next dev renderer --port 3310",
+    "renderer:build": "next build renderer",
+    "renderer:start": "next start renderer --port 3310",
+    "workspace": "node launch-workspace.js",
+    "launcher:install": "node install-launcher.js install",
+    "launcher:status": "node install-launcher.js status",
+    "launcher:uninstall": "node install-launcher.js uninstall",
+    "build": "npm run renderer:build",
+    "smoke": "node smoke-check.js",
+    "bridge:daemon": "node coco-bridge-service.js run-daemon",
+    "bridge:install": "node coco-bridge-service.js install-launchagent",
+    "bridge:status": "node coco-bridge-service.js status",
+    "bridge:uninstall": "node coco-bridge-service.js uninstall-launchagent"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "next": "14.2.7",
+    "react": "18.3.0",
+    "react-dom": "18.3.0"
+  }
+}

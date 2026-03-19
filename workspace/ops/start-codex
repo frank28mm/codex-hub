@@ -1,0 +1,843 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEFAULT_WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CODE_ROOT="${WORKSPACE_HUB_CODE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Code may come from a worktree, but runtime/control state should keep using the
+# canonical workspace unless the caller explicitly overrides it.
+WORKSPACE_ROOT="${WORKSPACE_HUB_ROOT:-$DEFAULT_WORKSPACE_ROOT}"
+VAULT_ROOT="${WORKSPACE_HUB_VAULT_ROOT:-$(cd "$DEFAULT_WORKSPACE_ROOT/../memory" && pwd)}"
+REGISTRY_MD="$VAULT_ROOT/PROJECT_REGISTRY.md"
+SESSION_ROUTER="$WORKSPACE_ROOT/runtime/session-router.json"
+MEMORY_TOOL="$CODE_ROOT/ops/codex_memory.py"
+CONTEXT_TOOL="$CODE_ROOT/ops/codex_context.py"
+MATERIAL_ROUTER_TOOL="$CODE_ROOT/ops/material_router.py"
+PROJECTS_ROOT="${WORKSPACE_HUB_PROJECTS_ROOT:-$WORKSPACE_ROOT/projects}"
+
+PROJECT=""
+PROMPT=""
+DRY_RUN="0"
+AUTO_OPEN_OBSIDIAN="1"
+BOARD_SCOPE="project"
+BINDING_BOARD_PATH=""
+TOPIC_NAME=""
+ROLLUP_TARGET=""
+EXECUTION_PROFILE=""
+MODEL_NAME=""
+REASONING_EFFORT=""
+RESUME_SESSION_ID=""
+NO_AUTO_RESUME="0"
+LAUNCH_SOURCE=""
+SOURCE_CHAT_REF=""
+SOURCE_THREAD_NAME=""
+SOURCE_THREAD_LABEL=""
+SOURCE_MESSAGE_ID=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  start-codex --project <name> [--prompt "<text>"]
+  start-codex --prompt "<text>"
+  start-codex --resume-session-id <session> [--prompt "<text>"]
+  start-codex --no-auto-resume [--project <name>] [--prompt "<text>"]
+  start-codex --no-open-obsidian [--project <name>] [--prompt "<text>"]
+  start-codex --dry-run [--project <name>] [--prompt "<text>"]
+  start-codex
+
+Behavior:
+  - Starts from the current product workspace root
+  - Does not require Obsidian to be manually opened first
+  - By default, ensures Obsidian is available in the background for the Vault
+  - If a project is resolved and a same-project session exists within 24 hours,
+    resumes that session
+  - If --prompt is provided, the script uses non-interactive codex exec mode
+  - If no project is resolved, starts in general mode
+  - If --dry-run is provided, prints the routing decision and exits
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project)
+      PROJECT="${2:-}"
+      shift 2
+      ;;
+    --prompt)
+      PROMPT="${2:-}"
+      shift 2
+      ;;
+    --execution-profile)
+      EXECUTION_PROFILE="${2:-}"
+      shift 2
+      ;;
+    --model)
+      MODEL_NAME="${2:-}"
+      shift 2
+      ;;
+    --reasoning-effort)
+      REASONING_EFFORT="${2:-}"
+      shift 2
+      ;;
+    --resume-session-id)
+      RESUME_SESSION_ID="${2:-}"
+      shift 2
+      ;;
+    --no-auto-resume)
+      NO_AUTO_RESUME="1"
+      shift
+      ;;
+    --source)
+      LAUNCH_SOURCE="${2:-}"
+      shift 2
+      ;;
+    --chat-ref)
+      SOURCE_CHAT_REF="${2:-}"
+      shift 2
+      ;;
+    --thread-name)
+      SOURCE_THREAD_NAME="${2:-}"
+      shift 2
+      ;;
+    --thread-label)
+      SOURCE_THREAD_LABEL="${2:-}"
+      shift 2
+      ;;
+    --source-message-id)
+      SOURCE_MESSAGE_ID="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN="1"
+      shift
+      ;;
+    --no-open-obsidian)
+      AUTO_OPEN_OBSIDIAN="0"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -z "$PROMPT" ]]; then
+        PROMPT="$1"
+      else
+        PROMPT="$PROMPT $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+resolve_project_from_prompt() {
+  python3 - "$REGISTRY_MD" "$PROMPT" "$PROJECTS_ROOT" <<'PY'
+import json, re, sys
+from pathlib import Path
+
+path, prompt, projects_root = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    text = open(path, "r", encoding="utf-8").read()
+except FileNotFoundError:
+    text = ""
+data = []
+if text:
+    match = re.search(r"<!-- PROJECT_REGISTRY_DATA_START -->\s*```json\s*(.*?)\s*```\s*<!-- PROJECT_REGISTRY_DATA_END -->", text, re.S)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+        except Exception:
+            data = []
+known = {item.get("project_name", ""): item for item in data if item.get("project_name")}
+try:
+    for child in sorted(Path(projects_root).iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        if child.name not in known:
+            known[child.name] = {
+                "project_name": child.name,
+                "aliases": [child.name.lower()] if child.name.lower() != child.name else [],
+            }
+except FileNotFoundError:
+    pass
+prompt_l = prompt.lower()
+hits = []
+for item in known.values():
+    names = [item.get("project_name", "")] + list(item.get("aliases", []))
+    for name in names:
+        if name and name.lower() in prompt_l:
+            hits.append(item["project_name"])
+            break
+hits = sorted(set(hits))
+print(hits[0] if len(hits) == 1 else "")
+PY
+}
+
+canonicalize_project_name() {
+  python3 - "$REGISTRY_MD" "$1" <<'PY'
+import json, re, sys
+
+path, project = sys.argv[1], sys.argv[2]
+project = project.strip()
+if not project:
+    print("")
+    raise SystemExit(0)
+try:
+    text = open(path, "r", encoding="utf-8").read()
+except FileNotFoundError:
+    text = ""
+data = []
+if text:
+    match = re.search(r"<!-- PROJECT_REGISTRY_DATA_START -->\s*```json\s*(.*?)\s*```\s*<!-- PROJECT_REGISTRY_DATA_END -->", text, re.S)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+        except Exception:
+            data = []
+project_l = project.lower()
+for item in data:
+    names = [item.get("project_name", "")] + list(item.get("aliases", []))
+    for name in names:
+        if name and name.lower() == project_l:
+            print(item.get("project_name", project))
+            raise SystemExit(0)
+print(project)
+PY
+}
+
+resolve_resume_context() {
+  python3 - "$SESSION_ROUTER" "$1" <<'PY'
+import json, sys, datetime as dt
+path, project = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+route = data.get("routes", {}).get(project)
+if not route:
+    print("")
+    raise SystemExit(0)
+sid = route.get("last_session_id")
+last_active = route.get("last_active_at")
+if not sid or not last_active:
+    print("")
+    raise SystemExit(0)
+try:
+    ts = dt.datetime.fromisoformat(last_active.replace("Z", "+00:00"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+now = dt.datetime.now(dt.timezone.utc)
+if (now - ts).total_seconds() <= 24 * 3600:
+    print(json.dumps({
+        "session_id": sid,
+        "binding_scope": route.get("binding_scope", "project"),
+        "binding_board_path": route.get("binding_board_path", ""),
+        "topic_name": route.get("topic_name", ""),
+        "rollup_target": route.get("rollup_target", ""),
+    }, ensure_ascii=False))
+else:
+    print("")
+PY
+}
+
+resolve_board_binding() {
+  python3 "$MEMORY_TOOL" resolve-board-binding --project-name "$1" --prompt "$2"
+}
+
+parse_binding_json() {
+  python3 - "$1" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+print(payload.get("binding_scope", "project"))
+print(payload.get("binding_board_path", ""))
+print(payload.get("topic_name", ""))
+print(payload.get("rollup_target", ""))
+print(payload.get("session_id", ""))
+PY
+}
+
+load_context_suggestions() {
+  if [[ -n "${1:-}" ]]; then
+    python3 "$MATERIAL_ROUTER_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}"
+    return 0
+  fi
+  python3 "$CONTEXT_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}"
+}
+
+resolve_codex_settings() {
+  python3 "$CODE_ROOT/ops/codex_models.py" resolve \
+    --model "$MODEL_NAME" \
+    --reasoning-effort "$REASONING_EFFORT" \
+    --execution-profile "$EXECUTION_PROFILE" \
+    --source "$LAUNCH_SOURCE"
+}
+
+resolve_project_pause() {
+  python3 "$CODE_ROOT/ops/project_pause.py" status --project-name "$1" --scope session_start
+}
+
+pause_active() {
+  python3 - "$1" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+print("1" if payload.get("active") else "0")
+PY
+}
+
+pause_summary() {
+  python3 - "$1" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+print(str(payload.get("summary", "")).strip())
+PY
+}
+
+print_context_summary() {
+  python3 - "$1" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+print(f"context_scope={payload.get('binding_scope', 'general')}")
+print(f"context_board={payload.get('board_path', '')}")
+print(f"context_recommendation_count={len(payload.get('recommended_files', []))}")
+protocol = payload.get("retrieval_protocol") or {}
+if protocol:
+    print(f"context_retrieval_next_step={protocol.get('next_step', '')}")
+    print(
+        "context_retrieval_counts="
+        f"search:{protocol.get('search_candidate_count', 0)} "
+        f"timeline:{protocol.get('timeline_candidate_count', 0)} "
+        f"detail:{protocol.get('detail_candidate_count', 0)}"
+    )
+    for path in (protocol.get("timeline_paths") or [])[:2]:
+        print(f"context_timeline_path={path}")
+    for path in (protocol.get("detail_paths") or [])[:2]:
+        print(f"context_detail_path={path}")
+for item in payload.get("recommended_files", [])[:4]:
+    print(f"context_file={item.get('path', '')} | reason={item.get('reason', '')}")
+PY
+}
+
+build_launch_context_json() {
+  python3 - \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" <<'PY'
+import json, sys
+
+(
+    mode,
+    project_name,
+    binding_scope,
+    binding_board_path,
+    topic_name,
+    rollup_target,
+    session_id,
+    execution_profile,
+    launch_source,
+    source_chat_ref,
+    source_thread_name,
+    source_thread_label,
+    selected_model,
+    selected_reasoning_effort,
+) = sys.argv[1:15]
+
+print(
+    json.dumps(
+        {
+            "mode": mode,
+            "project_name": project_name,
+            "binding_scope": binding_scope,
+            "binding_board_path": binding_board_path,
+            "topic_name": topic_name,
+            "rollup_target": rollup_target,
+            "session_id": session_id,
+            "execution_profile": execution_profile,
+            "launch_source": launch_source,
+            "source_chat_ref": source_chat_ref,
+            "source_thread_name": source_thread_name,
+            "source_thread_label": source_thread_label,
+            "model": selected_model,
+            "reasoning_effort": selected_reasoning_effort,
+        },
+        ensure_ascii=False,
+    )
+)
+PY
+}
+
+build_launcher_context_note() {
+  python3 - \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" <<'PY'
+import json, sys
+
+(
+    project_name,
+    binding_scope,
+    binding_board_path,
+    topic_name,
+    launch_source,
+    source_chat_ref,
+    source_thread_name,
+    source_thread_label,
+    source_message_id,
+    context_json,
+    mode,
+    execution_profile,
+    selected_model,
+    selected_reasoning_effort,
+) = sys.argv[1:15]
+
+try:
+    context = json.loads(context_json) if context_json else {}
+except Exception:
+    context = {}
+
+lines = []
+if launch_source or project_name or source_thread_name or source_thread_label or source_chat_ref:
+    lines.append("你当前是通过 Codex Hub 的统一启动器进入这个工作区，不是普通的随手桌面对话。")
+    if launch_source == "feishu":
+        lines.append("来源渠道：Feishu 远程聊天线程。")
+    elif launch_source == "electron":
+        lines.append("来源渠道：Electron 桌面对话线程。")
+    elif launch_source:
+        lines.append(f"来源渠道：{launch_source}。")
+    if project_name and project_name != "general":
+        lines.append(f"当前项目：{project_name}。")
+    if topic_name:
+        lines.append(f"当前专题：{topic_name}。")
+    if binding_scope and binding_scope != "chat":
+        lines.append(f"上下文范围：{binding_scope}。")
+    board_path = context.get("board_path") or binding_board_path
+    if board_path:
+        lines.append(f"关联板面：{board_path}。")
+    if source_thread_name:
+        lines.append(f"来源线程名称：{source_thread_name}。")
+    if source_thread_label and source_thread_label != source_thread_name:
+        lines.append(f"来源线程标签：{source_thread_label}。")
+    if source_chat_ref:
+        lines.append(f"来源聊天引用：{source_chat_ref}。")
+    if source_message_id:
+        lines.append(f"来源消息 ID：{source_message_id}。")
+    recommended = context.get("recommended_files") or []
+    if recommended:
+        lines.append("启动器建议你优先参考这些上下文文件：")
+        for item in recommended[:4]:
+            path = str(item.get("path", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            if path and reason:
+                lines.append(f"- {path}：{reason}")
+            elif path:
+                lines.append(f"- {path}")
+    retrieval_protocol = context.get("retrieval_protocol") or {}
+    if retrieval_protocol:
+        lines.append("当前检索协议固定遵循 search -> timeline -> detail。")
+        next_step = str(retrieval_protocol.get("next_step", "")).strip()
+        if next_step:
+            lines.append(f"下一步优先动作：{next_step}。")
+        timeline_paths = [str(path).strip() for path in retrieval_protocol.get("timeline_paths", []) if str(path).strip()]
+        detail_paths = [str(path).strip() for path in retrieval_protocol.get("detail_paths", []) if str(path).strip()]
+        if timeline_paths:
+            lines.append("可先浏览这些 timeline 入口：")
+            for path in timeline_paths[:3]:
+                lines.append(f"- {path}")
+        if detail_paths:
+            lines.append("需要细读时，优先展开这些 detail 入口：")
+            for path in detail_paths[:3]:
+                lines.append(f"- {path}")
+    lines.append("当前工作区还提供飞书对象操作能力，可直接完成消息、用户、文档、多维表格、日历、任务、视频会议等操作。")
+    lines.append(f"飞书资源注册表位于：{WORKSPACE_ROOT}/control/feishu_resources.yaml。")
+    lines.append(f"飞书操作 skill 位于：{WORKSPACE_ROOT}/.agents/skills/feishu-ops/SKILL.md。")
+    lines.append("如果用户要求操作飞书对象，优先使用 local_broker.py feishu-op 或对应 repo skill，不要只做口头解释。")
+    lines.append("请把这次任务当成上述来源线程的持续上下文，先按当前项目记忆和工作区协议理解，再执行用户请求。")
+if mode == "resume":
+    lines.append("这是续接会话，不要把它当成全新的陌生线程。")
+if execution_profile:
+    lines.append(f"当前执行档：{execution_profile}。")
+if selected_model:
+    lines.append(f"当前模型：{selected_model}。")
+if selected_reasoning_effort:
+    lines.append(f"当前推理强度：{selected_reasoning_effort}。")
+print("\n".join(lines).strip())
+PY
+}
+
+build_codex_prompt() {
+  local prompt_text="${1:-}"
+  local launch_note=""
+  if [[ -z "$prompt_text" ]]; then
+    return 0
+  fi
+  launch_note="$(build_launcher_context_note \
+    "${PROJECT:-general}" \
+    "${BOARD_SCOPE:-chat}" \
+    "$BINDING_BOARD_PATH" \
+    "$TOPIC_NAME" \
+    "$LAUNCH_SOURCE" \
+    "$SOURCE_CHAT_REF" \
+    "$SOURCE_THREAD_NAME" \
+    "$SOURCE_THREAD_LABEL" \
+    "$SOURCE_MESSAGE_ID" \
+    "$CONTEXT_JSON" \
+    "$2" \
+    "$EXECUTION_PROFILE" \
+    "$SELECTED_MODEL" \
+    "$SELECTED_REASONING_EFFORT")"
+  if [[ -z "$launch_note" ]]; then
+    printf '%s' "$prompt_text"
+    return 0
+  fi
+  printf '%s\n\n用户这次的直接请求是：\n%s' "$launch_note" "$prompt_text"
+}
+
+print_launcher_prompt_preview() {
+  python3 - "$1" <<'PY'
+import sys
+text = sys.argv[1]
+text = text.strip()
+if not text:
+    raise SystemExit(0)
+preview = text.replace("\n", "\\n")
+if len(preview) > 360:
+    preview = preview[:357] + "..."
+print(f"launcher_prompt_preview={preview}")
+PY
+}
+
+print_feishu_ops_summary() {
+  printf 'feishu_resources_path=%s\n' "$WORKSPACE_ROOT/control/feishu_resources.yaml"
+  printf 'feishu_skill_path=%s\n' "$WORKSPACE_ROOT/.agents/skills/feishu-ops/SKILL.md"
+}
+
+ensure_obsidian_background() {
+  if [[ "$AUTO_OPEN_OBSIDIAN" != "1" ]]; then
+    return 0
+  fi
+  if pgrep -x "Obsidian" >/dev/null 2>&1; then
+    return 0
+  fi
+  open -g -a Obsidian "$VAULT_ROOT" >/dev/null 2>&1 || true
+}
+
+run_codex() {
+  local launch_id="${1:-}"
+  local mode="${2:-new}"
+  local session_id="${3:-}"
+  local output_file=""
+  local status=0
+  local codex_prompt="$PROMPT"
+  local selected_model="${SELECTED_MODEL:-}"
+  local selected_reasoning_effort="${SELECTED_REASONING_EFFORT:-}"
+  local codex_path=""
+  local node_path=""
+  local -a codex_prefix=()
+  local -a codex_exec_base=()
+  local feishu_root=""
+  local finalize_args=(
+    python3 "$MEMORY_TOOL" finalize-launch
+    --launch-id "$launch_id"
+  )
+
+  codex_path="$(command -v codex || true)"
+  if [[ -z "$codex_path" && -x "$HOME/.npm-global/bin/codex" ]]; then
+    codex_path="$HOME/.npm-global/bin/codex"
+  fi
+  if [[ -z "$codex_path" ]]; then
+    codex_path="codex"
+  fi
+  node_path="$(command -v node || true)"
+  if [[ -z "$node_path" && -x "/opt/homebrew/bin/node" ]]; then
+    node_path="/opt/homebrew/bin/node"
+  fi
+  if [[ -z "$node_path" && -x "/usr/local/bin/node" ]]; then
+    node_path="/usr/local/bin/node"
+  fi
+
+  if [[ -f "$codex_path" ]] && head -n 1 "$codex_path" 2>/dev/null | grep -q '^#!/usr/bin/env node' && [[ -n "$node_path" ]]; then
+    codex_prefix=("$node_path" "$codex_path")
+  else
+    codex_prefix=("$codex_path")
+  fi
+
+  codex_exec_base=("${codex_prefix[@]}" "exec" "-C" "$WORKSPACE_ROOT")
+  if [[ -n "$selected_model" ]]; then
+    codex_exec_base+=("--model" "$selected_model")
+  fi
+  if [[ -n "$selected_reasoning_effort" ]]; then
+    codex_exec_base+=("-c" "model_reasoning_effort=\"$selected_reasoning_effort\"")
+  fi
+  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
+    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" ]]; then
+      codex_exec_base+=("--sandbox" "workspace-write" "-c" 'approval_policy="never"' "-c" "sandbox_workspace_write.network_access=true")
+      while IFS= read -r feishu_root; do
+        [[ -n "$feishu_root" ]] || continue
+        codex_exec_base+=("--add-dir" "$feishu_root")
+      done < <(
+        python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+workspace_root = Path(sys.argv[1]).resolve()
+vault_root = Path(sys.argv[2]).resolve()
+canonical_root = workspace_root
+if workspace_root.parent.name == "workspace-hub-worktrees":
+    sibling = workspace_root.parent.parent / "workspace-hub"
+    if sibling.exists():
+        canonical_root = sibling.resolve()
+worktrees_root = canonical_root.parent / "workspace-hub-worktrees"
+roots = [
+    vault_root,
+    canonical_root,
+    canonical_root / "projects",
+    workspace_root,
+    workspace_root / "projects",
+    worktrees_root / "core-v1-0-3-to-v1-0-5",
+    worktrees_root / "feishu-bridge",
+    worktrees_root / "electron-console",
+]
+seen = set()
+for root in roots:
+    if not root.exists():
+        continue
+    key = str(root.resolve())
+    if key in seen:
+        continue
+    seen.add(key)
+    print(key)
+PY
+      )
+    else
+      codex_exec_base+=("--sandbox" "danger-full-access" "-c" 'approval_policy="never"')
+    fi
+  fi
+
+  if [[ -n "$PROMPT" ]]; then
+    codex_prompt="$(build_codex_prompt "$PROMPT" "$mode")"
+  fi
+
+  if [[ -n "$PROJECT" && -n "$PROMPT" && "$mode" == "new" ]]; then
+    output_file="$WORKSPACE_ROOT/runtime/last-message-${launch_id}.txt"
+    rm -f "$output_file"
+    "${codex_exec_base[@]}" -o "$output_file" "$codex_prompt" || status=$?
+  elif [[ -n "$PROJECT" && -n "$PROMPT" && "$mode" == "resume" ]]; then
+    output_file="$WORKSPACE_ROOT/runtime/last-message-${launch_id}.txt"
+    rm -f "$output_file"
+    "${codex_exec_base[@]}" -o "$output_file" resume "$session_id" "$codex_prompt" || status=$?
+  elif [[ -z "$PROJECT" && -n "$PROMPT" && "$mode" == "resume" && -n "$session_id" ]]; then
+    output_file="$WORKSPACE_ROOT/runtime/last-message-${launch_id}.txt"
+    rm -f "$output_file"
+    "${codex_exec_base[@]}" -o "$output_file" resume "$session_id" "$codex_prompt" || status=$?
+  elif [[ -n "$PROMPT" ]]; then
+    "${codex_exec_base[@]}" "$codex_prompt" || status=$?
+  elif [[ "$mode" == "resume" && -n "$session_id" ]]; then
+    if [[ -n "$selected_model" ]]; then
+      "${codex_prefix[@]}" resume --model "$selected_model" ${selected_reasoning_effort:+-c model_reasoning_effort=\"$selected_reasoning_effort\"} -C "$WORKSPACE_ROOT" "$session_id" || status=$?
+    else
+      "${codex_prefix[@]}" resume ${selected_reasoning_effort:+-c model_reasoning_effort=\"$selected_reasoning_effort\"} -C "$WORKSPACE_ROOT" "$session_id" || status=$?
+    fi
+  else
+    if [[ -n "$selected_model" ]]; then
+      "${codex_prefix[@]}" --model "$selected_model" ${selected_reasoning_effort:+-c model_reasoning_effort=\"$selected_reasoning_effort\"} -C "$WORKSPACE_ROOT" || status=$?
+    else
+      "${codex_prefix[@]}" ${selected_reasoning_effort:+-c model_reasoning_effort=\"$selected_reasoning_effort\"} -C "$WORKSPACE_ROOT" || status=$?
+    fi
+  fi
+
+  if [[ -n "$launch_id" ]]; then
+    local final_status="completed"
+    if [[ "$status" -ne 0 ]]; then
+      if [[ "$status" -eq 130 || "$status" -eq 143 ]]; then
+        final_status="aborted"
+      else
+        final_status="failed"
+      fi
+    fi
+    if [[ -n "$session_id" ]]; then
+      finalize_args+=(--session-id "$session_id")
+    fi
+    if [[ -n "$SOURCE_THREAD_NAME" ]]; then
+      finalize_args+=(--thread-name "$SOURCE_THREAD_NAME")
+    fi
+    if [[ -n "$output_file" ]]; then
+      finalize_args+=(--summary-file "$output_file")
+    fi
+    finalize_args+=(--final-status "$final_status")
+    local finalize_output=""
+    finalize_output="$("${finalize_args[@]}" 2>/dev/null || true)"
+    if [[ -n "$finalize_output" ]]; then
+      printf 'WORKSPACE_HUB_FINALIZE_LAUNCH=%s\n' "$finalize_output" >&2
+    fi
+    rm -f "$output_file"
+  fi
+
+  return "$status"
+}
+
+if [[ "$DRY_RUN" != "1" && "${WORKSPACE_HUB_SKIP_DISCOVERY:-0}" != "1" ]]; then
+  python3 "$MEMORY_TOOL" discover-projects >/dev/null || true
+fi
+
+if [[ -z "$PROJECT" && -n "$PROMPT" ]]; then
+  PROJECT="$(resolve_project_from_prompt)"
+fi
+if [[ -n "$PROJECT" ]]; then
+  PROJECT="$(canonicalize_project_name "$PROJECT")"
+fi
+
+PROJECT_PAUSE_JSON=""
+if [[ -n "$PROJECT" ]]; then
+  PROJECT_PAUSE_JSON="$(resolve_project_pause "$PROJECT")"
+fi
+
+SESSION_ID="${RESUME_SESSION_ID:-}"
+RESUME_CONTEXT=""
+if [[ -n "$PROJECT" ]]; then
+  if [[ -z "$SESSION_ID" ]]; then
+    if [[ "$NO_AUTO_RESUME" != "1" ]]; then
+      RESUME_CONTEXT="$(resolve_resume_context "$PROJECT")"
+      if [[ -n "$RESUME_CONTEXT" ]]; then
+        {
+          IFS= read -r BOARD_SCOPE
+          IFS= read -r BINDING_BOARD_PATH
+          IFS= read -r TOPIC_NAME
+          IFS= read -r ROLLUP_TARGET
+          IFS= read -r SESSION_ID
+        } < <(parse_binding_json "$RESUME_CONTEXT")
+        BOARD_SCOPE="${BOARD_SCOPE:-project}"
+        BINDING_BOARD_PATH="${BINDING_BOARD_PATH:-}"
+        TOPIC_NAME="${TOPIC_NAME:-}"
+        ROLLUP_TARGET="${ROLLUP_TARGET:-}"
+        SESSION_ID="${SESSION_ID:-}"
+      fi
+    fi
+  fi
+  if [[ -n "$PROMPT" ]]; then
+    BINDING_JSON="$(resolve_board_binding "$PROJECT" "$PROMPT")"
+    {
+      IFS= read -r BOARD_SCOPE
+      IFS= read -r BINDING_BOARD_PATH
+      IFS= read -r TOPIC_NAME
+      IFS= read -r ROLLUP_TARGET
+      IFS= read -r _
+    } < <(parse_binding_json "$BINDING_JSON")
+    BOARD_SCOPE="${BOARD_SCOPE:-project}"
+    BINDING_BOARD_PATH="${BINDING_BOARD_PATH:-}"
+    TOPIC_NAME="${TOPIC_NAME:-}"
+    ROLLUP_TARGET="${ROLLUP_TARGET:-}"
+  fi
+fi
+
+export CODEX_PROJECT_NAME="${PROJECT:-general}"
+export CODEX_VAULT_PATH="$VAULT_ROOT"
+export CODEX_MEMORY_MODE="strict-minimal"
+SELECTED_MODEL="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str(payload.get("model","")).strip())' <<<"$(resolve_codex_settings)")"
+SELECTED_REASONING_EFFORT="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str(payload.get("reasoning_effort","")).strip())' <<<"$(resolve_codex_settings)")"
+CONTEXT_JSON="$(load_context_suggestions "${PROJECT:-}" "$PROMPT")"
+
+cd "$WORKSPACE_ROOT"
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  ensure_obsidian_background
+fi
+
+if [[ -n "$SESSION_ID" ]]; then
+  if [[ -z "$PROJECT" ]]; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf 'mode=resume\nproject=general\nsession_id=%s\nvault=%s\n' "$SESSION_ID" "$VAULT_ROOT"
+      printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+      printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+      print_feishu_ops_summary
+      print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "resume")"
+      print_context_summary "$CONTEXT_JSON"
+      exit 0
+    fi
+    echo "Routing: project=general mode=resume session=$SESSION_ID" >&2
+    printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+    print_context_summary "$CONTEXT_JSON" >&2
+    run_codex "" "resume" "$SESSION_ID"
+    exit $?
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'mode=resume\nproject=%s\nsession_id=%s\nvault=%s\n' "$PROJECT" "$SESSION_ID" "$VAULT_ROOT"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    print_feishu_ops_summary
+    print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "resume")"
+    if [[ -n "$PROJECT_PAUSE_JSON" ]]; then
+      printf 'pause_active=%s\npause_summary=%s\n' "$(pause_active "$PROJECT_PAUSE_JSON")" "$(pause_summary "$PROJECT_PAUSE_JSON")"
+    fi
+    print_context_summary "$CONTEXT_JSON"
+    exit 0
+  fi
+  if [[ -n "$PROJECT_PAUSE_JSON" && "$(pause_active "$PROJECT_PAUSE_JSON")" == "1" ]]; then
+    echo "Routing blocked: $(pause_summary "$PROJECT_PAUSE_JSON")" >&2
+    exit 0
+  fi
+  echo "Routing: project=$PROJECT mode=resume session=$SESSION_ID" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  print_context_summary "$CONTEXT_JSON" >&2
+  LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode resume --resume-session-id "$SESSION_ID" --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID")"
+  run_codex "$LAUNCH_ID" "resume" "$SESSION_ID"
+  exit $?
+fi
+
+if [[ -n "$PROJECT" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'mode=new\nproject=%s\nsession_id=\nvault=%s\n' "$PROJECT" "$VAULT_ROOT"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    print_feishu_ops_summary
+    print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "new")"
+    if [[ -n "$PROJECT_PAUSE_JSON" ]]; then
+      printf 'pause_active=%s\npause_summary=%s\n' "$(pause_active "$PROJECT_PAUSE_JSON")" "$(pause_summary "$PROJECT_PAUSE_JSON")"
+    fi
+    print_context_summary "$CONTEXT_JSON"
+    exit 0
+  fi
+  if [[ -n "$PROJECT_PAUSE_JSON" && "$(pause_active "$PROJECT_PAUSE_JSON")" == "1" ]]; then
+    echo "Routing blocked: $(pause_summary "$PROJECT_PAUSE_JSON")" >&2
+    exit 0
+  fi
+  echo "Routing: project=$PROJECT mode=new" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  print_context_summary "$CONTEXT_JSON" >&2
+  if [[ -z "$BINDING_BOARD_PATH" ]]; then
+    BINDING_JSON="$(resolve_board_binding "$PROJECT" "$PROMPT")"
+    {
+      IFS= read -r BOARD_SCOPE
+      IFS= read -r BINDING_BOARD_PATH
+      IFS= read -r TOPIC_NAME
+      IFS= read -r ROLLUP_TARGET
+      IFS= read -r _
+    } < <(parse_binding_json "$BINDING_JSON")
+    BOARD_SCOPE="${BOARD_SCOPE:-project}"
+    BINDING_BOARD_PATH="${BINDING_BOARD_PATH:-}"
+    TOPIC_NAME="${TOPIC_NAME:-}"
+    ROLLUP_TARGET="${ROLLUP_TARGET:-}"
+  fi
+  LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode new --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID")"
+else
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'mode=general\nproject=general\nsession_id=\nvault=%s\n' "$VAULT_ROOT"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    print_feishu_ops_summary
+    print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "new")"
+    print_context_summary "$CONTEXT_JSON"
+    exit 0
+  fi
+  echo "Routing: project=general mode=new" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  print_context_summary "$CONTEXT_JSON" >&2
+fi
+
+if [[ -n "$PROJECT" ]]; then
+  run_codex "$LAUNCH_ID" "new" ""
+  exit $?
+fi
+
+if [[ -n "$PROMPT" ]]; then
+  run_codex "" "new" ""
+  exit $?
+fi
+
+codex -C "$WORKSPACE_ROOT"
