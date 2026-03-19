@@ -9,6 +9,12 @@
 - 通过 `Feishu` 做远程协作、日程/任务/文档/多维表格操作
 - 把结果自动写回记忆系统，并同步成手机可查看的只读看板
 
+> [!NOTE]
+> 这套系统仍然使用 **Obsidian-compatible Vault** 作为长期记忆模型。  
+> 它没有脱离 Obsidian 的记忆体系，但已经脱离了 `Obsidian` GUI 的硬依赖：
+> 没装 `Obsidian` 时，核心的项目路由、写回和看板同步仍然可以通过直接读写 `memory/` 文件来工作。  
+> 如果你想获得完整体验，仍然强烈建议安装 `Obsidian`。
+
 这份仓库是 `Codex Hub` 的**可复制、可公开、可本地部署**版本，不包含任何个人真实记忆、真实飞书资源或私有项目源码。
 
 > [!IMPORTANT]
@@ -21,6 +27,13 @@
 > [!TIP]
 > 如果你准备让 coding agent 直接帮你部署，请先看根目录的 [AGENTS.md](./AGENTS.md)。
 > 这里专门写了“agent 应该怎么接手部署这套系统”的最优流程。
+
+> [!TIP]
+> 真正驱动系统运行的协议文件在：
+> - [workspace/AGENTS.md](./workspace/AGENTS.md)
+> - [workspace/MEMORY_SYSTEM.md](./workspace/MEMORY_SYSTEM.md)
+>
+> 只要 `Codex` 是从 `workspace/` 启动的，它就会自动读取这两份文件；用户不需要手工复制或替换它们。
 
 ## 当前正式支持
 
@@ -168,6 +181,20 @@ git clone https://github.com/frank28mm/codex-hub.git
 cd codex-hub
 ```
 
+### 第 1.5 步：普通用户可直接双击安装/验收
+
+如果你不想先记命令，公开版已经提供：
+
+- [Install Codex Hub.command](./Install%20Codex%20Hub.command)
+- [Validate Codex Hub.command](./Validate%20Codex%20Hub.command)
+
+推荐顺序：
+
+1. 先双击 `Install Codex Hub.command`
+2. 再双击 `Validate Codex Hub.command`
+
+如果你本来就是让 `Codex` 帮你部署，也可以直接跳过这两个 `.command` 文件，让它在 `workspace/` 里执行 bootstrap 和 acceptance。
+
 ### 第 2 步：确认目录结构
 
 确保这两个目录都在：
@@ -196,7 +223,14 @@ codex login
 
 如果你后面打算继续用 `Codex` 来帮你部署、接 Feishu、跑验收，那么这一步尤其重要。
 
-### 第 4 步：检查站点配置
+### 第 4 步：确认你理解当前依赖边界
+
+- `Codex CLI`：硬依赖
+- `Obsidian`：不是硬依赖，但强烈建议安装
+- `Feishu`：只有在你要远程协作和只读看板时才需要
+- `Electron`：可选入口，不是唯一入口
+
+### 第 5 步：检查站点配置
 
 打开：
 
@@ -214,7 +248,7 @@ codex login
 
 视为一套可运行环境。
 
-### 第 5 步：执行一键初始化
+### 第 6 步：执行一键初始化
 
 进入 `workspace/`：
 
@@ -239,7 +273,13 @@ python3 ops/bootstrap_workspace_hub.py init
 python3 ops/bootstrap_workspace_hub.py init --install-launchagents
 ```
 
-### 第 6 步：执行一键验收
+如果你已经确定要接 Feishu 聊天入口，还可以继续执行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
+```
+
+### 第 7 步：执行一键验收
 
 ```bash
 python3 ops/accept_product.py run
@@ -252,7 +292,7 @@ python3 ops/accept_product.py run
 - 无个人路径污染
 - 可运行 bootstrap 状态
 
-### 第 7 步：按你的使用目标选择模式
+### 第 8 步：按你的使用目标选择模式
 
 #### 只想先本地使用
 
@@ -267,7 +307,7 @@ python3 ops/accept_product.py run
 
 继续完成下面几步。
 
-### 第 8 步：创建你自己的 Feishu 应用
+### 第 9 步：创建你自己的 Feishu 应用
 
 这里有一个很重要的点：
 
@@ -287,7 +327,7 @@ python3 ops/accept_product.py run
 - 让 `Codex` 帮你逐项完成操作说明和本地配置
 - 人类自己只负责在飞书页面点确认、授权和审核
 
-### 第 9 步：填写 Feishu 资源模板
+### 第 10 步：填写 Feishu 资源模板
 
 打开：
 
@@ -301,7 +341,7 @@ python3 ops/accept_product.py run
 - 常用表格别名
 - 只读投影表格资源
 
-### 第 10 步：完成一次 Feishu OAuth
+### 第 11 步：完成一次 Feishu OAuth
 
 在 `workspace/` 里执行：
 
@@ -321,7 +361,20 @@ python3 ops/feishu_agent.py auth login
 - 由 `Codex` 来驱动这一步
 - 人类只在浏览器里完成最终授权
 
-### 第 11 步：启动 Feishu 协作
+### 第 12 步：补 Feishu bridge 配置并启动协作
+
+公开版已经自带：
+
+- `workspace/ops/feishu_bridge.py`
+- `workspace/ops/feishu_bridge.env.example`
+
+你要做的是：
+
+1. 复制：
+   - `workspace/ops/feishu_bridge.env.example`
+   - 到 `workspace/ops/feishu_bridge.env.local`
+2. 填入你自己的 Feishu 应用配置
+3. 然后启动或安装 bridge
 
 当前最简便的正式方式是：
 
@@ -345,7 +398,7 @@ npm run bridge:status
 npm run workspace
 ```
 
-### 第 12 步：日常怎么使用
+### 第 13 步：日常怎么使用
 
 部署完成后，最推荐的日常使用方式是：
 

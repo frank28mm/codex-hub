@@ -66,7 +66,7 @@
 ### 可选但强烈建议
 
 - `Obsidian`
-  - 用于查看和维护记忆库
+  - 不是硬依赖，但用于查看和维护记忆库、使用 `obsidian://` 深链、获得完整体验
 - `Feishu` 开放平台应用
   - 用于聊天协作、对象操作和只读 Bitable 看板
 - `Electron`
@@ -106,6 +106,13 @@
 > 让 `Codex` 在本地接手初始化、验收、Feishu 配置与桥接安装；
 > 人类用户只负责少量必要授权。
 
+> [!TIP]
+> `Codex` 只要从当前 `workspace/` 启动，就会自动读取：
+> - [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
+> - [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
+>
+> 这两份是运行协议，不需要用户手工复制到其他位置。
+
 ### 1. 克隆仓库
 
 把整个仓库克隆到本地，例如：
@@ -114,6 +121,11 @@
 git clone https://github.com/frank28mm/codex-hub.git
 cd codex-hub/workspace
 ```
+
+如果你不想先记命令，也可以从仓库根目录直接双击：
+
+- `Install Codex Hub.command`
+- `Validate Codex Hub.command`
 
 ### 2. 检查站点配置
 
@@ -157,6 +169,12 @@ python3 ops/bootstrap_workspace_hub.py init
 python3 ops/bootstrap_workspace_hub.py init --install-launchagents
 ```
 
+如果你已经准备好启用 Feishu 聊天入口，还可以继续执行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
+```
+
 ### 4. 执行一键验收
 
 ```bash
@@ -197,7 +215,7 @@ codex login
 #### Obsidian
 
 `Obsidian` 不是硬依赖。  
-系统可以直接读写 `memory/` 文件；你只是在需要人类查看时再打开 `Obsidian`。
+系统可以直接读写 `memory/` 文件；你只是在需要人类查看、深链跳转和长期浏览时再打开 `Obsidian`。
 
 #### Feishu
 
@@ -221,6 +239,14 @@ python3 ops/feishu_agent.py auth login
 ```
 
 5. 确保你的 Feishu 应用 scope 已经通过审核并发布
+6. 复制：
+   - `ops/feishu_bridge.env.example`
+   - 到 `ops/feishu_bridge.env.local`
+7. 然后执行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
+```
 
 对普通用户来说，最省事的方式不是手工自己逐项配，而是：
 

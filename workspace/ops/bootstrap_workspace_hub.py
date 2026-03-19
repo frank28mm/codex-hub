@@ -31,6 +31,17 @@ class SiteConfig:
     electron_enabled: bool
 
 
+def app_candidates(name: str) -> list[Path]:
+    return [
+        Path("/Applications") / f"{name}.app",
+        Path.home() / "Applications" / f"{name}.app",
+    ]
+
+
+def app_installed(name: str) -> bool:
+    return any(candidate.exists() for candidate in app_candidates(name))
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -155,16 +166,25 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
         "commands": {
             "python3": command_available("python3"),
             "node": command_available("node"),
+            "npm": command_available("npm"),
             "codex": command_available("codex"),
+        },
+        "apps": {
+            "obsidian": app_installed("Obsidian"),
+            "codex_desktop": app_installed("Codex"),
         },
         "files": {
             "site_config": SITE_CONFIG_PATH.exists(),
             "codex_config": CODEX_CONFIG_PATH.exists(),
             "feishu_resources": (site.workspace_root / "control" / "feishu_resources.yaml").exists(),
+            "feishu_bridge_env_example": (site.workspace_root / "ops" / "feishu_bridge.env.example").exists(),
         },
         "manual_actions": [],
         "sync_results": {},
         "launchagents": {
+            "installed": False,
+        },
+        "feishu_bridge": {
             "installed": False,
         },
     }
@@ -173,16 +193,23 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
 def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[str]:
     actions: list[str] = []
     commands = payload.get("commands", {})
+    apps = payload.get("apps", {})
     if not commands.get("codex"):
         actions.append("Install Codex CLI and complete `codex login`.")
     else:
         actions.append("Run `codex login` once if this machine has not authenticated yet.")
+    if not apps.get("codex_desktop"):
+        actions.append("Optional but recommended: install the Codex desktop app for direct-open workspace sessions.")
+    if not apps.get("obsidian"):
+        actions.append("Optional but strongly recommended: install Obsidian for full Vault browsing and `obsidian://` deep-link support.")
     if site.feishu_enabled:
         actions.extend(
             [
                 "Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.",
+                "Copy `ops/feishu_bridge.env.example` to `ops/feishu_bridge.env.local` and fill your Feishu app settings.",
                 "Complete one Feishu OAuth login with `python3 ops/feishu_agent.py auth login`.",
                 "Ensure your CoCo Feishu app scopes are approved and published.",
+                "Optionally install the Feishu bridge launch agent with `python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge`.",
             ]
         )
     else:
@@ -225,6 +252,26 @@ def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, obj
     return {"installed": True, "results": results}
 
 
+def maybe_install_feishu_bridge(site: SiteConfig, install: bool) -> dict[str, object]:
+    if not install:
+        return {"installed": False, "skipped": True}
+    if not site.feishu_enabled:
+        return {"installed": False, "skipped": True, "reason": "feishu_disabled"}
+    console_root = site.workspace_root / "apps" / "electron-console"
+    package_json = console_root / "package.json"
+    if not package_json.exists():
+        return {"installed": False, "skipped": True, "reason": "electron_console_missing"}
+    install_result = run_command(["npm", "install"], console_root)
+    bridge_result = run_command(["node", "coco-bridge-service.js", "install-launchagent"], console_root)
+    return {
+        "installed": install_result.get("returncode") == 0 and bridge_result.get("returncode") == 0,
+        "results": {
+            "npm_install": install_result,
+            "bridge_install": bridge_result,
+        },
+    }
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     site = load_site_config()
     ensure_dirs(required_workspace_dirs(site.workspace_root))
@@ -234,6 +281,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     payload = bootstrap_status_payload(site)
     payload["sync_results"] = maybe_sync(site, skip_sync=args.skip_sync)
     payload["launchagents"] = maybe_install_launchagents(site, install=args.install_launchagents)
+    payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)
     payload["manual_actions"] = build_manual_actions(site, payload)
 
     BOOTSTRAP_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--install-launchagents",
         action="store_true",
         help="Install launchd tasks for watcher, dashboard sync, health check, and Feishu projection.",
+    )
+    init_parser.add_argument(
+        "--install-feishu-bridge",
+        action="store_true",
+        help="Run npm install for Electron and install the Feishu bridge launch agent.",
     )
     init_parser.set_defaults(func=cmd_init)
 
