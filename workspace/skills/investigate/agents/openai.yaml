@@ -1,0 +1,4 @@
+interface:
+  display_name: "Investigate"
+  short_description: "Help with Investigate tasks"
+  default_prompt: "Use $investigate to diagnose a bug or unclear runtime state before proposing fixes."
