@@ -139,8 +139,12 @@ def test_feishu_writable_roots_include_canonical_workspace_and_support_worktrees
     assert "/tmp/codex-hub-worktrees/core" in roots
 
 
-def test_authorized_profiles_escalate_to_full_access(monkeypatch) -> None:
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/codex-hub-worktrees/core")
+def test_authorized_profiles_escalate_to_full_access(monkeypatch, tmp_path) -> None:
+    canonical_workspace = tmp_path / "workspace-hub"
+    (canonical_workspace / "projects").mkdir(parents=True)
+    worktree_root = tmp_path / "workspace-hub-worktrees" / "core"
+    worktree_root.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree_root))
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
     monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
 
@@ -157,6 +161,32 @@ def test_authorized_profiles_escalate_to_full_access(monkeypatch) -> None:
     assert "--add-dir" not in approved
     assert "--sandbox" in electron_full and "danger-full-access" in electron_full
     assert 'approval_policy="never"' in electron_full
+
+
+def test_feishu_local_extend_profile_adds_codex_home_roots(monkeypatch, tmp_path) -> None:
+    canonical_workspace = tmp_path / "workspace-hub"
+    (canonical_workspace / "projects").mkdir(parents=True)
+    worktree_root = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
+    worktree_root.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree_root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
+
+    command = local_broker._codex_exec_command(
+        prompt="install skill",
+        execution_profile="feishu-local-extend",
+    )
+
+    command_str = " ".join(command)
+    codex_home = tmp_path / "home" / ".codex"
+    assert "--sandbox" in command and "workspace-write" in command
+    assert 'approval_policy="never"' in command_str
+    assert str(codex_home) in command_str
+    assert str(codex_home / "skills") in command_str
+    assert str(codex_home / "agents") in command_str
+    assert (codex_home / "skills").exists()
+    assert (codex_home / "agents").exists()
 
 
 def test_local_broker_freezes_status_panel_and_command_contract(sample_env, monkeypatch, capsys) -> None:
@@ -608,7 +638,7 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
         status="pending",
         project_name="SampleProj",
         session_id="sess-bridge-1",
-        expires_at="2026-03-20T01:00:00Z",
+        expires_at="2036-03-20T01:00:00Z",
         metadata={
             "requested_action": "git push origin codex/feishu-bridge",
             "chat_id": "chat_123",

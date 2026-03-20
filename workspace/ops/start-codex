@@ -565,19 +565,20 @@ run_codex() {
   if [[ -n "$selected_reasoning_effort" ]]; then
     codex_exec_base+=("-c" "model_reasoning_effort=\"$selected_reasoning_effort\"")
   fi
-  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
-    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" ]]; then
+  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
+    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" ]]; then
       codex_exec_base+=("--sandbox" "workspace-write" "-c" 'approval_policy="never"' "-c" "sandbox_workspace_write.network_access=true")
       while IFS= read -r feishu_root; do
         [[ -n "$feishu_root" ]] || continue
         codex_exec_base+=("--add-dir" "$feishu_root")
       done < <(
-        python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" <<'PY'
+        python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" "$EXECUTION_PROFILE" <<'PY'
 from pathlib import Path
 import sys
 
 workspace_root = Path(sys.argv[1]).resolve()
 vault_root = Path(sys.argv[2]).resolve()
+execution_profile = str(sys.argv[3]).strip()
 canonical_root = workspace_root
 if workspace_root.parent.name == "workspace-hub-worktrees":
     sibling = workspace_root.parent.parent / "workspace-hub"
@@ -594,6 +595,11 @@ roots = [
     worktrees_root / "feishu-bridge",
     worktrees_root / "electron-console",
 ]
+if execution_profile == "feishu-local-extend":
+    codex_home = Path.home() / ".codex"
+    for extra in [codex_home, codex_home / "skills", codex_home / "agents"]:
+        extra.mkdir(parents=True, exist_ok=True)
+        roots.append(extra)
 seen = set()
 for root in roots:
     if not root.exists():

@@ -36,7 +36,19 @@ def _canonical_workspace_root() -> Path:
     return current
 
 
-def _feishu_writable_roots() -> list[Path]:
+def _feishu_local_extension_roots() -> list[Path]:
+    codex_home = Path.home() / ".codex"
+    roots = [
+        codex_home,
+        codex_home / "skills",
+        codex_home / "agents",
+    ]
+    for root in roots:
+        root.mkdir(parents=True, exist_ok=True)
+    return roots
+
+
+def _feishu_writable_roots(*, include_local_extensions: bool = False) -> list[Path]:
     canonical_root = _canonical_workspace_root()
     worktrees_root = canonical_root.parent / "workspace-hub-worktrees"
     roots = [
@@ -49,6 +61,8 @@ def _feishu_writable_roots() -> list[Path]:
         worktrees_root / "feishu-bridge",
         worktrees_root / "electron-console",
     ]
+    if include_local_extensions:
+        roots.extend(_feishu_local_extension_roots())
     unique: list[Path] = []
     seen: set[str] = set()
     for path in roots:
@@ -246,7 +260,7 @@ def _codex_exec_command(
         command.extend(["--model", selected_model])
     if selected_reasoning:
         command.extend(["-c", f'model_reasoning_effort="{selected_reasoning}"'])
-    if execution_profile in {"feishu", "feishu-object-op"}:
+    if execution_profile in {"feishu", "feishu-object-op", "feishu-local-extend"}:
         command.extend(
             [
                 "--sandbox",
@@ -257,7 +271,9 @@ def _codex_exec_command(
                 "sandbox_workspace_write.network_access=true",
             ]
         )
-        for root in _feishu_writable_roots():
+        for root in _feishu_writable_roots(
+            include_local_extensions=execution_profile == "feishu-local-extend"
+        ):
             command.extend(["--add-dir", str(root)])
     if execution_profile == "feishu-approved":
         command.extend(
@@ -290,6 +306,7 @@ def _should_use_start_codex(execution_profile: str = "") -> bool:
     return execution_profile in {
         "feishu",
         "feishu-object-op",
+        "feishu-local-extend",
         "feishu-approved",
         "electron",
         "electron-full-access",

@@ -79,6 +79,10 @@
    - 应先明确说明缺的是哪一类权限、当前卡在哪一步
    - 然后主动向用户申请批准或下一步授权，而不是把权限不足误写成任务失败
    - 用户一旦明确批准，后续会话应继续完成原任务，并说明哪些步骤需要重试
+   - Feishu 普通任务和飞书对象操作默认走 `workspace-write + network_access=true`
+   - 写入 `~/.codex/skills/`、`~/.codex/agents/` 这类本地 Codex 扩展目录，默认走 `feishu-local-extend`，不需要额外审批
+   - 写入 `~/Library/LaunchAgents`、shell profile、`/Applications`、`brew services` 这类本地系统级动作时，必须先审批
+   - `git push`、`ssh`、deploy、release 等高风险远程或不可逆动作，继续保留审批
 26. 这份 `workspace/AGENTS.md` 是运行协议，不需要用户手工替换到别处：
    - 只要 Codex 在当前 `workspace/` 下启动，它就会直接读取这里
    - 根目录的 `AGENTS.md` 只负责帮助部署这套产品，不替代运行协议
