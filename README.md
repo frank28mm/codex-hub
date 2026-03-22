@@ -2,21 +2,29 @@
 
 `Codex Hub` 是一套以 `Codex + Obsidian + Feishu` 为核心的本地工作系统。
 
-它解决的不是“单次聊天”，而是：
+它解决的是：
 
 - 在本地长期维护项目和任务真相
 - 通过 `Codex` 执行项目级工作
 - 通过 `Feishu` 做远程协作、日程/任务/文档/多维表格操作
 - 把结果自动写回记忆系统，并同步成手机可查看的只读看板
 
+用户只要完成自己的 `Codex` 登录、`Feishu` 应用配置与必要授权，就可以按这套产品的推荐方式来部署，并复现 `Codex Hub` 的核心使用方式：
+
+- 统一启动与项目路由
+- `Obsidian-compatible` 记忆系统读写
+- 自包含的 Feishu bridge runtime 与对象操作主链
+- 只读 Bitable 投影
+- 可选的 Electron 桌面宿主
+- 一键初始化与一键验收
+
 > [!NOTE]
-> 这套系统仍然使用 **Obsidian-compatible Vault** 作为长期记忆模型。  
+> 这套系统使用 **Obsidian-compatible Vault** 作为长期记忆模型。  
 > 它没有脱离 Obsidian 的记忆体系，但已经脱离了 `Obsidian` GUI 的硬依赖：
 > 没装 `Obsidian` 时，核心的项目路由、写回和看板同步仍然可以通过直接读写 `memory/` 文件来工作。  
 > 如果你想获得完整体验，仍然强烈建议安装 `Obsidian`。
 
-这份仓库是 `Codex Hub` 的**可复制、可公开、可本地部署**版本，不包含任何个人真实记忆、真实飞书资源或私有项目源码。
-
+这份仓库是 `Codex Hub` 的**可复制、可公开、可本地部署**版本
 > [!IMPORTANT]
 > **最推荐的部署方式：使用 Codex 自行完成部署，效果最佳。**
 > 这套系统本来就是给 `Codex` 驱动的工作流准备的，所以最顺的方式不是人类手工一点点配，而是让 `Codex` 直接在本地接手：
@@ -39,12 +47,12 @@
 
 - **正式支持：macOS**
 - 当前这版后台自动化依赖 `launchd / LaunchAgents`
-- Windows 目前**不作为正式支持平台**
+- Windows 目前**无法支持**
 
 ## 仓库结构
 
 - `workspace/`
-  - 产品代码、启动器、Feishu 能力、Electron 前端、自动化脚本、测试和系统文档
+  - 产品代码、运行协议、Feishu bridge runtime、启动器、Electron 前端、自动化脚本、测试和系统文档
 - `memory/`
   - 模板化的长期记忆库骨架，供新部署者本地初始化使用
 
@@ -161,9 +169,46 @@ Electron 不是这套系统唯一入口。
 - 去个人化扫描
 - 记忆索引刷新
 - dashboard 一致性校验
+- Feishu bridge runtime 测试
 
 也就是说，这不是一个“概念模板”，而是一份**已经跑通的可部署版本**。  
 你要像我现在这样使用，关键不是再写代码，而是按下面流程完成部署和少量授权。
+
+
+### 场景 6：在 Feishu 里远程推进项目，而不是只发命令
+
+你可以在 Feishu 里直接说：
+
+- 继续 `Codex Hub` 这个项目
+- 看看 `知识库` 当前做到哪里了
+- 帮我汇总一下今天的变更
+
+然后系统会：
+
+- 路由到对应项目
+- 读取项目协议和记忆
+- 执行任务
+- 回传结果卡或摘要
+
+### 场景 7：在 Feishu 里处理需要确认的动作
+
+如果任务涉及更高风险动作，例如：
+
+- 需要更高权限
+- 需要系统级操作
+- 需要明确批准
+
+那么公开版现在的消息层会把这件事更清楚地呈现出来，而不是只给一段难读的文字。
+
+### 场景 8：复杂任务里让 Codex 给你第二意见
+
+你可以让它：
+
+- 审一下当前方案
+- 再给一个反方意见
+- 再给一个顾问式建议
+
+这轮公开版已经把这条主链也带进来了，所以这类“不是只执行，而是帮你判断和复审”的工作方式，也已经进入公开版。
 
 ## 普通用户从零到可用的完整流程
 
@@ -367,6 +412,8 @@ python3 ops/feishu_agent.py auth login
 
 - `workspace/ops/feishu_bridge.py`
 - `workspace/ops/feishu_bridge.env.example`
+- `workspace/bridge/feishu/*`
+- `workspace/bridge/feishu_long_connection_service.js`
 
 你要做的是：
 
@@ -380,10 +427,10 @@ python3 ops/feishu_agent.py auth login
 
 1. 一个 Feishu 应用
 2. 一次 OAuth 登录
-3. 一个 Electron 宿主内的长连接桥接服务
+3. 公开版仓库自带的 Feishu 长连接 bridge runtime
 4. 可选的只读 Bitable 投影
 
-如果你要启用这条线，进入：
+在当前产品里，最推荐的宿主仍然是 Electron，因此通常这样启动：
 
 ```bash
 cd apps/electron-console
@@ -391,6 +438,8 @@ npm install
 npm run bridge:install
 npm run bridge:status
 ```
+
+如果你只想验证 bridge runtime 本身，公开版也已经把这层代码直接放进了 `workspace/bridge/`，不再依赖私有仓外部路径。
 
 如果你还想直接打开桌面工作台：
 
@@ -432,7 +481,7 @@ npm run workspace
 
 1. 一个 Feishu 应用
 2. 一次 `OAuth` 登录
-3. 一个 Electron 宿主内的长连接桥接服务
+3. 仓库内自包含的 Feishu bridge runtime
 4. 可选的只读 Bitable 投影
 
 它不是“零配置”，因为：

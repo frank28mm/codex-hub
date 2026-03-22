@@ -6,6 +6,7 @@
 - 统一启动 `Codex`
 - 读取和写回 `Obsidian` 记忆库
 - 通过 `Feishu` 做远程协作
+- 运行仓库内自包含的 Feishu bridge runtime
 - 通过 `Electron` 提供本地控制台
 - 通过自动化脚本维护 dashboard、watcher、只读 Bitable 看板
 
@@ -22,6 +23,70 @@
 2. 用 `Obsidian` 保存长期项目记忆和任务真相
 3. 用 `Feishu` 做远程协作入口
 4. 在手机端通过飞书只读看板查看项目和任务
+
+## 公开版当前已经包含什么
+
+这份公开版当前已经包含可运行的主链能力。  
+也就是说，用户不需要自己再拼一套系统，而是可以在完成自己的账号、授权和资源配置后，按这份 README 的流程直接部署并使用：
+
+- [ops/start-codex](/Users/frank/Codex Hub/workspace/ops/start-codex)
+  - 统一启动、项目路由和写回主链
+- [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
+  - 公开版完整运行协议
+- [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
+  - 公开版记忆系统协议
+- [ops/feishu_agent.py](/Users/frank/Codex Hub/workspace/ops/feishu_agent.py)
+  - Feishu 对象操作与 OAuth
+- [ops/feishu_projection.py](/Users/frank/Codex Hub/workspace/ops/feishu_projection.py)
+  - 只读 Bitable 投影
+- [bridge/feishu](/Users/frank/Codex Hub/workspace/bridge/feishu)
+  - 仓库内自包含的 Feishu 消息层、审批卡、回复卡与线程控制
+- [bridge/feishu_long_connection_service.js](/Users/frank/Codex Hub/workspace/bridge/feishu_long_connection_service.js)
+  - Feishu 长连接 bridge 入口
+- [ops/gstack_phase1_entry.py](/Users/frank/Codex Hub/workspace/ops/gstack_phase1_entry.py)
+  - gstack 主链与第二意见入口
+- [ops/claude_code_runner.py](/Users/frank/Codex Hub/workspace/ops/claude_code_runner.py)
+  - Claude second-opinion 执行器
+- [ops/bootstrap_workspace_hub.py](/Users/frank/Codex Hub/workspace/ops/bootstrap_workspace_hub.py)
+  - 一键初始化
+- [ops/accept_product.py](/Users/frank/Codex Hub/workspace/ops/accept_product.py)
+  - 一键验收
+
+## 这些新增能力在使用上意味着什么
+
+这轮公开版新增的，不只是几个文件，而是几条用户可感知的能力链。
+
+### 1. Feishu 远程协作更完整了
+
+现在公开版已经把 Feishu bridge runtime 直接放进仓库里，所以用户部署完成后，Feishu 这条线更接近“开箱即可接入”：
+
+- 能在 Feishu 里继续项目线程
+- 能接收结果卡和摘要
+- 能处理批准动作
+- 能把长结果通过更清楚的方式呈现出来
+
+### 2. 公开版已经更接近真实 Codex Hub 工作方式
+
+这次同时补进了：
+
+- 更完整的运行协议
+- `gstack` 主链
+- second-opinion 执行器
+
+所以公开版不只是“能启动 Codex”，而是更接近：
+
+- 用 `Codex Hub` 统一调度项目
+- 按协议读写记忆
+- 在复杂任务里走更完整的工作流
+- 在需要时给出第二意见
+
+### 3. 对用户来说，体验变化主要在这几个地方
+
+部署完成后，最直接能感知到的是：
+
+- Feishu 不再只是一个消息入口，而是一个真正的远程工作入口
+- 长结果和复杂结果不再像工程日志，而更像产品化输出
+- 公开版更容易接近你现在私有工作区里的实际使用方式
 
 ## 典型使用场景
 
@@ -83,6 +148,8 @@
 
 - `ops/`
   - 启动器、broker、watcher、dashboard sync、Feishu 工具层、只读投影等脚本
+- `bridge/`
+  - Feishu 长连接 bridge runtime、消息卡片、线程控制与 Node 回归测试
 - `control/`
   - 控制真源，包括站点配置、模型默认值、飞书资源模板
 - `apps/`
@@ -265,7 +332,7 @@ python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
 
 1. **一个 Feishu 应用**
 2. **一次 OAuth 登录**
-3. **一个 Electron 宿主内的长连接桥接服务**
+3. **仓库内自包含的 Feishu bridge runtime**
 4. **一个可选的只读 Bitable 投影**
 
 也就是说，没有额外的 sidecar 编排层，没有第二套数据库，也没有独立的 web 管理后台。
@@ -274,7 +341,7 @@ python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
 
 ### 如何启动 Feishu 协作
 
-当前推荐方式是通过 Electron 宿主运行 Feishu 长连接桥接。
+当前推荐方式仍然是通过 Electron 宿主运行 Feishu 长连接桥接，因为这是公开版最顺的桌面路径；但 bridge runtime 本身已经直接包含在 `workspace/bridge/` 里，不再依赖私有仓外部代码。
 
 先进入：
 
@@ -288,6 +355,14 @@ npm install
 ```bash
 npm run bridge:install
 npm run bridge:status
+```
+
+如果你要单独验证 bridge 层本身，也可以进入：
+
+```bash
+cd bridge
+npm install
+npm test
 ```
 
 如果你只是想先本地看 Electron 工作台，也可以：
@@ -378,6 +453,14 @@ python3 ops/feishu_agent.py auth login
 python3 ops/feishu_projection.py status
 ```
 
+### Bridge
+
+```bash
+cd bridge
+npm install
+npm test
+```
+
 ### Electron
 
 ```bash
@@ -399,6 +482,12 @@ npm run bridge:status
   - 一键验收
 - [ops/start-codex](./ops/start-codex)
   - 统一强启动入口
+- [bridge/feishu/service.js](./bridge/feishu/service.js)
+  - Feishu 线程、审批卡、长回复摘要卡与 Doc 镜像的核心消息层
+- [bridge/feishu/outbound.js](./bridge/feishu/outbound.js)
+  - Feishu 回复卡片与消息格式化
+- [bridge/feishu_long_connection_service.js](./bridge/feishu_long_connection_service.js)
+  - 长连接 bridge 入口
 
 ## 当前边界
 
