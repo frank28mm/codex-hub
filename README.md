@@ -1,12 +1,13 @@
 # Codex Hub
 
-`Codex Hub` 是一套以 `Codex + Obsidian + Feishu` 为核心的本地工作系统。
+`Codex Hub` 是一套以 `Codex + Obsidian + Feishu` 为核心，并可选接入微信私聊入口的本地工作系统。
 
 它解决的是：
 
 - 在本地长期维护项目和任务真相
 - 通过 `Codex` 执行项目级工作
 - 通过 `Feishu` 做远程协作、日程/任务/文档/多维表格操作
+- 可选用微信私聊把 `CoCo` 当成第二个远程入口
 - 把结果自动写回记忆系统，并同步成手机可查看的只读看板
 
 用户只要完成自己的 `Codex` 登录、`Feishu` 应用配置与必要授权，就可以按这套产品的推荐方式来部署，并复现 `Codex Hub` 的核心使用方式：
@@ -14,6 +15,7 @@
 - 统一启动与项目路由
 - `Obsidian-compatible` 记忆系统读写
 - 自包含的 Feishu bridge runtime 与对象操作主链
+- 可选的微信私聊 bridge
 - 只读 Bitable 投影
 - 可选的 Electron 桌面宿主
 - 一键初始化与一键验收
@@ -81,7 +83,7 @@
 
 1. 用 `Codex` 驱动日常项目执行
 2. 用 `Obsidian` 维护长期记忆和事实源
-3. 用 `Feishu` 做远程协作入口
+3. 用 `Feishu` 或微信私聊做远程协作入口
 4. 用飞书多维表格看手机端只读项目看板
 
 ## 小白用户最常见的使用场景
@@ -102,9 +104,9 @@
 - 自己长期推进多个项目
 - 不想每次重新解释项目背景
 
-### 场景 2：不用坐在电脑前，也能在 Feishu 里交代事情
+### 场景 2：不用坐在电脑前，也能在远程入口里交代事情
 
-你在 Feishu 里对自己创建的机器人说：
+你在 Feishu 里对自己创建的机器人，或者在微信私聊里对 `CoCo` 说：
 
 - 帮我安排一个日程
 - 新建一个项目文档
@@ -112,7 +114,7 @@
 - 建一个多维表格
 - 继续处理某个项目
 
-这时 `Codex Hub` 会把 Feishu 当成远程入口，而不是第二套系统。
+这时 `Codex Hub` 会把远程聊天入口当成工作入口，而不是第二套系统。
 
 适合：
 
@@ -352,6 +354,27 @@ python3 ops/accept_product.py run
 
 继续完成下面几步。
 
+#### 想增加一个微信私聊入口
+
+在完成本地版之后，你也可以补一个微信私聊版 `CoCo`。
+
+当前范围是：
+
+- 只支持微信私聊
+- 不支持群聊
+- 走同一条 `Codex Hub` 主链
+
+最小步骤是：
+
+```bash
+python3 ops/weixin_bridge.py login-qr-start
+python3 ops/weixin_bridge.py login-qr-wait --timeout 180
+python3 ops/weixin_bridge.py install-launchagent
+python3 ops/weixin_bridge.py status
+```
+
+完成后，你就可以把微信私聊当成第二个远程入口来用。
+
 ### 第 9 步：创建你自己的 Feishu 应用
 
 这里有一个很重要的点：
@@ -468,6 +491,8 @@ npm run workspace
    - 在上面的基础上，用 `Obsidian` 打开 `memory/`
 3. 跑本地 + Feishu：
    - 在上面的基础上，创建你自己的 Feishu 应用并完成一次 OAuth
+4. 跑本地 + 微信私聊：
+   - 在本地版基础上，执行一次微信扫码登录并安装 `weixin_bridge` 的 LaunchAgent
 
 ## Feishu 接入是不是最简便
 

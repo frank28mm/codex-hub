@@ -31,22 +31,13 @@ def _canonical_workspace_root() -> Path:
     current = workspace_root()
     parent = current.parent
     if parent.name == "workspace-hub-worktrees":
-        sibling = parent.parent / "workspace-hub"
-        if sibling.exists():
-            return sibling
-        default_root = workspace_hub_project.DEFAULT_WORKSPACE_ROOT
-        if default_root.exists():
-            return default_root
+        return workspace_hub_project.DEFAULT_WORKSPACE_ROOT
     return current
 
 
 def _feishu_local_extension_roots() -> list[Path]:
     codex_home = Path.home() / ".codex"
-    roots = [
-        codex_home,
-        codex_home / "skills",
-        codex_home / "agents",
-    ]
+    roots = [codex_home, codex_home / "skills", codex_home / "agents"]
     for root in roots:
         root.mkdir(parents=True, exist_ok=True)
     return roots
@@ -58,7 +49,7 @@ def _feishu_local_system_roots() -> list[Path]:
     launch_agents = home_root / "Library" / "LaunchAgents"
     for root in (codex_home, codex_home / "skills", codex_home / "agents", launch_agents):
         root.mkdir(parents=True, exist_ok=True)
-    return [
+    roots = [
         home_root,
         codex_home,
         codex_home / "skills",
@@ -68,29 +59,22 @@ def _feishu_local_system_roots() -> list[Path]:
         Path("/usr/local/bin"),
         Path("/opt/homebrew/bin"),
     ]
+    return roots
 
 
 def _feishu_writable_roots(*, include_local_extensions: bool = False) -> list[Path]:
     canonical_root = _canonical_workspace_root()
-    current_root = workspace_root()
-    worktrees_roots: list[Path] = [canonical_root.parent / "workspace-hub-worktrees"]
-    if current_root.parent.name == "workspace-hub-worktrees":
-        worktrees_roots.append(current_root.parent)
+    worktrees_root = canonical_root.parent / "workspace-hub-worktrees"
     roots = [
         codex_memory.VAULT_ROOT,
         canonical_root,
         canonical_root / "projects",
-        current_root,
-        current_root / "projects",
+        workspace_root(),
+        workspace_root() / "projects",
+        worktrees_root / "core-v1-0-3-to-v1-0-5",
+        worktrees_root / "feishu-bridge",
+        worktrees_root / "electron-console",
     ]
-    for worktrees_root in worktrees_roots:
-        roots.extend(
-            [
-                worktrees_root / "core-v1-0-3-to-v1-0-5",
-                worktrees_root / "feishu-bridge",
-                worktrees_root / "electron-console",
-            ]
-        )
     if include_local_extensions:
         roots.extend(_feishu_local_extension_roots())
     unique: list[Path] = []
@@ -409,7 +393,7 @@ def _codex_exec_command(
         command.extend(["--model", selected_model])
     if selected_reasoning:
         command.extend(["-c", f'model_reasoning_effort="{selected_reasoning}"'])
-    if execution_profile in {"feishu", "feishu-object-op", "feishu-local-extend", "feishu-local-system-approved"}:
+    if execution_profile in {"feishu", "weixin", "feishu-object-op", "feishu-local-extend", "feishu-local-system-approved"}:
         command.extend(
             [
                 "--sandbox",
@@ -458,6 +442,7 @@ def _codex_exec_command(
 def _should_use_start_codex(execution_profile: str = "") -> bool:
     return execution_profile in {
         "feishu",
+        "weixin",
         "feishu-object-op",
         "feishu-local-extend",
         "feishu-approved",
@@ -1538,6 +1523,7 @@ def build_parser() -> argparse.ArgumentParser:
     command_center.add_argument("--thread-name", default="")
     command_center.add_argument("--thread-label", default="")
     command_center.add_argument("--source-message-id", default="")
+    command_center.add_argument("--approval-token", default="")
     command_center.add_argument("--no-auto-resume", action="store_true")
     command_center.set_defaults(func=cmd_command_center)
 

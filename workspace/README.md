@@ -7,6 +7,7 @@
 - 读取和写回 `Obsidian` 记忆库
 - 通过 `Feishu` 做远程协作
 - 运行仓库内自包含的 Feishu bridge runtime
+- 可选接入微信私聊版 `CoCo`
 - 通过 `Electron` 提供本地控制台
 - 通过自动化脚本维护 dashboard、watcher、只读 Bitable 看板
 
@@ -22,7 +23,8 @@
 1. 用 `Codex` 处理项目任务
 2. 用 `Obsidian` 保存长期项目记忆和任务真相
 3. 用 `Feishu` 做远程协作入口
-4. 在手机端通过飞书只读看板查看项目和任务
+4. 用微信私聊做轻量远程入口
+5. 在手机端通过飞书只读看板查看项目和任务
 
 ## 公开版当前已经包含什么
 
@@ -39,6 +41,8 @@
   - Feishu 对象操作与 OAuth
 - [ops/feishu_projection.py](/Users/frank/Codex Hub/workspace/ops/feishu_projection.py)
   - 只读 Bitable 投影
+- [ops/weixin_bridge.py](/Users/frank/Codex Hub/workspace/ops/weixin_bridge.py)
+  - 微信私聊 bridge、二维码登录与常驻轮询
 - [bridge/feishu](/Users/frank/Codex Hub/workspace/bridge/feishu)
   - 仓库内自包含的 Feishu 消息层、审批卡、回复卡与线程控制
 - [bridge/feishu_long_connection_service.js](/Users/frank/Codex Hub/workspace/bridge/feishu_long_connection_service.js)
@@ -371,6 +375,27 @@ npm test
 npm run workspace
 ```
 
+## 微信私聊入口（可选）
+
+如果你希望再增加一个轻量远程入口，而不是只使用 Feishu，也可以启用微信私聊版 `CoCo`。
+
+当前范围是：
+
+- 只支持微信私聊
+- 不支持微信群聊
+- 继续走同一条 `Codex Hub` 主链
+
+最小启动步骤：
+
+```bash
+python3 ops/weixin_bridge.py login-qr-start
+python3 ops/weixin_bridge.py login-qr-wait --timeout 180
+python3 ops/weixin_bridge.py install-launchagent
+python3 ops/weixin_bridge.py status
+```
+
+启用后，你就可以通过微信私聊把任务送入同一套 `broker -> start-codex -> memory writeback` 主链。
+
 ## 部署等级
 
 ### A. 本地单机版
@@ -411,6 +436,14 @@ npm run workspace
 - 当前任务只读表
 - 手机端可视化看板
 
+### D. 微信私聊版
+
+在本地版基础上再增加：
+
+- 微信私聊入口
+- 常驻轮询
+- 工作区级 `CoCo 私聊`
+
 ## 日常使用方式
 
 最推荐的工作方式是：
@@ -418,8 +451,9 @@ npm run workspace
 1. 平时直接在 `workspace/` 下使用 `Codex`
 2. 需要记忆时让系统自动读写 `memory/`
 3. 需要远程协作时用 Feishu 找你自己创建的机器人
-4. 需要看项目和任务可视化时看 Feishu Bitable
-5. 需要本地控制台时打开 Electron
+4. 需要轻量远程入口时用微信私聊找 `CoCo`
+5. 需要看项目和任务可视化时看 Feishu Bitable
+6. 需要本地控制台时打开 Electron
 
 如果你是第一次上手，建议按这个顺序体验：
 
@@ -461,6 +495,14 @@ npm install
 npm test
 ```
 
+### Weixin
+
+```bash
+python3 ops/weixin_bridge.py contract
+python3 ops/weixin_bridge.py status
+python3 ops/weixin_bridge.py install-launchagent
+```
+
 ### Electron
 
 ```bash
@@ -488,11 +530,14 @@ npm run bridge:status
   - Feishu 回复卡片与消息格式化
 - [bridge/feishu_long_connection_service.js](./bridge/feishu_long_connection_service.js)
   - 长连接 bridge 入口
+- [ops/weixin_bridge.py](./ops/weixin_bridge.py)
+  - 微信私聊 bridge、二维码登录、daemon 与 LaunchAgent 安装
 
 ## 当前边界
 
-- 这是可部署版本，不是你的个人现网镜像
 - 默认不带任何真实飞书资源和 token
 - 默认不带真实长期记忆
+- 默认不带真实微信登录 token
 - Feishu 权限审核和第一次 OAuth 无法完全自动化，只能做到“少量人工授权后长期自动续期”
+- 微信桥当前只支持私聊，不支持群聊
 - 当前正式支持平台是 macOS；Windows 尚未完成后台任务、常驻 bridge、通知与保活适配

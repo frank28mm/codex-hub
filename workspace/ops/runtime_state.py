@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover
 
 
 def workspace_root() -> Path:
-    return Path(os.environ.get("WORKSPACE_HUB_ROOT", str(workspace_hub_project.DEFAULT_WORKSPACE_ROOT)))
+    return Path(os.environ.get("WORKSPACE_HUB_ROOT", str(Path(__file__).resolve().parents[1])))
 
 
 def runtime_root() -> Path:
@@ -359,6 +359,7 @@ def upsert_bridge_message(
     project_name: str = "",
     session_id: str = "",
 ) -> dict[str, Any]:
+    init_db()
     now = iso_now()
     with transaction() as conn:
         conn.execute(

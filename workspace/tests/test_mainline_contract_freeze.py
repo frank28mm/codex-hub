@@ -111,30 +111,40 @@ def parser_command_names(parser: argparse.ArgumentParser) -> set[str]:
     return set(action.choices.keys())
 
 
-def test_runtime_root_prefers_canonical_runtime_for_worktree(monkeypatch) -> None:
+def test_runtime_root_prefers_canonical_runtime_for_worktree(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("WORKSPACE_HUB_RUNTIME_ROOT", raising=False)
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/workspace-hub-worktrees/core")
+    worktree = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree))
 
-    from ops import codex_retrieval, control_gate
+    from ops import codex_retrieval, control_gate, workspace_hub_project
 
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, _local_broker, _watcher = reload_modules()
     codex_retrieval = importlib.reload(codex_retrieval)
     control_gate = importlib.reload(control_gate)
+    workspace_hub_project = importlib.reload(workspace_hub_project)
 
-    expected = Path(__file__).resolve().parents[1] / "runtime"
+    expected = workspace_hub_project.DEFAULT_WORKSPACE_ROOT / "runtime"
     assert runtime_state.runtime_root() == expected
     assert control_gate.runtime_root() == expected
     assert codex_retrieval.runtime_root() == expected
 
 
-def test_feishu_writable_roots_include_canonical_workspace_and_support_worktrees(monkeypatch) -> None:
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/workspace-hub-worktrees/core")
+def test_feishu_writable_roots_include_canonical_workspace_and_support_worktrees(monkeypatch, tmp_path) -> None:
+    worktrees_root = tmp_path / "workspace-hub-worktrees"
+    current_worktree = worktrees_root / "core-v1-0-3-to-v1-0-5"
+    current_worktree.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(current_worktree))
+    from ops import workspace_hub_project
+
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    workspace_hub_project = importlib.reload(workspace_hub_project)
+    canonical_worktrees_root = workspace_hub_project.DEFAULT_WORKSPACE_ROOT.parent / "workspace-hub-worktrees"
     original_exists = local_broker.Path.exists
     expected_paths = {
-        "/tmp/workspace-hub-worktrees/core",
-        "/tmp/workspace-hub-worktrees/feishu-bridge",
-        "/tmp/workspace-hub-worktrees/electron-console",
+        str(current_worktree),
+        str(canonical_worktrees_root / "feishu-bridge"),
+        str(canonical_worktrees_root / "electron-console"),
     }
 
     def fake_exists(path: Path) -> bool:
@@ -146,21 +156,19 @@ def test_feishu_writable_roots_include_canonical_workspace_and_support_worktrees
 
     roots = {str(path) for path in local_broker._feishu_writable_roots()}
 
-    canonical_workspace = str(Path(__file__).resolve().parents[1])
-    assert canonical_workspace in roots
-    assert f"{canonical_workspace}/projects" in roots
-    assert "/tmp/workspace-hub-worktrees/core" in roots
-    assert "/tmp/workspace-hub-worktrees/feishu-bridge" in roots
-    assert "/tmp/workspace-hub-worktrees/electron-console" in roots
+    assert str(workspace_hub_project.DEFAULT_WORKSPACE_ROOT) in roots
+    assert str(workspace_hub_project.DEFAULT_WORKSPACE_ROOT / "projects") in roots
+    assert str(current_worktree) in roots
+    assert str(canonical_worktrees_root / "feishu-bridge") in roots
+    assert str(canonical_worktrees_root / "electron-console") in roots
+    assert str(workspace_hub_project.DEFAULT_LOCAL_VAULT_ROOT) in roots
 
 
 def test_authorized_profiles_escalate_to_full_access(monkeypatch, tmp_path) -> None:
-    canonical_workspace = tmp_path / "workspace-hub"
-    (canonical_workspace / "projects").mkdir(parents=True)
-    worktree_root = tmp_path / "workspace-hub-worktrees" / "core"
-    worktree_root.mkdir(parents=True)
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree_root))
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    worktree = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree))
+    monkeypatch.setenv("HOME", "/tmp/workspace-hub-test-home")
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
     monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
 
@@ -182,17 +190,17 @@ def test_authorized_profiles_escalate_to_full_access(monkeypatch, tmp_path) -> N
     assert "--sandbox" in local_system and "workspace-write" in local_system
     assert "danger-full-access" not in local_system
     assert any(str(Path("/Applications")) == part for part in local_system)
+    assert any(str(Path.home() / "Library" / "LaunchAgents") == part for part in local_system)
     assert "--sandbox" in electron_full and "danger-full-access" in electron_full
     assert 'approval_policy="never"' in electron_full
 
 
 def test_feishu_local_extend_profile_adds_codex_home_roots(monkeypatch, tmp_path) -> None:
-    canonical_workspace = tmp_path / "workspace-hub"
-    (canonical_workspace / "projects").mkdir(parents=True)
-    worktree_root = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
-    worktree_root.mkdir(parents=True)
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree_root))
+    worktree = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    codex_home = tmp_path / "home" / ".codex"
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
     monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
 
@@ -202,12 +210,12 @@ def test_feishu_local_extend_profile_adds_codex_home_roots(monkeypatch, tmp_path
     )
 
     command_str = " ".join(command)
-    codex_home = tmp_path / "home" / ".codex"
     assert "--sandbox" in command and "workspace-write" in command
     assert 'approval_policy="never"' in command_str
     assert str(codex_home) in command_str
     assert str(codex_home / "skills") in command_str
     assert str(codex_home / "agents") in command_str
+    assert codex_home.exists()
     assert (codex_home / "skills").exists()
     assert (codex_home / "agents").exists()
 
@@ -964,6 +972,59 @@ def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, caps
     ]
 
 
+def test_weixin_profile_routes_through_start_codex(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    monkeypatch.setattr(
+        local_broker,
+        "_run",
+        lambda command, cwd=None: {
+            "command": command,
+            "returncode": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+        },
+    )
+
+    exec_args = argparse.Namespace(
+        action="codex-exec",
+        prompt="继续处理 SampleProj 当前任务",
+        session_id="",
+        project_name="SampleProj",
+        execution_profile="weixin",
+        source="weixin",
+        chat_ref="weixin:default:wx-user",
+        thread_name="CoCo 私聊",
+        thread_label="CoCo 私聊",
+        source_message_id="wx_msg_1",
+        approval_token="",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
+    )
+    assert local_broker.cmd_command_center(exec_args) == 0
+    exec_payload = read_payload(capsys)
+    assert exec_payload["ok"] is True
+    assert exec_payload["command"] == [
+        str(local_broker.workspace_root() / "ops" / "start-codex"),
+        "--execution-profile",
+        "weixin",
+        "--project",
+        "SampleProj",
+        "--source",
+        "weixin",
+        "--chat-ref",
+        "weixin:default:wx-user",
+        "--thread-name",
+        "CoCo 私聊",
+        "--thread-label",
+        "CoCo 私聊",
+        "--source-message-id",
+        "wx_msg_1",
+        "--prompt",
+        "继续处理 SampleProj 当前任务",
+    ]
+
+
 def test_feishu_exec_can_disable_project_auto_resume(sample_env, monkeypatch, capsys) -> None:
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
     monkeypatch.setattr(
@@ -1523,19 +1584,15 @@ def test_electron_and_feishu_entrypoints_keep_runtime_ingestion_fields(sample_en
     electron_main = (Path(__file__).resolve().parents[1] / "apps" / "electron-console" / "main.js").read_text(
         encoding="utf-8"
     )
-    bridge_host = (Path(__file__).resolve().parents[1] / "apps" / "electron-console" / "bridge-host.js").read_text(
-        encoding="utf-8"
-    )
-    local_broker_text = (Path(__file__).resolve().parents[1] / "ops" / "local_broker.py").read_text(
+    feishu_service = (Path(__file__).resolve().parents[1] / "bridge" / "feishu" / "service.js").read_text(
         encoding="utf-8"
     )
 
     assert 'payload?.reasoning_effort' in electron_main
     assert '--reasoning-effort' in electron_main
-    assert 'payload.thread_label' in bridge_host
-    assert 'payload.source_message_id' in bridge_host
-    assert 'approval_token=getattr(args, "approval_token", "")' in local_broker_text
-    assert 'reasoning_effort=getattr(args, "reasoning_effort", "")' in local_broker_text
+    assert 'options.reasoningEffort || options.reasoning_effort' in feishu_service
+    assert 'commonPayload.reasoning_effort = selectedReasoningEffort' in feishu_service
+    assert 'no_auto_resume: Boolean(conversationKey)' in feishu_service
 
 
 def test_bridge_continuity_status_flags_shared_sessions_and_response_delay(sample_env, monkeypatch) -> None:

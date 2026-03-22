@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEFAULT_WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CODE_ROOT="${WORKSPACE_HUB_CODE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+DEFAULT_WORKSPACE_ROOT="$CODE_ROOT"
+DEFAULT_VAULT_ROOT="$(cd "$CODE_ROOT/../memory" && pwd)"
 # Code may come from a worktree, but runtime/control state should keep using the
 # canonical workspace unless the caller explicitly overrides it.
 WORKSPACE_ROOT="${WORKSPACE_HUB_ROOT:-$DEFAULT_WORKSPACE_ROOT}"
-VAULT_ROOT="${WORKSPACE_HUB_VAULT_ROOT:-$(cd "$DEFAULT_WORKSPACE_ROOT/../memory" && pwd)}"
+VAULT_ROOT="${WORKSPACE_HUB_VAULT_ROOT:-$DEFAULT_VAULT_ROOT}"
 REGISTRY_MD="$VAULT_ROOT/PROJECT_REGISTRY.md"
 SESSION_ROUTER="$WORKSPACE_ROOT/runtime/session-router.json"
 MEMORY_TOOL="$CODE_ROOT/ops/codex_memory.py"
@@ -47,7 +48,7 @@ Usage:
   start-codex
 
 Behavior:
-  - Starts from the current product workspace root
+  - Starts from the current Codex Hub workspace root
   - Does not require Obsidian to be manually opened first
   - By default, ensures Obsidian is available in the background for the Vault
   - If a project is resolved and a same-project session exists within 24 hours,
@@ -406,7 +407,7 @@ PY
 
 build_launcher_context_note() {
   python3 - \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" <<'PY'
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" <<'PY'
 import json, sys
 
 (
@@ -424,7 +425,8 @@ import json, sys
     execution_profile,
     selected_model,
     selected_reasoning_effort,
-) = sys.argv[1:15]
+    code_root,
+) = sys.argv[1:16]
 
 try:
     context = json.loads(context_json) if context_json else {}
@@ -436,6 +438,8 @@ if launch_source or project_name or source_thread_name or source_thread_label or
     lines.append("你当前是通过 Codex Hub 的统一启动器进入这个工作区，不是普通的随手桌面对话。")
     if launch_source == "feishu":
         lines.append("来源渠道：Feishu 远程聊天线程。")
+    elif launch_source == "weixin":
+        lines.append("来源渠道：微信私聊线程。")
     elif launch_source == "electron":
         lines.append("来源渠道：Electron 桌面对话线程。")
     elif launch_source:
@@ -457,6 +461,9 @@ if launch_source or project_name or source_thread_name or source_thread_label or
         lines.append(f"来源聊天引用：{source_chat_ref}。")
     if source_message_id:
         lines.append(f"来源消息 ID：{source_message_id}。")
+    if launch_source == "weixin" and (source_thread_label == "CoCo 私聊" or source_thread_name == "CoCo 私聊") and not (project_name and project_name != "general"):
+        lines.append("这条微信私聊线程应视作 `CoCo 私聊` 的工作区级入口，默认不绑定单个项目。")
+        lines.append("只有当用户当前这条消息明确提到项目名，或明确要求续接上一个项目型会话时，才进入项目上下文。")
     recommended = context.get("recommended_files") or []
     if recommended:
         lines.append("启动器建议你优先参考这些上下文文件：")
@@ -530,8 +537,8 @@ if launch_source or project_name or source_thread_name or source_thread_label or
             if suggested_command:
                 lines.append(f"推荐命令：`{suggested_command}`")
     lines.append("当前工作区还提供飞书对象操作能力，可直接完成消息、用户、文档、多维表格、日历、任务、视频会议等操作。")
-    lines.append(f"飞书资源注册表位于：{WORKSPACE_ROOT}/control/feishu_resources.yaml。")
-    lines.append(f"飞书操作 skill 位于：{WORKSPACE_ROOT}/.agents/skills/feishu-ops/SKILL.md。")
+    lines.append(f"飞书资源注册表位于：{code_root}/control/feishu_resources.yaml。")
+    lines.append(f"飞书操作 skill 位于：{code_root}/.agents/skills/feishu-ops/SKILL.md。")
     lines.append("如果用户要求操作飞书对象，优先使用 local_broker.py feishu-op 或对应 repo skill，不要只做口头解释。")
     lines.append("请把这次任务当成上述来源线程的持续上下文，先按当前项目记忆和工作区协议理解，再执行用户请求。")
 if mode == "resume":
@@ -566,7 +573,8 @@ build_codex_prompt() {
     "$2" \
     "$EXECUTION_PROFILE" \
     "$SELECTED_MODEL" \
-    "$SELECTED_REASONING_EFFORT")"
+    "$SELECTED_REASONING_EFFORT" \
+    "$CODE_ROOT")"
   if [[ -z "$launch_note" ]]; then
     printf '%s' "$prompt_text"
     return 0
@@ -594,37 +602,29 @@ print_feishu_ops_summary() {
 }
 
 emit_execution_profile_roots() {
-  python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" "$EXECUTION_PROFILE" "$DEFAULT_WORKSPACE_ROOT" <<'PY'
+  python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" "$EXECUTION_PROFILE" <<'PY'
 from pathlib import Path
 import sys
 
 workspace_root = Path(sys.argv[1]).resolve()
 vault_root = Path(sys.argv[2]).resolve()
 execution_profile = str(sys.argv[3]).strip()
-default_workspace_root = Path(sys.argv[4]).resolve()
 canonical_root = workspace_root
 if workspace_root.parent.name == "workspace-hub-worktrees":
     sibling = workspace_root.parent.parent / "workspace-hub"
     if sibling.exists():
         canonical_root = sibling.resolve()
-    elif default_workspace_root.exists():
-        canonical_root = default_workspace_root
-worktrees_roots = [canonical_root.parent / "workspace-hub-worktrees"]
-if workspace_root.parent.name == "workspace-hub-worktrees":
-    worktrees_roots.append(workspace_root.parent)
+worktrees_root = canonical_root.parent / "workspace-hub-worktrees"
 roots = [
     vault_root,
     canonical_root,
     canonical_root / "projects",
     workspace_root,
     workspace_root / "projects",
+    worktrees_root / "core-v1-0-3-to-v1-0-5",
+    worktrees_root / "feishu-bridge",
+    worktrees_root / "electron-console",
 ]
-for worktrees_root in worktrees_roots:
-    roots.extend([
-        worktrees_root / "core-v1-0-3-to-v1-0-5",
-        worktrees_root / "feishu-bridge",
-        worktrees_root / "electron-console",
-    ])
 
 codex_home = Path.home() / ".codex"
 if execution_profile in {"feishu-local-extend", "feishu-local-system-approved"}:
@@ -786,8 +786,8 @@ run_codex() {
   if [[ -n "$selected_reasoning_effort" ]]; then
     codex_exec_base+=("-c" "model_reasoning_effort=\"$selected_reasoning_effort\"")
   fi
-  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-local-system-approved" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
-    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-local-system-approved" ]]; then
+  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "weixin" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-local-system-approved" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
+    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "weixin" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-local-system-approved" ]]; then
       codex_exec_base+=("--sandbox" "workspace-write" "-c" 'approval_policy="never"' "-c" "sandbox_workspace_write.network_access=true")
       while IFS= read -r feishu_root; do
         [[ -n "$feishu_root" ]] || continue

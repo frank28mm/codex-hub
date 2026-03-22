@@ -58,6 +58,78 @@ def test_codex_context_suggest_topic_bound(sample_env) -> None:
     assert any(path.endswith("SampleProj-需求-跟进板.md") for path in payload["retrieval_protocol"]["detail_paths"])
 
 
+def test_codex_context_includes_workflow_and_second_opinion_recommendation(sample_env) -> None:
+    codex_retrieval.build_index()
+
+    payload = codex_context.suggest_context(
+        project_name="SampleProj",
+        prompt="先帮我审一下这次改动，然后再让 Claude 给一个第二意见。",
+    )
+
+    workflow = payload["workflow_recommendation"]
+    assert workflow["recognized_stage"] == "multi-stage"
+    assert workflow["suggested_path"] == ["review", "claude-review"]
+    assert workflow["second_opinion"]["skill"] == "claude-review"
+    assert workflow["second_opinion"]["source"] == "explicit"
+    assert workflow["second_opinion"]["package_template_id"] == "review-risk-scan"
+    assert workflow["second_opinion"]["material_source"] == "extractor"
+    assert workflow["second_opinion"]["required_fields"] == [
+        "question",
+        "artifact",
+        "current_judgment",
+        "extra_context",
+    ]
+    assert "workflow-recommended" in payload["reasoning_tags"]
+    assert "second-opinion-ready" in payload["reasoning_tags"]
+
+
+def test_codex_context_derives_followup_second_opinion_for_review_prompt(sample_env) -> None:
+    codex_retrieval.build_index()
+
+    payload = codex_context.suggest_context(
+        project_name="SampleProj",
+        prompt="帮我审一下这次改动有没有问题。",
+    )
+
+    workflow = payload["workflow_recommendation"]
+    assert workflow["recognized_stage"] == "execution"
+    assert workflow["suggested_path"] == ["review"]
+    assert workflow["second_opinion"]["skill"] == "claude-review"
+    assert workflow["second_opinion"]["source"] == "followup"
+    assert workflow["second_opinion"]["package_template_id"] == "review-risk-scan"
+    assert workflow["second_opinion"]["material_source"] == "extractor"
+    assert workflow["second_opinion"]["main_thread_execution"]["entrypoint"] == "workflow-second-opinion"
+    assert workflow["second_opinion"]["packaged_request"]["autofilled_fields"] == [
+        "question",
+        "artifact",
+        "current_judgment",
+        "extra_context",
+    ]
+    assert "当前 review 证据包" in workflow["second_opinion"]["packaged_request"]["request"]["artifact"]
+    assert "workflow-recommended" in payload["reasoning_tags"]
+    assert "second-opinion-ready" in payload["reasoning_tags"]
+
+
+def test_codex_context_derives_consult_second_opinion_materials_for_plan_prompt(sample_env) -> None:
+    codex_retrieval.build_index()
+
+    payload = codex_context.suggest_context(
+        project_name="SampleProj",
+        prompt="这个方向值不值得做？从产品角度看呢？",
+    )
+
+    workflow = payload["workflow_recommendation"]
+    assert workflow["recognized_stage"] == "entry"
+    assert workflow["suggested_path"] == ["plan-ceo-review"]
+    assert workflow["second_opinion"]["skill"] == "claude-consult"
+    assert workflow["second_opinion"]["source"] == "followup"
+    assert workflow["second_opinion"]["package_template_id"] == "consult-tradeoff-check"
+    assert workflow["second_opinion"]["material_source"] == "extractor"
+    assert workflow["second_opinion"]["main_thread_execution"]["entrypoint"] == "workflow-second-opinion"
+    assert "当前方案摘要" in workflow["second_opinion"]["packaged_request"]["request"]["artifact"]
+    assert "识别路径: plan-ceo-review" in workflow["second_opinion"]["packaged_request"]["request"]["artifact"]
+
+
 def test_export_rules_generates_valid_rules(sample_env) -> None:
     env = make_env(sample_env)
     out_dir = sample_env["workspace_root"] / ".codex" / "rules"
@@ -262,6 +334,137 @@ def test_start_codex_dry_run_prints_launch_source_context(sample_env) -> None:
     assert "context_retrieval_counts=" in result.stdout
     assert "feishu_resources.yaml" in result.stdout
     assert ".agents/skills/feishu-ops/SKILL.md" in result.stdout
+
+
+def test_start_codex_dry_run_prints_weixin_launch_source_context(sample_env) -> None:
+    env = make_env(sample_env)
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "ops" / "start-codex"),
+            "--project",
+            "SampleProj",
+            "--prompt",
+            "继续处理这个项目",
+            "--source",
+            "weixin",
+            "--chat-ref",
+            "weixin:default:wx-user",
+            "--thread-name",
+            "CoCo 私聊",
+            "--thread-label",
+            "CoCo 私聊",
+            "--source-message-id",
+            "wx_msg_demo",
+            "--dry-run",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "launch_source=weixin" in result.stdout
+    assert "chat_ref=weixin:default:wx-user" in result.stdout
+    assert "thread_label=CoCo 私聊" in result.stdout
+    assert '"launch_source": "weixin"' in result.stdout
+    assert "来源渠道：微信私聊线程" in result.stdout
+    assert "来源线程名称：CoCo 私聊" in result.stdout
+
+
+def test_start_codex_dry_run_marks_weixin_private_dm_as_workspace_entry(sample_env) -> None:
+    env = make_env(sample_env)
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "ops" / "start-codex"),
+            "--prompt",
+            "你是谁？",
+            "--source",
+            "weixin",
+            "--chat-ref",
+            "weixin:default:wx-user",
+            "--thread-name",
+            "CoCo 私聊",
+            "--thread-label",
+            "CoCo 私聊",
+            "--source-message-id",
+            "wx_msg_workspace",
+            "--dry-run",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "mode=general" in result.stdout
+    assert "来源渠道：微信私聊线程" in result.stdout
+    assert "来源线程名称：CoCo 私聊" in result.stdout
+    assert "工作区级入口" in result.stdout
+
+
+def test_start_codex_dry_run_surfaces_workflow_and_second_opinion_guidance(sample_env) -> None:
+    env = make_env(sample_env)
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "ops" / "start-codex"),
+            "--project",
+            "SampleProj",
+            "--prompt",
+            "先帮我审一下这次改动，然后再让 Claude 给一个第二意见。",
+            "--source",
+            "feishu",
+            "--chat-ref",
+            "oc_demo_chat",
+            "--thread-name",
+            "Codex Hub",
+            "--dry-run",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "context_workflow_path=review -> claude-review" in result.stdout
+    assert "context_second_opinion_skill=claude-review" in result.stdout
+    assert "launcher_prompt_preview=" in result.stdout
+
+
+def test_start_codex_dry_run_surfaces_followup_second_opinion_guidance(sample_env) -> None:
+    env = make_env(sample_env)
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "ops" / "start-codex"),
+            "--project",
+            "SampleProj",
+            "--prompt",
+            "帮我审一下这次改动有没有问题。",
+            "--source",
+            "feishu",
+            "--chat-ref",
+            "oc_demo_chat",
+            "--thread-name",
+            "Codex Hub",
+            "--dry-run",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "context_workflow_path=review" in result.stdout
+    assert "context_second_opinion_skill=claude-review" in result.stdout
+    assert "context_second_opinion_source=followup" in result.stdout
+    assert "context_second_opinion_template=review-risk-scan" in result.stdout
+    assert "context_second_opinion_material_source=extractor" in result.stdout
+    assert "context_second_opinion_fields=question,artifact,current_judgment,extra_context" in result.stdout
+    assert "context_second_opinion_entrypoint=workflow-second-opinion" in result.stdout
+    assert "context_second_opinion_focus=这个改动或方案最大的回归风险、盲区或缺失验证是什么？" in result.stdout
 
 
 def test_start_codex_dry_run_resolves_unregistered_project_from_filesystem(sample_env) -> None:

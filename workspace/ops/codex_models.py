@@ -10,12 +10,9 @@ from typing import Any
 
 import yaml
 
-try:
-    from ops import workspace_hub_project
-except ImportError:  # pragma: no cover
-    import workspace_hub_project  # type: ignore
+
 WORKSPACE_ROOT = Path(
-    os.environ.get("WORKSPACE_HUB_ROOT", str(workspace_hub_project.DEFAULT_WORKSPACE_ROOT))
+    os.environ.get("WORKSPACE_HUB_ROOT", str(Path(__file__).resolve().parents[1]))
 ).resolve()
 DEFAULT_SETTINGS_PATH = WORKSPACE_ROOT / "control" / "codex-models.yaml"
 USER_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
@@ -168,7 +165,7 @@ def summarize_settings(path: Path | None = None) -> dict[str, Any]:
 def _entrypoint_for(execution_profile: str = "", source: str = "") -> str:
     profile = str(execution_profile or "").strip()
     source_name = str(source or "").strip()
-    if profile.startswith("feishu") or source_name == "feishu":
+    if profile.startswith("feishu") or source_name in {"feishu", "weixin"} or profile.startswith("weixin"):
         return "feishu"
     if profile.startswith("electron") or source_name == "electron":
         return "electron"
