@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ops import codex_memory, codex_models, feishu_agent, material_router, project_pause, runtime_ingestion, runtime_state
+    from ops import codex_memory, codex_models, feishu_agent, material_router, project_pause, runtime_ingestion, runtime_state, workspace_hub_project
 except ImportError:  # pragma: no cover
     import codex_memory  # type: ignore
     import codex_models  # type: ignore
@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover
     import project_pause  # type: ignore
     import runtime_ingestion  # type: ignore
     import runtime_state  # type: ignore
+    import workspace_hub_project  # type: ignore
 
 
 def workspace_root() -> Path:
@@ -33,22 +34,65 @@ def _canonical_workspace_root() -> Path:
         sibling = parent.parent / "workspace-hub"
         if sibling.exists():
             return sibling
+        default_root = workspace_hub_project.DEFAULT_WORKSPACE_ROOT
+        if default_root.exists():
+            return default_root
     return current
 
 
-def _feishu_writable_roots() -> list[Path]:
+def _feishu_local_extension_roots() -> list[Path]:
+    codex_home = Path.home() / ".codex"
+    roots = [
+        codex_home,
+        codex_home / "skills",
+        codex_home / "agents",
+    ]
+    for root in roots:
+        root.mkdir(parents=True, exist_ok=True)
+    return roots
+
+
+def _feishu_local_system_roots() -> list[Path]:
+    home_root = Path.home()
+    codex_home = home_root / ".codex"
+    launch_agents = home_root / "Library" / "LaunchAgents"
+    for root in (codex_home, codex_home / "skills", codex_home / "agents", launch_agents):
+        root.mkdir(parents=True, exist_ok=True)
+    return [
+        home_root,
+        codex_home,
+        codex_home / "skills",
+        codex_home / "agents",
+        launch_agents,
+        Path("/Applications"),
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+    ]
+
+
+def _feishu_writable_roots(*, include_local_extensions: bool = False) -> list[Path]:
     canonical_root = _canonical_workspace_root()
-    worktrees_root = canonical_root.parent / "workspace-hub-worktrees"
+    current_root = workspace_root()
+    worktrees_roots: list[Path] = [canonical_root.parent / "workspace-hub-worktrees"]
+    if current_root.parent.name == "workspace-hub-worktrees":
+        worktrees_roots.append(current_root.parent)
     roots = [
         codex_memory.VAULT_ROOT,
         canonical_root,
         canonical_root / "projects",
-        workspace_root(),
-        workspace_root() / "projects",
-        worktrees_root / "core-v1-0-3-to-v1-0-5",
-        worktrees_root / "feishu-bridge",
-        worktrees_root / "electron-console",
+        current_root,
+        current_root / "projects",
     ]
+    for worktrees_root in worktrees_roots:
+        roots.extend(
+            [
+                worktrees_root / "core-v1-0-3-to-v1-0-5",
+                worktrees_root / "feishu-bridge",
+                worktrees_root / "electron-console",
+            ]
+        )
+    if include_local_extensions:
+        roots.extend(_feishu_local_extension_roots())
     unique: list[Path] = []
     seen: set[str] = set()
     for path in roots:
@@ -60,6 +104,125 @@ def _feishu_writable_roots() -> list[Path]:
         seen.add(key)
         unique.append(path)
     return unique
+
+
+def _feishu_local_system_writable_roots() -> list[Path]:
+    roots = [*_feishu_writable_roots(include_local_extensions=True), *_feishu_local_system_roots()]
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in roots:
+        if not path.exists():
+            continue
+        key = str(path.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+APPROVED_PROFILE_SCOPE_MAP = {
+    "feishu-approved": "feishu_high_risk_execution",
+    "feishu-local-system-approved": "feishu_local_system_execution",
+}
+
+
+def _approved_profile_error(
+    action: str,
+    *,
+    execution_profile: str,
+    approval_token: str,
+    error: str,
+    expected_scope: str = "",
+) -> dict[str, Any]:
+    return _response(
+        action,
+        ok=False,
+        result_status="blocked",
+        error=error,
+        error_type=error,
+        execution_profile=execution_profile,
+        approval_token=approval_token,
+        expected_scope=expected_scope,
+    )
+
+
+def _validate_execution_profile_access(
+    action: str,
+    *,
+    execution_profile: str,
+    approval_token: str = "",
+    source: str = "",
+) -> dict[str, Any] | None:
+    profile = str(execution_profile or "").strip()
+    if not profile:
+        return None
+    if profile == "electron-full-access":
+        if str(source or "").strip() == "electron":
+            return None
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token="",
+            error="electron_full_access_requires_electron_source",
+        )
+    expected_scope = APPROVED_PROFILE_SCOPE_MAP.get(profile, "")
+    if not expected_scope:
+        return None
+    token = str(approval_token or "").strip()
+    if not token:
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token="",
+            error="approval_token_required",
+            expected_scope=expected_scope,
+        )
+    item = runtime_state.fetch_approval_token(token)
+    if not item.get("scope"):
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token=token,
+            error="approval_token_not_found",
+            expected_scope=expected_scope,
+        )
+    if str(item.get("status") or "").strip() != "approved":
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token=token,
+            error="approval_token_not_approved",
+            expected_scope=expected_scope,
+        )
+    expires_at = runtime_state.parse_iso_timestamp(str(item.get("expires_at") or "").strip())
+    if expires_at is not None and expires_at <= dt.datetime.now(dt.timezone.utc):
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token=token,
+            error="approval_token_expired",
+            expected_scope=expected_scope,
+        )
+    if str(item.get("scope") or "").strip() != expected_scope:
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token=token,
+            error="approval_scope_mismatch",
+            expected_scope=expected_scope,
+        )
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    approved_profile = str(metadata.get("approved_execution_profile") or "feishu-approved").strip()
+    if approved_profile != profile:
+        return _approved_profile_error(
+            action,
+            execution_profile=profile,
+            approval_token=token,
+            error="approval_profile_mismatch",
+            expected_scope=expected_scope,
+        )
+    return None
 
 
 def _print(payload: dict[str, Any]) -> int:
@@ -246,7 +409,7 @@ def _codex_exec_command(
         command.extend(["--model", selected_model])
     if selected_reasoning:
         command.extend(["-c", f'model_reasoning_effort="{selected_reasoning}"'])
-    if execution_profile in {"feishu", "feishu-object-op"}:
+    if execution_profile in {"feishu", "feishu-object-op", "feishu-local-extend", "feishu-local-system-approved"}:
         command.extend(
             [
                 "--sandbox",
@@ -257,7 +420,13 @@ def _codex_exec_command(
                 "sandbox_workspace_write.network_access=true",
             ]
         )
-        for root in _feishu_writable_roots():
+        if execution_profile == "feishu-local-system-approved":
+            roots = _feishu_local_system_writable_roots()
+        else:
+            roots = _feishu_writable_roots(
+                include_local_extensions=execution_profile == "feishu-local-extend"
+            )
+        for root in roots:
             command.extend(["--add-dir", str(root)])
     if execution_profile == "feishu-approved":
         command.extend(
@@ -290,7 +459,9 @@ def _should_use_start_codex(execution_profile: str = "") -> bool:
     return execution_profile in {
         "feishu",
         "feishu-object-op",
+        "feishu-local-extend",
         "feishu-approved",
+        "feishu-local-system-approved",
         "electron",
         "electron-full-access",
     }
@@ -314,6 +485,7 @@ def _start_codex_command(
     thread_name: str = "",
     thread_label: str = "",
     source_message_id: str = "",
+    approval_token: str = "",
 ) -> list[str]:
     command = [_start_codex_path()]
     if execution_profile:
@@ -322,6 +494,8 @@ def _start_codex_command(
         command.extend(["--model", model])
     if reasoning_effort:
         command.extend(["--reasoning-effort", reasoning_effort])
+    if approval_token:
+        command.extend(["--approval-token", approval_token])
     if project_name:
         command.extend(["--project", project_name])
     if session_id:
@@ -801,6 +975,14 @@ def cmd_codex_exec(args: argparse.Namespace) -> int:
     if blocked:
         return _print(blocked)
     execution_profile = getattr(args, "execution_profile", "")
+    validation_error = _validate_execution_profile_access(
+        "codex_exec",
+        execution_profile=execution_profile,
+        approval_token=getattr(args, "approval_token", ""),
+        source=getattr(args, "source", ""),
+    )
+    if validation_error:
+        return _print(validation_error)
     command = (
         _start_codex_command(
             prompt=args.prompt,
@@ -814,6 +996,7 @@ def cmd_codex_exec(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
         else _codex_exec_command(
@@ -833,6 +1016,14 @@ def cmd_codex_resume(args: argparse.Namespace) -> int:
     if blocked:
         return _print(blocked)
     execution_profile = getattr(args, "execution_profile", "")
+    validation_error = _validate_execution_profile_access(
+        "codex_resume",
+        execution_profile=execution_profile,
+        approval_token=getattr(args, "approval_token", ""),
+        source=getattr(args, "source", ""),
+    )
+    if validation_error:
+        return _print(validation_error)
     command = (
         _start_codex_command(
             prompt=args.prompt,
@@ -847,6 +1038,7 @@ def cmd_codex_resume(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
         else _codex_exec_command(
@@ -1083,6 +1275,16 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             blocked["action"] = action
             return _print(blocked)
     execution_profile = getattr(args, "execution_profile", "")
+    if action in {"codex-exec", "codex-resume"}:
+        validation_error = _validate_execution_profile_access(
+            "command_center",
+            execution_profile=execution_profile,
+            approval_token=getattr(args, "approval_token", ""),
+            source=getattr(args, "source", ""),
+        )
+        if validation_error:
+            validation_error["action"] = action
+            return _print(validation_error)
     payload: dict[str, Any]
     if action == "open-codex-app":
         payload = _command_result("codex_app", _run([_codex_cli_path(), "app", str(workspace_root())]))
@@ -1100,6 +1302,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
         else _codex_exec_command(
@@ -1129,6 +1332,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
         else _codex_exec_command(
@@ -1202,6 +1406,7 @@ def build_parser() -> argparse.ArgumentParser:
     codex_exec.add_argument("--thread-name", default="")
     codex_exec.add_argument("--thread-label", default="")
     codex_exec.add_argument("--source-message-id", default="")
+    codex_exec.add_argument("--approval-token", default="")
     codex_exec.add_argument("--no-auto-resume", action="store_true")
     codex_exec.set_defaults(func=cmd_codex_exec)
 
@@ -1217,6 +1422,7 @@ def build_parser() -> argparse.ArgumentParser:
     codex_resume.add_argument("--thread-name", default="")
     codex_resume.add_argument("--thread-label", default="")
     codex_resume.add_argument("--source-message-id", default="")
+    codex_resume.add_argument("--approval-token", default="")
     codex_resume.add_argument("--no-auto-resume", action="store_true")
     codex_resume.set_defaults(func=cmd_codex_resume)
 

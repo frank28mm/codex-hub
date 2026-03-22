@@ -70,7 +70,7 @@
 
 ## Feishu 线程规则
 
-1. 机器人私聊固定视为整个 `Codex Hub` 工作区的管理线程：
+1. `CoCo` 私聊固定视为整个 `Codex Hub` 工作区的管理线程：
    - 不绑定单个项目
    - 默认承接跨项目协调、主线/支线调度和高风险授权
 2. Feishu 群聊固定采用：
@@ -78,13 +78,12 @@
    - 默认按消息内容中的项目名或别名自动路由，就像在 Codex app 里新开对话后直接提项目一样
    - `这个群只聊 xxx` 这类声明只作为可选偏好，不是执行前提
 3. 不做同群多 lane，也不要求在同一个群里频繁切项目；真正的项目识别优先来自当前消息和最近上下文。
-4. 需要项目级执行与汇报时，优先在对应项目群完成；需要工作区级调度或更高授权时，优先走机器人私聊。
-5. 文档里的 `CoCo` 只是示例机器人名，部署者可以自己命名。
+4. 需要项目级执行与汇报时，优先在对应项目群完成；需要工作区级调度或更高授权时，优先走 `CoCo` 私聊。
 
 ## 权限申请规则
 
 1. 如果任务被沙箱、系统权限、Git/LaunchAgent 写入限制、网络限制或其他执行边界拦住，不能只停在“当前无权限”。
-2. 机器人或 Codex 应先明确说明：
+2. CoCo 应先明确说明：
    - 缺的是哪一类权限
    - 当前具体卡在哪一步
    - 用户批准后可以继续完成什么
@@ -137,7 +136,7 @@
    - 更新 `07_dashboards/ACTIONS.md`
    - 更新 `07_dashboards/MEMORY_HEALTH.md`
 6. 与这套系统有关的标准工作流统一收敛到 repo skill `obsidian-memory-workflow`。
-7. 根层还包括：
+7. 自 `v1.0.1` 起，根层还新增：
    - `/.codex/config.toml`
    - `/.codex/rules/generated.rules`
    它们只承载 Codex 运行默认和命令前缀规则投影，不承载任务事实源和业务控制真源。
@@ -182,13 +181,14 @@
    - 一级项目板
    - `NEXT_ACTIONS.md`
 2. `07_dashboards/` 和 `reports/` 是派生阅读层，不是任务真源。
-3. 自动化如果要汇报“当前系统健康状态”，必须先做实时只读核验：
+3. `reports/ops/workspace-hub-health/latest.md` 只是“最近一次定时健康检查”，不是“当前时刻系统状态”的唯一真源。
+4. 自动化如果要汇报“当前系统健康状态”，必须先做实时只读核验：
    - `python3 ops/codex_dashboard_sync.py verify-consistency`
    - `python3 ops/workspace_hub_route_check.py`
-4. 若实时核验与派生展示冲突：
+5. 若实时核验与 `latest.md` 冲突：
    - 以实时核验结果为准
-   - 把旧展示描述为“历史告警”或“待确认关闭”
-5. 若项目板 / `NEXT_ACTIONS.md` 与 `07_dashboards/` 冲突：
+   - 把 `latest.md` 中的相关问题描述为“历史告警”或“待确认关闭”
+6. 若项目板 / `NEXT_ACTIONS.md` 与 `07_dashboards/` 冲突：
    - 以项目板与 `NEXT_ACTIONS.md` 为准
    - 把 dashboard 视为展示层滞后
-6. 自动化不得把“总板空白”写成结论，除非项目板与 `NEXT_ACTIONS.md` 同时都没有有效 `todo / doing / blocked` 条目。
+7. 自动化不得把“总板空白”写成结论，除非项目板与 `NEXT_ACTIONS.md` 同时都没有有效 `todo / doing / blocked` 条目。

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Freeze"
+  short_description: "Temporarily block risky changes until a clear gate is satisfied"
+  default_prompt: "Use $freeze to stop risky writes or release activity until the right gate is met."

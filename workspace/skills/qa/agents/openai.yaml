@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qa"
+  short_description: "Help with Qa tasks and workflows"
+  default_prompt: "Use $qa to verify a completed change with targeted tests and acceptance-oriented checks."

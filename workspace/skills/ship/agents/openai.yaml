@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship"
+  short_description: "Judge whether work is ready for release or formal delivery"
+  default_prompt: "Use $ship to decide whether this change is actually ready to release, submit, or hand off."

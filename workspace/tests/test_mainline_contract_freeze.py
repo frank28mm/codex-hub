@@ -113,7 +113,7 @@ def parser_command_names(parser: argparse.ArgumentParser) -> set[str]:
 
 def test_runtime_root_prefers_canonical_runtime_for_worktree(monkeypatch) -> None:
     monkeypatch.delenv("WORKSPACE_HUB_RUNTIME_ROOT", raising=False)
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/codex-hub-worktrees/core")
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/workspace-hub-worktrees/core")
 
     from ops import codex_retrieval, control_gate
 
@@ -128,24 +128,48 @@ def test_runtime_root_prefers_canonical_runtime_for_worktree(monkeypatch) -> Non
 
 
 def test_feishu_writable_roots_include_canonical_workspace_and_support_worktrees(monkeypatch) -> None:
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/codex-hub-worktrees/core")
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/workspace-hub-worktrees/core")
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    original_exists = local_broker.Path.exists
+    expected_paths = {
+        "/tmp/workspace-hub-worktrees/core",
+        "/tmp/workspace-hub-worktrees/feishu-bridge",
+        "/tmp/workspace-hub-worktrees/electron-console",
+    }
+
+    def fake_exists(path: Path) -> bool:
+        if str(path) in expected_paths:
+            return True
+        return original_exists(path)
+
+    monkeypatch.setattr(local_broker.Path, "exists", fake_exists)
 
     roots = {str(path) for path in local_broker._feishu_writable_roots()}
 
     canonical_workspace = str(Path(__file__).resolve().parents[1])
     assert canonical_workspace in roots
     assert f"{canonical_workspace}/projects" in roots
-    assert "/tmp/codex-hub-worktrees/core" in roots
+    assert "/tmp/workspace-hub-worktrees/core" in roots
+    assert "/tmp/workspace-hub-worktrees/feishu-bridge" in roots
+    assert "/tmp/workspace-hub-worktrees/electron-console" in roots
 
 
-def test_authorized_profiles_escalate_to_full_access(monkeypatch) -> None:
-    monkeypatch.setenv("WORKSPACE_HUB_ROOT", "/tmp/codex-hub-worktrees/core")
+def test_authorized_profiles_escalate_to_full_access(monkeypatch, tmp_path) -> None:
+    canonical_workspace = tmp_path / "workspace-hub"
+    (canonical_workspace / "projects").mkdir(parents=True)
+    worktree_root = tmp_path / "workspace-hub-worktrees" / "core"
+    worktree_root.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree_root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
     monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
 
     standard = local_broker._codex_exec_command(prompt="status", execution_profile="feishu")
     approved = local_broker._codex_exec_command(prompt="git push", execution_profile="feishu-approved")
+    local_system = local_broker._codex_exec_command(
+        prompt="install launch agent",
+        execution_profile="feishu-local-system-approved",
+    )
     electron_full = local_broker._codex_exec_command(prompt="继续 Electron 会话", execution_profile="electron-full-access")
 
     assert 'approval_policy="never"' in standard
@@ -155,8 +179,91 @@ def test_authorized_profiles_escalate_to_full_access(monkeypatch) -> None:
     assert "--sandbox" in approved and "danger-full-access" in approved
     assert "sandbox_workspace_write.network_access=true" not in approved
     assert "--add-dir" not in approved
+    assert "--sandbox" in local_system and "workspace-write" in local_system
+    assert "danger-full-access" not in local_system
+    assert any(str(Path("/Applications")) == part for part in local_system)
     assert "--sandbox" in electron_full and "danger-full-access" in electron_full
     assert 'approval_policy="never"' in electron_full
+
+
+def test_feishu_local_extend_profile_adds_codex_home_roots(monkeypatch, tmp_path) -> None:
+    canonical_workspace = tmp_path / "workspace-hub"
+    (canonical_workspace / "projects").mkdir(parents=True)
+    worktree_root = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
+    worktree_root.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree_root))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
+
+    command = local_broker._codex_exec_command(
+        prompt="install skill",
+        execution_profile="feishu-local-extend",
+    )
+
+    command_str = " ".join(command)
+    codex_home = tmp_path / "home" / ".codex"
+    assert "--sandbox" in command and "workspace-write" in command
+    assert 'approval_policy="never"' in command_str
+    assert str(codex_home) in command_str
+    assert str(codex_home / "skills") in command_str
+    assert str(codex_home / "agents") in command_str
+    assert (codex_home / "skills").exists()
+    assert (codex_home / "agents").exists()
+
+
+def test_validate_execution_profile_access_requires_approved_token(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+
+    payload = local_broker._validate_execution_profile_access(
+        "codex_exec",
+        execution_profile="feishu-approved",
+        approval_token="",
+        source="feishu",
+    )
+
+    assert payload is not None
+    assert payload["ok"] is False
+    assert payload["error"] == "approval_token_required"
+    assert payload["expected_scope"] == "feishu_high_risk_execution"
+
+
+def test_validate_execution_profile_access_rejects_scope_mismatch(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    runtime_state.upsert_approval_token(
+        token="coco-scope-mismatch",
+        scope="feishu_local_system_execution",
+        status="approved",
+        metadata={"approved_execution_profile": "feishu-local-system-approved"},
+    )
+
+    payload = local_broker._validate_execution_profile_access(
+        "codex_exec",
+        execution_profile="feishu-approved",
+        approval_token="coco-scope-mismatch",
+        source="feishu",
+    )
+
+    assert payload is not None
+    assert payload["ok"] is False
+    assert payload["error"] == "approval_scope_mismatch"
+
+
+def test_validate_execution_profile_access_requires_electron_source(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+
+    payload = local_broker._validate_execution_profile_access(
+        "codex_exec",
+        execution_profile="electron-full-access",
+        approval_token="",
+        source="feishu",
+    )
+
+    assert payload is not None
+    assert payload["ok"] is False
+    assert payload["error"] == "electron_full_access_requires_electron_source"
 
 
 def test_local_broker_freezes_status_panel_and_command_contract(sample_env, monkeypatch, capsys) -> None:
@@ -608,7 +715,7 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
         status="pending",
         project_name="SampleProj",
         session_id="sess-bridge-1",
-        expires_at="2026-03-20T01:00:00Z",
+        expires_at="2036-03-20T01:00:00Z",
         metadata={
             "requested_action": "git push origin codex/feishu-bridge",
             "chat_id": "chat_123",
@@ -773,7 +880,14 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
 
 
 def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, capsys) -> None:
-    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    runtime_state.upsert_approval_token(
+        token="coco-allow-mainline",
+        scope="feishu_high_risk_execution",
+        status="approved",
+        metadata={"approved_execution_profile": "feishu-approved"},
+    )
     monkeypatch.setattr(
         local_broker,
         "_run",
@@ -791,6 +905,15 @@ def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, caps
         session_id="",
         project_name="Codex Hub",
         execution_profile="feishu",
+        source="feishu",
+        chat_ref="",
+        thread_name="",
+        thread_label="",
+        source_message_id="",
+        approval_token="",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
     )
     assert local_broker.cmd_command_center(exec_args) == 0
     exec_payload = read_payload(capsys)
@@ -801,6 +924,8 @@ def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, caps
         "feishu",
         "--project",
         "Codex Hub",
+        "--source",
+        "feishu",
         "--prompt",
         "继续 Codex Hub 的 Feishu 入口",
     ]
@@ -811,6 +936,15 @@ def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, caps
         session_id="sess-feishu-1",
         project_name="",
         execution_profile="feishu-approved",
+        source="feishu",
+        chat_ref="",
+        thread_name="",
+        thread_label="",
+        source_message_id="",
+        approval_token="coco-allow-mainline",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
     )
     assert local_broker.cmd_command_center(resume_args) == 0
     resume_payload = read_payload(capsys)
@@ -819,8 +953,12 @@ def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, caps
         str(local_broker.workspace_root() / "ops" / "start-codex"),
         "--execution-profile",
         "feishu-approved",
+        "--approval-token",
+        "coco-allow-mainline",
         "--resume-session-id",
         "sess-feishu-1",
+        "--source",
+        "feishu",
         "--prompt",
         "继续处理上一轮问题",
     ]
@@ -1042,6 +1180,15 @@ def test_electron_full_access_profile_routes_through_start_codex(sample_env, mon
         session_id="",
         project_name="Codex Hub",
         execution_profile="electron-full-access",
+        source="electron",
+        chat_ref="",
+        thread_name="",
+        thread_label="",
+        source_message_id="",
+        approval_token="",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
     )
     assert local_broker.cmd_command_center(exec_args) == 0
     exec_payload = read_payload(capsys)
@@ -1052,8 +1199,64 @@ def test_electron_full_access_profile_routes_through_start_codex(sample_env, mon
         "electron-full-access",
         "--project",
         "Codex Hub",
+        "--source",
+        "electron",
         "--prompt",
         "继续 Electron 完全访问任务",
+    ]
+
+
+def test_local_system_approved_profile_routes_through_start_codex(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    runtime_state.upsert_approval_token(
+        token="coco-local-system",
+        scope="feishu_local_system_execution",
+        status="approved",
+        metadata={"approved_execution_profile": "feishu-local-system-approved"},
+    )
+    monkeypatch.setattr(
+        local_broker,
+        "_run",
+        lambda command, cwd=None: {
+            "command": command,
+            "returncode": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+        },
+    )
+
+    exec_args = argparse.Namespace(
+        action="codex-exec",
+        prompt="请帮我安装 launch agent",
+        session_id="",
+        project_name="Codex Hub",
+        execution_profile="feishu-local-system-approved",
+        source="feishu",
+        chat_ref="",
+        thread_name="",
+        thread_label="",
+        source_message_id="",
+        approval_token="coco-local-system",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
+    )
+    assert local_broker.cmd_command_center(exec_args) == 0
+    payload = read_payload(capsys)
+    assert payload["ok"] is True
+    assert payload["command"] == [
+        str(local_broker.workspace_root() / "ops" / "start-codex"),
+        "--execution-profile",
+        "feishu-local-system-approved",
+        "--approval-token",
+        "coco-local-system",
+        "--project",
+        "Codex Hub",
+        "--source",
+        "feishu",
+        "--prompt",
+        "请帮我安装 launch agent",
     ]
 
 
@@ -1320,15 +1523,19 @@ def test_electron_and_feishu_entrypoints_keep_runtime_ingestion_fields(sample_en
     electron_main = (Path(__file__).resolve().parents[1] / "apps" / "electron-console" / "main.js").read_text(
         encoding="utf-8"
     )
-    feishu_service = (Path(__file__).resolve().parents[1] / "bridge" / "feishu" / "service.js").read_text(
+    bridge_host = (Path(__file__).resolve().parents[1] / "apps" / "electron-console" / "bridge-host.js").read_text(
+        encoding="utf-8"
+    )
+    local_broker_text = (Path(__file__).resolve().parents[1] / "ops" / "local_broker.py").read_text(
         encoding="utf-8"
     )
 
     assert 'payload?.reasoning_effort' in electron_main
     assert '--reasoning-effort' in electron_main
-    assert 'options.reasoningEffort || options.reasoning_effort' in feishu_service
-    assert 'commonPayload.reasoning_effort = selectedReasoningEffort' in feishu_service
-    assert 'no_auto_resume: Boolean(conversationKey)' in feishu_service
+    assert 'payload.thread_label' in bridge_host
+    assert 'payload.source_message_id' in bridge_host
+    assert 'approval_token=getattr(args, "approval_token", "")' in local_broker_text
+    assert 'reasoning_effort=getattr(args, "reasoning_effort", "")' in local_broker_text
 
 
 def test_bridge_continuity_status_flags_shared_sessions_and_response_delay(sample_env, monkeypatch) -> None:

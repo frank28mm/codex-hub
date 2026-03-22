@@ -1,9 +1,18 @@
-node_modules/
-**/.next/
-logs/
 runtime/
-reports/ops/
-**/__pycache__/
-**/.pytest_cache/
-**/.mypy_cache/
+logs/
+projects/
+output/
+__pycache__/
 .DS_Store
+*.log
+*.tmp
+*.lock
+tmp_*.png
+tmp_*.jpg
+
+# Generated ops/runtime reports
+reports/ops/workspace-hub-daily/
+reports/ops/workspace-hub-health/health-*.md
+reports/ops/workspace-hub-health/latest.md
+reports/ops/workspace-hub-health/history.ndjson
+reports/ops/workspace-hub-health/alerts.ndjson

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Consult"
+  short_description: "Get a lightweight advisory second opinion on framing or tradeoffs"
+  default_prompt: "Use $claude-consult to get a lightweight advisory second opinion on this decision or option set."

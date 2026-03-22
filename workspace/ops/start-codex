@@ -33,6 +33,7 @@ SOURCE_CHAT_REF=""
 SOURCE_THREAD_NAME=""
 SOURCE_THREAD_LABEL=""
 SOURCE_MESSAGE_ID=""
+APPROVAL_TOKEN=""
 
 usage() {
   cat <<'EOF'
@@ -105,6 +106,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source-message-id)
       SOURCE_MESSAGE_ID="${2:-}"
+      shift 2
+      ;;
+    --approval-token)
+      APPROVAL_TOKEN="${2:-}"
       shift 2
       ;;
     --dry-run)
@@ -314,6 +319,40 @@ if protocol:
         print(f"context_timeline_path={path}")
     for path in (protocol.get("detail_paths") or [])[:2]:
         print(f"context_detail_path={path}")
+workflow = payload.get("workflow_recommendation") or {}
+if workflow:
+    suggested_path = [str(item).strip() for item in workflow.get("suggested_path", []) if str(item).strip()]
+    if suggested_path:
+        print(f"context_workflow_path={' -> '.join(suggested_path)}")
+    stage = str(workflow.get("recognized_stage", "")).strip()
+    if stage:
+        print(f"context_workflow_stage={stage}")
+    second_opinion = workflow.get("second_opinion") or {}
+    if second_opinion:
+        print(f"context_second_opinion_skill={second_opinion.get('skill', '')}")
+        source = str(second_opinion.get("source", "")).strip()
+        if source:
+            print(f"context_second_opinion_source={source}")
+        template_id = str(second_opinion.get("package_template_id", "")).strip()
+        if template_id:
+            print(f"context_second_opinion_template={template_id}")
+        material_source = str(second_opinion.get("material_source", "")).strip()
+        if material_source:
+            print(f"context_second_opinion_material_source={material_source}")
+        required_fields = [
+            str(item).strip()
+            for item in (second_opinion.get("required_fields") or [])
+            if str(item).strip()
+        ]
+        if required_fields:
+            print(f"context_second_opinion_fields={','.join(required_fields)}")
+        execution = second_opinion.get("main_thread_execution") or {}
+        entrypoint = str(execution.get("entrypoint", "")).strip()
+        if entrypoint:
+            print(f"context_second_opinion_entrypoint={entrypoint}")
+        focus_question = str(execution.get("focus_question", "")).strip()
+        if focus_question:
+            print(f"context_second_opinion_focus={focus_question}")
 for item in payload.get("recommended_files", [])[:4]:
     print(f"context_file={item.get('path', '')} | reason={item.get('reason', '')}")
 PY
@@ -444,6 +483,52 @@ if launch_source or project_name or source_thread_name or source_thread_label or
             lines.append("需要细读时，优先展开这些 detail 入口：")
             for path in detail_paths[:3]:
                 lines.append(f"- {path}")
+    workflow = context.get("workflow_recommendation") or {}
+    if workflow:
+        suggested_path = [str(item).strip() for item in workflow.get("suggested_path", []) if str(item).strip()]
+        if suggested_path:
+            lines.append(f"当前工作流建议：`{' -> '.join(suggested_path)}`。")
+        assistant_message = str(workflow.get("assistant_message", "")).strip()
+        if assistant_message:
+            lines.append(f"工作流建议说明：{assistant_message}")
+        plan = [str(item).strip() for item in workflow.get("initial_action_plan", []) if str(item).strip()]
+        if plan:
+            lines.append("建议的初始动作：")
+            for item in plan[:4]:
+                lines.append(f"- {item}")
+        second_opinion = workflow.get("second_opinion") or {}
+        if second_opinion:
+            lines.append("如果这条请求要进入 second-opinion，先补齐这些字段：")
+            for field_name in second_opinion.get("required_fields", [])[:4]:
+                lines.append(f"- {field_name}")
+            template_id = str(second_opinion.get("package_template_id", "")).strip()
+            if template_id:
+                lines.append(f"默认打包模板：`{template_id}`。")
+            material_source = str(second_opinion.get("material_source", "")).strip()
+            if material_source:
+                lines.append(f"当前取材来源：`{material_source}`。")
+            packaged_request = second_opinion.get("packaged_request") or {}
+            request = packaged_request.get("request") or {}
+            focus_question = str(request.get("question", "")).strip()
+            if focus_question:
+                lines.append(f"当前 second-opinion 焦点：{focus_question}")
+            current_judgment = str(request.get("current_judgment", "")).strip()
+            if current_judgment:
+                lines.append(f"当前主线程判断：{current_judgment}")
+            artifact_preview = str(
+                (second_opinion.get("main_thread_execution") or {}).get("artifact_preview", "")
+            ).strip()
+            if artifact_preview:
+                lines.append("当前已打包的证据摘要：")
+                for preview_line in artifact_preview.splitlines()[:5]:
+                    lines.append(f"- {preview_line}")
+            execution = second_opinion.get("main_thread_execution") or {}
+            entrypoint = str(execution.get("entrypoint", "")).strip()
+            if entrypoint:
+                lines.append(f"推荐调用入口：`{entrypoint}`。")
+            suggested_command = str(execution.get("suggested_command", "")).strip()
+            if suggested_command:
+                lines.append(f"推荐命令：`{suggested_command}`")
     lines.append("当前工作区还提供飞书对象操作能力，可直接完成消息、用户、文档、多维表格、日历、任务、视频会议等操作。")
     lines.append(f"飞书资源注册表位于：{WORKSPACE_ROOT}/control/feishu_resources.yaml。")
     lines.append(f"飞书操作 skill 位于：{WORKSPACE_ROOT}/.agents/skills/feishu-ops/SKILL.md。")
@@ -508,6 +593,138 @@ print_feishu_ops_summary() {
   printf 'feishu_skill_path=%s\n' "$WORKSPACE_ROOT/.agents/skills/feishu-ops/SKILL.md"
 }
 
+emit_execution_profile_roots() {
+  python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" "$EXECUTION_PROFILE" "$DEFAULT_WORKSPACE_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+workspace_root = Path(sys.argv[1]).resolve()
+vault_root = Path(sys.argv[2]).resolve()
+execution_profile = str(sys.argv[3]).strip()
+default_workspace_root = Path(sys.argv[4]).resolve()
+canonical_root = workspace_root
+if workspace_root.parent.name == "workspace-hub-worktrees":
+    sibling = workspace_root.parent.parent / "workspace-hub"
+    if sibling.exists():
+        canonical_root = sibling.resolve()
+    elif default_workspace_root.exists():
+        canonical_root = default_workspace_root
+worktrees_roots = [canonical_root.parent / "workspace-hub-worktrees"]
+if workspace_root.parent.name == "workspace-hub-worktrees":
+    worktrees_roots.append(workspace_root.parent)
+roots = [
+    vault_root,
+    canonical_root,
+    canonical_root / "projects",
+    workspace_root,
+    workspace_root / "projects",
+]
+for worktrees_root in worktrees_roots:
+    roots.extend([
+        worktrees_root / "core-v1-0-3-to-v1-0-5",
+        worktrees_root / "feishu-bridge",
+        worktrees_root / "electron-console",
+    ])
+
+codex_home = Path.home() / ".codex"
+if execution_profile in {"feishu-local-extend", "feishu-local-system-approved"}:
+    for extra in [codex_home, codex_home / "skills", codex_home / "agents"]:
+        extra.mkdir(parents=True, exist_ok=True)
+        roots.append(extra)
+
+if execution_profile == "feishu-local-system-approved":
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True, exist_ok=True)
+    roots.extend(
+        [
+            Path.home(),
+            launch_agents,
+            Path("/Applications"),
+            Path("/usr/local/bin"),
+            Path("/opt/homebrew/bin"),
+        ]
+    )
+
+seen = set()
+for root in roots:
+    try:
+        key = str(root.resolve())
+    except FileNotFoundError:
+        if not root.exists():
+            continue
+        key = str(root)
+    if key in seen:
+        continue
+    seen.add(key)
+    print(key)
+PY
+}
+
+validate_execution_profile_access() {
+  python3 - "$CODE_ROOT" "$EXECUTION_PROFILE" "$APPROVAL_TOKEN" "$LAUNCH_SOURCE" <<'PY'
+import datetime as dt
+import sys
+from pathlib import Path
+
+code_root = Path(sys.argv[1]).resolve()
+execution_profile = str(sys.argv[2]).strip()
+approval_token = str(sys.argv[3]).strip()
+source = str(sys.argv[4]).strip()
+sys.path.insert(0, str(code_root))
+
+from ops import runtime_state  # noqa: E402
+
+approved_map = {
+    "feishu-approved": "feishu_high_risk_execution",
+    "feishu-local-system-approved": "feishu_local_system_execution",
+}
+
+if not execution_profile:
+    raise SystemExit(0)
+
+if execution_profile == "electron-full-access":
+    if source == "electron":
+        raise SystemExit(0)
+    print("electron-full-access requires --source electron", file=sys.stderr)
+    raise SystemExit(1)
+
+expected_scope = approved_map.get(execution_profile, "")
+if not expected_scope:
+    raise SystemExit(0)
+
+if not approval_token:
+    print(f"{execution_profile} requires --approval-token ({expected_scope})", file=sys.stderr)
+    raise SystemExit(1)
+
+item = runtime_state.fetch_approval_token(approval_token)
+if not item.get("scope"):
+    print(f"approval token {approval_token} not found", file=sys.stderr)
+    raise SystemExit(1)
+if str(item.get("status") or "").strip() != "approved":
+    print(f"approval token {approval_token} is not approved", file=sys.stderr)
+    raise SystemExit(1)
+expires_at = runtime_state.parse_iso_timestamp(str(item.get("expires_at") or "").strip())
+if expires_at is not None and expires_at <= dt.datetime.now(dt.timezone.utc):
+    print(f"approval token {approval_token} is expired", file=sys.stderr)
+    raise SystemExit(1)
+scope = str(item.get("scope") or "").strip()
+if scope != expected_scope:
+    print(
+        f"approval token {approval_token} scope mismatch: expected {expected_scope}, got {scope}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+approved_profile = str(metadata.get("approved_execution_profile") or "feishu-approved").strip()
+if approved_profile != execution_profile:
+    print(
+        f"approval token {approval_token} profile mismatch: expected {execution_profile}, got {approved_profile}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
 ensure_obsidian_background() {
   if [[ "$AUTO_OPEN_OBSIDIAN" != "1" ]]; then
     return 0
@@ -558,6 +775,10 @@ run_codex() {
     codex_prefix=("$codex_path")
   fi
 
+  if ! validate_execution_profile_access; then
+    return 1
+  fi
+
   codex_exec_base=("${codex_prefix[@]}" "exec" "-C" "$WORKSPACE_ROOT")
   if [[ -n "$selected_model" ]]; then
     codex_exec_base+=("--model" "$selected_model")
@@ -565,46 +786,13 @@ run_codex() {
   if [[ -n "$selected_reasoning_effort" ]]; then
     codex_exec_base+=("-c" "model_reasoning_effort=\"$selected_reasoning_effort\"")
   fi
-  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
-    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" ]]; then
+  if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-local-system-approved" || "$EXECUTION_PROFILE" == "feishu-approved" || "$EXECUTION_PROFILE" == "electron-full-access" ]]; then
+    if [[ "$EXECUTION_PROFILE" == "feishu" || "$EXECUTION_PROFILE" == "feishu-object-op" || "$EXECUTION_PROFILE" == "feishu-local-extend" || "$EXECUTION_PROFILE" == "feishu-local-system-approved" ]]; then
       codex_exec_base+=("--sandbox" "workspace-write" "-c" 'approval_policy="never"' "-c" "sandbox_workspace_write.network_access=true")
       while IFS= read -r feishu_root; do
         [[ -n "$feishu_root" ]] || continue
         codex_exec_base+=("--add-dir" "$feishu_root")
-      done < <(
-        python3 - "$WORKSPACE_ROOT" "$VAULT_ROOT" <<'PY'
-from pathlib import Path
-import sys
-
-workspace_root = Path(sys.argv[1]).resolve()
-vault_root = Path(sys.argv[2]).resolve()
-canonical_root = workspace_root
-if workspace_root.parent.name == "workspace-hub-worktrees":
-    sibling = workspace_root.parent.parent / "workspace-hub"
-    if sibling.exists():
-        canonical_root = sibling.resolve()
-worktrees_root = canonical_root.parent / "workspace-hub-worktrees"
-roots = [
-    vault_root,
-    canonical_root,
-    canonical_root / "projects",
-    workspace_root,
-    workspace_root / "projects",
-    worktrees_root / "core-v1-0-3-to-v1-0-5",
-    worktrees_root / "feishu-bridge",
-    worktrees_root / "electron-console",
-]
-seen = set()
-for root in roots:
-    if not root.exists():
-        continue
-    key = str(root.resolve())
-    if key in seen:
-        continue
-    seen.add(key)
-    print(key)
-PY
-      )
+      done < <(emit_execution_profile_roots)
     else
       codex_exec_base+=("--sandbox" "danger-full-access" "-c" 'approval_policy="never"')
     fi

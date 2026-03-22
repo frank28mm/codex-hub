@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unfreeze"
+  short_description: "Judge whether a previously frozen task can safely resume"
+  default_prompt: "Use $unfreeze to decide whether the freeze condition is met and what the next safe step should be."

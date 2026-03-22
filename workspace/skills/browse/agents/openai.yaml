@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browse"
+  short_description: "Verify real browser flows and UI behavior with evidence"
+  default_prompt: "Use $browse to verify this page or browser flow with live evidence before drawing conclusions."

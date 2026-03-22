@@ -1,0 +1,4 @@
+interface:
+  display_name: "Guard"
+  short_description: "Help with Guard tasks and workflows"
+  default_prompt: "Use $guard to keep this task in a constrained, dry-run-first, approval-aware posture."
