@@ -39,6 +39,23 @@
 > 这里专门写了“agent 应该怎么接手部署这套系统”的最优流程。
 
 > [!TIP]
+> 如果你已经完成了 `codex login`，并且想马上把**微信私聊入口**也接进来，最推荐的方式不是手工敲命令，而是直接让 `Codex` 来做。
+>
+> 你可以在 `workspace/` 里直接对 `Codex` 说：
+>
+> `帮我接微信私聊入口，启用微信私聊版 CoCo。请完成二维码登录、等待我扫码、安装后台常驻并验证状态。`
+>
+> 正常情况下，`Codex` 会替你：
+> - 启动微信二维码登录
+> - 把本地二维码展示出来让你扫码
+> - 等你扫码确认
+> - 安装 `weixin_bridge` 的后台常驻
+> - 最后验证桥接状态
+>
+> 对人类来说，通常只需要做一件事：
+> **用微信扫一扫本地弹出的二维码。**
+
+> [!TIP]
 > 真正驱动系统运行的协议文件在：
 > - [workspace/AGENTS.md](./workspace/AGENTS.md)
 > - [workspace/MEMORY_SYSTEM.md](./workspace/MEMORY_SYSTEM.md)
@@ -364,14 +381,12 @@ python3 ops/accept_product.py run
 - 不支持群聊
 - 走同一条 `Codex Hub` 主链
 
-最小步骤是：
+最推荐方式是：
 
-```bash
-python3 ops/weixin_bridge.py login-qr-start
-python3 ops/weixin_bridge.py login-qr-wait --timeout 180
-python3 ops/weixin_bridge.py install-launchagent
-python3 ops/weixin_bridge.py status
-```
+- 在 `workspace/` 里直接让 `Codex` 帮你接这条入口
+- `Codex` 会先启动二维码登录
+- 然后等你扫码
+- 再继续安装后台常驻并验证状态
 
 完成后，你就可以把微信私聊当成第二个远程入口来用。
 

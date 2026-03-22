@@ -178,6 +178,23 @@
 > 人类用户只负责少量必要授权。
 
 > [!TIP]
+> 如果你已经完成基础初始化，并且想把**微信私聊版 `CoCo`** 接进来，最推荐的方式也是直接让 `Codex` 来接。
+>
+> 你可以直接说：
+>
+> `帮我接微信私聊入口，启用微信私聊版 CoCo。请完成二维码登录、等待我扫码、安装后台常驻并验证状态。`
+>
+> 正常情况下，`Codex` 会替你：
+> - 运行 `weixin_bridge` 的二维码登录
+> - 把本地二维码展示给你扫码
+> - 等你确认登录
+> - 安装 LaunchAgent 常驻轮询
+> - 最后检查 bridge 状态
+>
+> 对人类用户来说，通常只需要：
+> **扫一下二维码。**
+
+> [!TIP]
 > `Codex` 只要从当前 `workspace/` 启动，就会自动读取：
 > - [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
 > - [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
@@ -385,14 +402,19 @@ npm run workspace
 - 不支持微信群聊
 - 继续走同一条 `Codex Hub` 主链
 
-最小启动步骤：
+最推荐方式不是手工逐条执行，而是直接让 `Codex` 接手这条安装链。
 
-```bash
-python3 ops/weixin_bridge.py login-qr-start
-python3 ops/weixin_bridge.py login-qr-wait --timeout 180
-python3 ops/weixin_bridge.py install-launchagent
-python3 ops/weixin_bridge.py status
-```
+你可以在 `workspace/` 里直接说：
+
+`帮我接微信私聊入口，启用微信私聊版 CoCo。请完成二维码登录、等待我扫码、安装后台常驻并验证状态。`
+
+然后：
+
+- `Codex` 会启动二维码登录
+- 给你展示本地二维码
+- 等你扫码
+- 自动安装 `weixin_bridge` 的 LaunchAgent
+- 最后检查 `status`
 
 启用后，你就可以通过微信私聊把任务送入同一套 `broker -> start-codex -> memory writeback` 主链。
 
