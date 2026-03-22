@@ -1,0 +1,14 @@
+{
+  "name": "workspace-hub-feishu-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Feishu bridge service baseline for the Workspace Hub integrated desktop release.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node feishu_long_connection_service.test.js && node feishu_outbound.test.js"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.48.0"
+  }
+}
