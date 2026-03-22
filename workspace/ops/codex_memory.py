@@ -1759,6 +1759,7 @@ def cmd_finalize_launch(args: argparse.Namespace) -> int:
                 "project_name": binding["project_name"],
                 "session_id": binding.get("session_id", ""),
                 "last_active_at": binding.get("last_active_at", ""),
+                "reply_text": summary_text,
                 "summary_excerpt": binding.get("summary_excerpt", ""),
                 "binding_scope": binding.get("binding_scope", "project"),
                 "binding_board_path": binding.get("binding_board_path", ""),

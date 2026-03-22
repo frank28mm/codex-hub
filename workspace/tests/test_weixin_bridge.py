@@ -15,6 +15,16 @@ def _sample_message(text: str, *, user_id: str = "wx-user", message_id: str = "m
     }
 
 
+def _sample_image_message(*, user_id: str = "wx-user", message_id: str = "msg-image", context_token: str = "ctx-image") -> dict:
+    return {
+        "message_id": message_id,
+        "from_user_id": user_id,
+        "context_token": context_token,
+        "message_type": 1,
+        "item_list": [{"type": 2, "image_item": {"media": {"encrypt_query_param": "enc"}}}],
+    }
+
+
 def test_weixin_contract_status_exposes_dm_runtime_ownership(sample_env) -> None:
     contract = weixin_bridge.bridge_contract()
 
@@ -142,6 +152,107 @@ def test_route_private_message_keeps_workspace_scope_for_unbound_prompt(sample_e
     assert binding["metadata"].get("last_project_name", "") == ""
 
 
+def test_route_private_message_prefers_full_reply_text_and_splits_long_replies(sample_env, monkeypatch) -> None:
+    weixin_bridge.save_account(
+        {
+            "account_id": "default",
+            "token": "wx-token",
+            "base_url": "https://weixin.example",
+        }
+    )
+    monkeypatch.setattr(weixin_bridge, "_send_typing", lambda *args, **kwargs: None)
+    long_reply = "第一段。" * 180 + "\n\n" + "第二段。" * 180
+    sent_texts: list[str] = []
+
+    monkeypatch.setattr(
+        weixin_bridge,
+        "_broker_command",
+        lambda args: {
+            "ok": True,
+            "command": ["python3", "/broker.py", *args],
+            "response": {
+                "ok": True,
+                "finalize_launch": {
+                    "project_name": "SampleProj",
+                    "session_id": "sess-long-1",
+                    "reply_text": long_reply,
+                    "summary_excerpt": "这段短摘要不该盖过完整回复。",
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        weixin_bridge,
+        "send_text_message",
+        lambda account, *, user_id, context_token, text: sent_texts.append(text) or {"message_id": f"out-{len(sent_texts)}", "result": {"ok": True}},
+    )
+
+    payload = weixin_bridge.route_private_message(_sample_message("请给我完整答复", message_id="msg-long"))
+
+    assert payload["ok"] is True
+    assert payload["reply_text"] == long_reply
+    assert len(payload["deliveries"]) >= 2
+    assert sent_texts[0].startswith("（1/")
+    assert "第一段。" in "".join(sent_texts)
+    assert "第二段。" in "".join(sent_texts)
+
+
+def test_route_private_message_strips_markdown_for_weixin_delivery(sample_env, monkeypatch) -> None:
+    weixin_bridge.save_account(
+        {
+            "account_id": "default",
+            "token": "wx-token",
+            "base_url": "https://weixin.example",
+        }
+    )
+    monkeypatch.setattr(weixin_bridge, "_send_typing", lambda *args, **kwargs: None)
+    sent_texts: list[str] = []
+    reply_text = """# 标题
+
+**重点** 请看这个[链接](https://example.com)。
+
+```python
+print("hello")
+```
+"""
+
+    monkeypatch.setattr(
+        weixin_bridge,
+        "_broker_command",
+        lambda args: {
+            "ok": True,
+            "command": ["python3", "/broker.py", *args],
+            "response": {
+                "ok": True,
+                "finalize_launch": {
+                    "project_name": "SampleProj",
+                    "session_id": "sess-md-1",
+                    "reply_text": reply_text,
+                    "summary_excerpt": "短摘要",
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        weixin_bridge,
+        "send_text_message",
+        lambda account, *, user_id, context_token, text: sent_texts.append(text) or {"message_id": f"out-{len(sent_texts)}", "result": {"ok": True}},
+    )
+
+    payload = weixin_bridge.route_private_message(_sample_message("请按微信格式回复", message_id="msg-md"))
+
+    assert payload["ok"] is True
+    assert sent_texts
+    combined = "\n".join(sent_texts)
+    assert "标题" in combined
+    assert "重点 请看这个链接。" in combined
+    assert "print(\"hello\")" in combined
+    assert "[" not in combined
+    assert "](https://example.com)" not in combined
+    assert "**" not in combined
+    assert "```" not in combined
+
+
 def test_route_private_message_only_resumes_when_user_explicitly_continues(sample_env, monkeypatch) -> None:
     weixin_bridge.save_account(
         {
@@ -210,6 +321,29 @@ def test_route_private_message_blocks_high_risk_actions(sample_env, monkeypatch)
     assert "Feishu 私聊 CoCo" in payload["reply_text"]
 
 
+def test_route_private_message_replies_for_unsupported_image_input(sample_env, monkeypatch) -> None:
+    weixin_bridge.save_account(
+        {
+            "account_id": "default",
+            "token": "wx-token",
+            "base_url": "https://weixin.example",
+        }
+    )
+    sent_texts: list[str] = []
+    monkeypatch.setattr(
+        weixin_bridge,
+        "send_text_message",
+        lambda account, *, user_id, context_token, text: sent_texts.append(text) or {"message_id": "out-image", "result": {"ok": True}},
+    )
+
+    payload = weixin_bridge.route_private_message(_sample_image_message())
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "unsupported_input"
+    assert sent_texts
+    assert "不能直接理解图片内容" in sent_texts[0]
+
+
 def test_run_once_polls_updates_and_persists_cursor(sample_env, monkeypatch) -> None:
     weixin_bridge.save_account(
         {
@@ -255,6 +389,36 @@ def test_launch_agent_payload_uses_daemon_entry(sample_env) -> None:
     assert payload["StandardErrorPath"].endswith("logs/weixin-bridge.err.log")
 
 
+def test_enable_orchestrates_login_and_launchagent_install(sample_env, monkeypatch, capsys, tmp_path) -> None:
+    plist_path = tmp_path / "LaunchAgents" / f"{weixin_bridge.LAUNCH_AGENT_NAME}.plist"
+    monkeypatch.setattr(
+        weixin_bridge,
+        "start_login_qr",
+        lambda **kwargs: {"qrcode_image_path": str(tmp_path / "login_qr.png"), "qrcode": "token"},
+    )
+    monkeypatch.setattr(weixin_bridge, "wait_for_login", lambda timeout_seconds=0: {"connected": True, "status": "connected"})
+    monkeypatch.setattr(weixin_bridge, "bridge_status", lambda: {"configured": True, "connected": True})
+    monkeypatch.setattr(weixin_bridge, "launch_agent_plist_path", lambda name: plist_path)
+    monkeypatch.setattr(weixin_bridge, "log_stdout_path", lambda: tmp_path / "stdout.log")
+    monkeypatch.setattr(weixin_bridge, "run_launchctl", lambda *args: type("Result", (), {"returncode": 0, "stderr": ""})())
+
+    args = argparse.Namespace(
+        base_url=weixin_bridge.DEFAULT_BASE_URL,
+        bot_type=weixin_bridge.DEFAULT_BOT_TYPE,
+        account_id="default",
+        timeout=180,
+        poll_interval=5,
+        error_backoff=12,
+        no_open=True,
+    )
+    rc = weixin_bridge.cmd_enable(args)
+    payload = capsys.readouterr().out
+
+    assert rc == 0
+    assert plist_path.exists()
+    assert '"ok": true' in payload.lower()
+
+
 def test_safe_run_once_persists_error_state(sample_env, monkeypatch) -> None:
     monkeypatch.setattr(weixin_bridge, "run_once", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bridge boom")))
 
@@ -273,5 +437,7 @@ def test_weixin_parser_exposes_phase2_commands() -> None:
     action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
 
     assert "daemon" in action.choices
+    assert "login" in action.choices
+    assert "enable" in action.choices
     assert "install-launchagent" in action.choices
     assert "uninstall-launchagent" in action.choices

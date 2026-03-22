@@ -53,6 +53,7 @@ DEFAULT_POLL_INTERVAL = 2
 DEFAULT_ERROR_BACKOFF = 8
 WEIXIN_DM_THREAD_NAME = "CoCo 私聊"
 WEIXIN_DM_THREAD_LABEL = "CoCo 私聊"
+WEIXIN_TEXT_CHUNK_LIMIT = 900
 CONTINUE_SESSION_PATTERNS = [
     re.compile(r"^\s*继续"),
     re.compile(r"^\s*接着"),
@@ -490,18 +491,50 @@ def _account_or_error() -> tuple[dict[str, Any], dict[str, Any] | None]:
     return {}, {"ok": False, "error": "weixin_account_not_configured", "bridge": BRIDGE_NAME}
 
 
-def _message_text(message: dict[str, Any]) -> str:
+def _message_analysis(message: dict[str, Any]) -> dict[str, str]:
+    fallback_kind = "empty"
     for item in message.get("item_list") or []:
         if int(item.get("type", 0) or 0) == 1:
             text_item = item.get("text_item", {})
             text = str(text_item.get("text", "")).strip()
             if text:
-                return text
-        if int(item.get("type", 0) or 0) == 3:
+                return {"text": text, "content_kind": "text"}
+        if item.get("image_item") is not None:
+            if fallback_kind == "empty":
+                fallback_kind = "image"
+            continue
+        if int(item.get("type", 0) or 0) == 3 or item.get("voice_item") is not None:
             voice_item = item.get("voice_item", {})
             text = str(voice_item.get("text", "")).strip()
             if text:
-                return text
+                return {"text": text, "content_kind": "voice_text"}
+            if fallback_kind == "empty":
+                fallback_kind = "voice"
+            continue
+        if item.get("video_item") is not None:
+            if fallback_kind == "empty":
+                fallback_kind = "video"
+            continue
+        if item.get("file_item") is not None:
+            if fallback_kind == "empty":
+                fallback_kind = "file"
+    return {"text": "", "content_kind": fallback_kind}
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    return _message_analysis(message)["text"]
+
+
+def _unsupported_input_reply(content_kind: str) -> str:
+    kind = str(content_kind or "").strip()
+    if kind == "image":
+        return "当前微信私聊桥第一版还不能直接理解图片内容。请补一段文字说明，或等后续版本接入图片理解。"
+    if kind == "voice":
+        return "当前微信私聊桥第一版只支持微信侧已经转写成文字的语音。这条语音没有可用转写，请改发文字。"
+    if kind == "video":
+        return "当前微信私聊桥第一版还不能直接理解视频内容。请先发文字说明，或把关键信息整理成文字再发。"
+    if kind == "file":
+        return "当前微信私聊桥第一版还不能直接读取微信里的文件附件。请先发文字说明，或把文件放到工作区可访问位置后再让我处理。"
     return ""
 
 
@@ -516,7 +549,8 @@ def _message_id(message: dict[str, Any]) -> str:
 
 def _normalize_inbound(message: dict[str, Any], account: dict[str, Any]) -> dict[str, Any]:
     user_id = str(message.get("from_user_id", "")).strip()
-    text = _message_text(message)
+    analysis = _message_analysis(message)
+    text = analysis["text"]
     account_id = str(account.get("account_id", "default")).strip() or "default"
     chat_ref = _chat_ref(account_id, user_id)
     project_name = detect_project_name(text)
@@ -527,6 +561,7 @@ def _normalize_inbound(message: dict[str, Any], account: dict[str, Any]) -> dict
         "thread_name": WEIXIN_DM_THREAD_NAME,
         "thread_label": WEIXIN_DM_THREAD_LABEL,
         "text": text,
+        "content_kind": analysis["content_kind"],
         "user_id": user_id,
         "account_id": account_id,
         "context_token": str(message.get("context_token", "")).strip(),
@@ -579,15 +614,122 @@ def _should_block_high_risk(text: str) -> bool:
 def _reply_text_from_broker_result(result: dict[str, Any]) -> str:
     response = result.get("response", {}) if isinstance(result.get("response"), dict) else {}
     finalize = response.get("finalize_launch", {}) if isinstance(response.get("finalize_launch"), dict) else {}
+    if finalize.get("reply_text"):
+        return str(finalize.get("reply_text", "")).strip()
     if finalize.get("summary_excerpt"):
         return str(finalize.get("summary_excerpt", "")).strip()
-    stdout = str(response.get("stdout", "") or result.get("stdout", "")).strip()
+    stdout = str(response.get("stdout", "") or response.get("raw", "") or result.get("stdout", "")).strip()
     if stdout:
-        return stdout[-1800:]
+        return stdout
     if response.get("ok") is True:
         return "已收到并完成处理。"
     error = str(response.get("error", "")).strip() or str(result.get("stderr", "")).strip()
     return error or "处理失败。"
+
+
+def _markdown_to_weixin_text(text: str) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+    result = source
+    result = re.sub(r"```[^\n]*\n?([\s\S]*?)```", lambda match: match.group(1).strip(), result)
+    result = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", result)
+    result = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", result)
+    result = re.sub(r"^\|[\s:|-]+\|$", "", result, flags=re.M)
+
+    def _table_row(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        cells = [cell.strip() for cell in inner.split("|")]
+        return "  ".join(cell for cell in cells if cell)
+
+    result = re.sub(r"^\|(.+)\|$", _table_row, result, flags=re.M)
+    result = re.sub(r"(?m)^(#{1,6})\s*", "", result)
+    result = re.sub(r"[*_~`]+", "", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
+def _split_reply_text(text: str, *, limit: int = WEIXIN_TEXT_CHUNK_LIMIT) -> list[str]:
+    source = _markdown_to_weixin_text(text)
+    if not source:
+        return []
+    if len(source) <= limit:
+        return [source]
+
+    chunks: list[str] = []
+    current = ""
+    for paragraph in source.split("\n\n"):
+        part = paragraph.strip()
+        if not part:
+            continue
+        candidate = f"{current}\n\n{part}".strip() if current else part
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(part) <= limit:
+            current = part
+            continue
+        pieces = [piece for piece in re.split(r"(?<=[。！？!?])", part) if piece]
+        for piece in pieces:
+            piece = piece.strip()
+            if not piece:
+                continue
+            candidate = f"{current}{piece}" if current else piece
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+                current = ""
+            while len(piece) > limit:
+                chunks.append(piece[:limit].rstrip())
+                piece = piece[limit:].lstrip()
+            current = piece
+    if current:
+        chunks.append(current)
+    if len(chunks) <= 1:
+        return chunks
+    total = len(chunks)
+    return [f"（{index + 1}/{total}）\n{chunk}" for index, chunk in enumerate(chunks)]
+
+
+def _deliver_reply_text(
+    account: dict[str, Any],
+    normalized: dict[str, Any],
+    *,
+    reply_text: str,
+    status: str,
+    project_name: str,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    deliveries: list[dict[str, Any]] = []
+    chunks = _split_reply_text(reply_text)
+    for index, chunk in enumerate(chunks, start=1):
+        delivery = send_text_message(
+            account,
+            user_id=normalized["user_id"],
+            context_token=normalized["context_token"],
+            text=chunk,
+        )
+        runtime_state.upsert_bridge_message(
+            bridge=BRIDGE_NAME,
+            direction="outbound",
+            message_id=str(delivery.get("message_id", "")) or f"out-{normalized['message_id']}-{index}",
+            status=status,
+            payload={
+                "text": chunk,
+                "chat_ref": normalized["chat_ref"],
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+            },
+            project_name=project_name,
+            session_id=session_id,
+        )
+        deliveries.append(delivery)
+    return deliveries
 
 
 def _continuation_requested(text: str) -> bool:
@@ -713,26 +855,44 @@ def route_private_message(message: dict[str, Any], *, send_reply: bool = True) -
     )
     text = str(normalized["text"]).strip()
     if not text:
-        return {"ok": False, "reason": "empty_text", "inbound_record": inbound_record}
+        reply_text = _unsupported_input_reply(str(normalized.get("content_kind", "")))
+        deliveries: list[dict[str, Any]] = []
+        if send_reply and normalized["context_token"] and reply_text:
+            deliveries = _deliver_reply_text(
+                account,
+                normalized,
+                reply_text=reply_text,
+                status="unsupported_input",
+                project_name=normalized["project_name"],
+                session_id="",
+            )
+        return {
+            "ok": False,
+            "reason": "unsupported_input" if reply_text else "empty_text",
+            "inbound_record": inbound_record,
+            "reply_text": reply_text,
+            "delivery": deliveries[0] if deliveries else {},
+            "deliveries": deliveries,
+        }
     if _should_block_high_risk(text):
         blocked_text = "微信私聊桥接第一版暂不执行高风险或系统级动作。请改走 Feishu 私聊 CoCo 完成授权后再执行。"
-        delivery = {}
+        deliveries: list[dict[str, Any]] = []
         if send_reply and normalized["context_token"]:
-            delivery = send_text_message(
+            deliveries = _deliver_reply_text(
                 account,
-                user_id=normalized["user_id"],
-                context_token=normalized["context_token"],
-                text=blocked_text,
-            )
-            runtime_state.upsert_bridge_message(
-                bridge=BRIDGE_NAME,
-                direction="outbound",
-                message_id=str(delivery.get("message_id", "")) or f"out-{normalized['message_id']}",
+                normalized,
+                reply_text=blocked_text,
                 status="blocked_high_risk",
-                payload={"text": blocked_text, "chat_ref": normalized["chat_ref"]},
                 project_name=normalized["project_name"],
+                session_id="",
             )
-        return {"ok": False, "reason": "high_risk_not_supported", "reply_text": blocked_text, "delivery": delivery}
+        return {
+            "ok": False,
+            "reason": "high_risk_not_supported",
+            "reply_text": blocked_text,
+            "delivery": deliveries[0] if deliveries else {},
+            "deliveries": deliveries,
+        }
 
     binding = runtime_state.fetch_bridge_chat_binding(bridge=BRIDGE_NAME, chat_ref=normalized["chat_ref"])
     if not str(binding.get("binding_scope", "")).strip():
@@ -775,20 +935,13 @@ def route_private_message(message: dict[str, Any], *, send_reply: bool = True) -
         explicit_project_name=explicit_project_name,
     )
     reply_text = _reply_text_from_broker_result(broker_result)
-    delivery = {}
+    deliveries: list[dict[str, Any]] = []
     if send_reply and normalized["context_token"] and reply_text:
-        delivery = send_text_message(
+        deliveries = _deliver_reply_text(
             account,
-            user_id=normalized["user_id"],
-            context_token=normalized["context_token"],
-            text=reply_text,
-        )
-        runtime_state.upsert_bridge_message(
-            bridge=BRIDGE_NAME,
-            direction="outbound",
-            message_id=str(delivery.get("message_id", "")) or f"out-{normalized['message_id']}",
+            normalized,
+            reply_text=reply_text,
             status="sent" if broker_result.get("ok") else "error",
-            payload={"text": reply_text, "chat_ref": normalized["chat_ref"]},
             project_name=str(updated_binding.get("project_name", "")).strip(),
             session_id=str(updated_binding.get("session_id", "")).strip(),
         )
@@ -798,7 +951,8 @@ def route_private_message(message: dict[str, Any], *, send_reply: bool = True) -
         "binding": updated_binding,
         "broker_result": broker_result,
         "reply_text": reply_text,
-        "delivery": delivery,
+        "delivery": deliveries[0] if deliveries else {},
+        "deliveries": deliveries,
     }
 
 
@@ -993,6 +1147,26 @@ def cmd_login_qr_wait(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_login(args: argparse.Namespace) -> int:
+    started = start_login_qr(base_url=args.base_url, bot_type=args.bot_type, account_id=args.account_id)
+    image_path = str(started.get("qrcode_image_path") or "").strip()
+    opened = False
+    if image_path and not args.no_open:
+        try:
+            subprocess.run(["open", image_path], check=False, capture_output=True, text=True)
+            opened = True
+        except Exception:
+            opened = False
+    waited = wait_for_login(timeout_seconds=args.timeout)
+    payload = {
+        "started": started,
+        "opened_image": opened,
+        "wait": waited,
+    }
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0 if waited.get("connected") else 1
+
+
 def cmd_run_once(args: argparse.Namespace) -> int:
     payload = safe_run_once(send_reply=not args.no_reply, mode="manual")
     print(json.dumps(payload, ensure_ascii=False))
@@ -1042,6 +1216,88 @@ def cmd_install_launchagent(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_enable(args: argparse.Namespace) -> int:
+    login_started = start_login_qr(base_url=args.base_url, bot_type=args.bot_type, account_id=args.account_id)
+    image_path = str(login_started.get("qrcode_image_path") or "").strip()
+    opened = False
+    if image_path and not args.no_open:
+        try:
+            subprocess.run(["open", image_path], check=False, capture_output=True, text=True)
+            opened = True
+        except Exception:
+            opened = False
+    login_wait = wait_for_login(timeout_seconds=args.timeout)
+    if not login_wait.get("connected"):
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "stage": "login",
+                    "started": login_started,
+                    "opened_image": opened,
+                    "wait": login_wait,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
+    install_payload = launch_agent_payload(poll_interval=args.poll_interval, error_backoff=args.error_backoff)
+    plist_path = launch_agent_plist_path(LAUNCH_AGENT_NAME)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    log_stdout_path().parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_dumps(install_payload), encoding="utf-8")
+    domain = f"gui/{os.getuid()}"
+    run_launchctl("bootout", domain, str(plist_path))
+    bootstrap = run_launchctl("bootstrap", domain, str(plist_path))
+    if bootstrap.returncode != 0:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "stage": "install-launchagent",
+                    "started": login_started,
+                    "opened_image": opened,
+                    "wait": login_wait,
+                    "stderr": bootstrap.stderr.strip(),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return bootstrap.returncode
+    kickstart = run_launchctl("kickstart", "-k", f"{domain}/{LAUNCH_AGENT_NAME}")
+    if kickstart.returncode != 0:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "stage": "kickstart",
+                    "started": login_started,
+                    "opened_image": opened,
+                    "wait": login_wait,
+                    "stderr": kickstart.stderr.strip(),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return kickstart.returncode
+    payload = {
+        "ok": True,
+        "started": login_started,
+        "opened_image": opened,
+        "wait": login_wait,
+        "launchagent": {
+            "installed": True,
+            "loaded": True,
+            "poll_interval": int(args.poll_interval),
+            "error_backoff": int(args.error_backoff),
+            "plist": str(plist_path),
+        },
+        "status": bridge_status(),
+    }
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
 def cmd_uninstall_launchagent(_args: argparse.Namespace) -> int:
     plist_path = launch_agent_plist_path(LAUNCH_AGENT_NAME)
     domain = f"gui/{os.getuid()}"
@@ -1072,6 +1328,14 @@ def build_parser() -> argparse.ArgumentParser:
     login_qr_wait.add_argument("--timeout", type=int, default=180)
     login_qr_wait.set_defaults(func=cmd_login_qr_wait)
 
+    login_parser = subparsers.add_parser("login")
+    login_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    login_parser.add_argument("--bot-type", default=DEFAULT_BOT_TYPE)
+    login_parser.add_argument("--account-id", default="default")
+    login_parser.add_argument("--timeout", type=int, default=180)
+    login_parser.add_argument("--no-open", action="store_true")
+    login_parser.set_defaults(func=cmd_login)
+
     run_once_parser = subparsers.add_parser("run-once")
     run_once_parser.add_argument("--no-reply", action="store_true")
     run_once_parser.set_defaults(func=cmd_run_once)
@@ -1086,6 +1350,16 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL)
     install_parser.add_argument("--error-backoff", type=int, default=DEFAULT_ERROR_BACKOFF)
     install_parser.set_defaults(func=cmd_install_launchagent)
+
+    enable_parser = subparsers.add_parser("enable")
+    enable_parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    enable_parser.add_argument("--bot-type", default=DEFAULT_BOT_TYPE)
+    enable_parser.add_argument("--account-id", default="default")
+    enable_parser.add_argument("--timeout", type=int, default=180)
+    enable_parser.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL)
+    enable_parser.add_argument("--error-backoff", type=int, default=DEFAULT_ERROR_BACKOFF)
+    enable_parser.add_argument("--no-open", action="store_true")
+    enable_parser.set_defaults(func=cmd_enable)
 
     uninstall_parser = subparsers.add_parser("uninstall-launchagent")
     uninstall_parser.set_defaults(func=cmd_uninstall_launchagent)
