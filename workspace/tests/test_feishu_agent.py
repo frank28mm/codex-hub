@@ -406,7 +406,7 @@ def test_user_token_auto_refresh_uses_oidc_and_preserves_refresh_token(sample_en
 
 def test_meeting_create_and_queries_use_vchat(sample_env) -> None:
     agent = build_agent(sample_env)
-    create_payload = agent.meeting_create({"title": "TINT 周会", "start": "2026-03-18 19:00", "attendees": ["operator@example.com"]})
+    create_payload = agent.meeting_create({"title": "SampleProj 周会", "start": "2026-03-18 19:00", "attendees": ["operator@example.com"]})
     get_payload = agent.meeting_get({"id": "evt_123", "calendar": "cal_meeting"})
     list_payload = agent.meeting_list({"calendar": "cal_meeting"})
     cancel_payload = agent.meeting_cancel({"id": "evt_123", "calendar": "cal_meeting"})

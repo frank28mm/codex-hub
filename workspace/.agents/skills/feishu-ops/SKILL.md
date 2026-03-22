@@ -99,7 +99,7 @@ python3 ops/local_broker.py feishu-op \
 python3 ops/local_broker.py feishu-op \
   --domain meeting \
   --action create \
-  --payload-json '{"title":"TINT 项目周会","start":"2026-03-18 19:00","end":"2026-03-18 19:30","attendees":["user@example.com"]}'
+  --payload-json '{"title":"产品项目周会","start":"2026-03-18 19:00","end":"2026-03-18 19:30","attendees":["user@example.com"]}'
 ```
 
 ```bash

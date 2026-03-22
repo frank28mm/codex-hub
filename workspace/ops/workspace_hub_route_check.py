@@ -88,20 +88,6 @@ def default_cases() -> list[RouteCase]:
             expected_scope="project",
             expected_board_suffix=f"{PROJECT_NAME}-项目板.md",
         ),
-        RouteCase(
-            name="TINT-frontend-topic",
-            project_name="TINT",
-            prompt="我们继续聊 TINT 前端专题",
-            expected_scope="topic",
-            expected_board_suffix="TINT-前端-跟进板.md",
-        ),
-        RouteCase(
-            name="工作-碰碰酷奇-科技馆-topic",
-            project_name="工作-碰碰酷奇",
-            prompt="我们继续聊工作-碰碰酷奇 科技馆线",
-            expected_scope="topic",
-            expected_board_suffix="工作-碰碰酷奇-科技馆跟进板.md",
-        ),
     ]
 
 

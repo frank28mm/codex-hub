@@ -219,7 +219,7 @@ async function testShouldRunInBackgroundSkipsStatusQuestions() {
     true,
   );
   assert.equal(
-    shouldRunInBackground({ text: "你先查 TINT 的 Supabase 配置和 .env 现状，再告诉我现在用的是哪套" }),
+    shouldRunInBackground({ text: "你先查 SampleProj 的 Supabase 配置和 .env 现状，再告诉我现在用的是哪套" }),
     false,
   );
   assert.equal(
@@ -2019,9 +2019,9 @@ async function testChatBindingDeclarationRoutesWithProjectContext() {
   await withTempProjectRegistry(
     [
       {
-        project_name: "TINT",
-        aliases: ["Tint", "TINT"],
-        path: "03_semantic/projects/TINT.md",
+        project_name: "SampleProj",
+        aliases: ["Sample", "SampleProj"],
+        path: "03_semantic/projects/SampleProj.md",
         status: "active",
         summary_note: "Sample product project",
       },
@@ -2084,7 +2084,7 @@ async function testChatBindingDeclarationRoutesWithProjectContext() {
         message: {
           message_id: "bind-msg",
           message_type: "text",
-          content: JSON.stringify({ text: "哦不是，我说的是TINT。在这个聊天群里面，我们只聊TINT @_user_1" }),
+          content: JSON.stringify({ text: "哦不是，我说的是 SampleProj。在这个聊天群里面，我们只聊 SampleProj @_user_1" }),
           chat_type: "group",
           chat_id: "chat-bind",
         },
@@ -2092,10 +2092,10 @@ async function testChatBindingDeclarationRoutesWithProjectContext() {
       });
       assert.equal(bindingResult.ok, true);
       assert.equal(bindingResult.direct, true);
-      assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `TINT`/);
+      assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `SampleProj`/);
 
       const binding = await service.getBindingForConversationKey("chat-bind");
-      assert.equal(binding?.project_name, "TINT");
+      assert.equal(binding?.project_name, "SampleProj");
       assert.equal(binding?.topic_name, "");
 
       const followupResult = await service.handleMessageEvent({
@@ -2111,9 +2111,9 @@ async function testChatBindingDeclarationRoutesWithProjectContext() {
       assert.equal(followupResult.ok, true);
       const execCall = brokerCalls.find((item) => item.command === "codex-exec");
       assert.ok(execCall);
-      assert.equal(execCall.payload.project_name, "TINT");
+      assert.equal(execCall.payload.project_name, "SampleProj");
       assert.equal(execCall.payload.topic_name, undefined);
-      assert.equal(execCall.payload.thread_label, "TINT");
+      assert.equal(execCall.payload.thread_label, "SampleProj");
       assert.equal(execCall.payload.no_auto_resume, true);
 
       await service.handleMessageEvent({
@@ -2134,7 +2134,7 @@ async function testChatBindingDeclarationRoutesWithProjectContext() {
         message: {
           message_id: "bind-msg-4",
           message_type: "text",
-          content: JSON.stringify({ text: "继续说 TINT 这个项目的后续安排" }),
+          content: JSON.stringify({ text: "继续说 SampleProj 这个项目的后续安排" }),
           chat_type: "group",
           chat_id: "chat-bind",
         },
@@ -2152,9 +2152,9 @@ async function testChatBindingDeclarationHandlesNaturalProjectPhrase() {
   await withTempProjectRegistry(
     [
       {
-        project_name: "工作-碰碰酷奇",
-        aliases: ["碰碰酷奇", "碰碰酷奇的项目"],
-        path: "03_semantic/projects/工作-碰碰酷奇.md",
+        project_name: "示例交付",
+        aliases: ["示例交付", "示例交付项目"],
+        path: "03_semantic/projects/示例交付.md",
         status: "active",
         summary_note: "Sample delivery project",
       },
@@ -2217,7 +2217,7 @@ async function testChatBindingDeclarationHandlesNaturalProjectPhrase() {
           message_id: "bind-natural",
           message_type: "text",
           content: JSON.stringify({
-            text: "@_user_1 这个群组只有你和我。你可以叫我吉祥或者Frank 。在这里，我们只聊碰碰酷奇的项目",
+            text: "@_user_1 这个群组只有你和我。你可以叫我吉祥或者Frank 。在这里，我们只聊示例交付的项目",
           }),
           chat_type: "group",
           chat_id: "chat-natural",
@@ -2226,10 +2226,10 @@ async function testChatBindingDeclarationHandlesNaturalProjectPhrase() {
       });
       assert.equal(bindingResult.ok, true);
       assert.equal(bindingResult.direct, true);
-      assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `工作-碰碰酷奇`/);
+      assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `示例交付`/);
 
       const binding = await service.getBindingForConversationKey("chat-natural");
-      assert.equal(binding?.project_name, "工作-碰碰酷奇");
+      assert.equal(binding?.project_name, "示例交付");
       assert.equal(binding?.topic_name, "");
     },
   );
@@ -2241,9 +2241,9 @@ async function testChatBindingDeclarationCapturesTopicHint() {
   await withTempProjectRegistry(
     [
       {
-        project_name: "工作-碰碰酷奇",
-        aliases: ["碰碰酷奇"],
-        path: "03_semantic/projects/工作-碰碰酷奇.md",
+        project_name: "示例交付",
+        aliases: ["示例交付"],
+        path: "03_semantic/projects/示例交付.md",
         status: "active",
         summary_note: "Sample delivery project",
       },
@@ -2306,7 +2306,7 @@ async function testChatBindingDeclarationCapturesTopicHint() {
         message: {
           message_id: "topic-bind-msg",
           message_type: "text",
-          content: JSON.stringify({ text: "这个群只聊 碰碰酷奇 科技馆" }),
+          content: JSON.stringify({ text: "这个群只聊 示例交付 展馆线" }),
           chat_type: "group",
           chat_id: "chat-topic",
         },
@@ -2314,11 +2314,11 @@ async function testChatBindingDeclarationCapturesTopicHint() {
       });
       assert.equal(bindingResult.ok, true);
       assert.equal(bindingResult.direct, true);
-      assert.match(bindingResult.replyPreview, /话题 `科技馆`/);
+      assert.match(bindingResult.replyPreview, /话题 `展馆线`/);
 
       const binding = await service.getBindingForConversationKey("chat-topic");
-      assert.equal(binding?.project_name, "工作-碰碰酷奇");
-      assert.equal(binding?.topic_name, "科技馆");
+      assert.equal(binding?.project_name, "示例交付");
+      assert.equal(binding?.topic_name, "展馆线");
 
       const followup = await service.handleMessageEvent({
         message: {
@@ -2333,9 +2333,9 @@ async function testChatBindingDeclarationCapturesTopicHint() {
       assert.equal(followup.ok, true);
       const execCall = brokerCalls.find((item) => item.command === "codex-exec");
       assert.ok(execCall);
-      assert.equal(execCall.payload.project_name, "工作-碰碰酷奇");
-      assert.equal(execCall.payload.topic_name, "科技馆");
-      assert.equal(execCall.payload.thread_label, "工作-碰碰酷奇 / 科技馆");
+      assert.equal(execCall.payload.project_name, "示例交付");
+      assert.equal(execCall.payload.topic_name, "展馆线");
+      assert.equal(execCall.payload.thread_label, "示例交付 / 展馆线");
       assert.equal(execCall.payload.no_auto_resume, true);
     },
   );
@@ -2346,9 +2346,9 @@ async function testChatBindingDeclarationReportsBrokerValidationFailure() {
   await withTempProjectRegistry(
     [
       {
-        project_name: "工作-碰碰酷奇",
-        aliases: ["碰碰酷奇"],
-        path: "03_semantic/projects/工作-碰碰酷奇.md",
+        project_name: "示例交付",
+        aliases: ["示例交付"],
+        path: "03_semantic/projects/示例交付.md",
         status: "active",
         summary_note: "Sample delivery project",
       },
@@ -2377,8 +2377,8 @@ async function testChatBindingDeclarationReportsBrokerValidationFailure() {
               if (payload.binding_json) {
                 return {
                   ok: false,
-                  error: "unknown topic_name `bad-topic` for project `工作-碰碰酷奇`",
-                  available_topics: ["科技馆"],
+                  error: "unknown topic_name `bad-topic` for project `示例交付`",
+                  available_topics: ["展馆线"],
                 };
               }
               return { ok: true, binding: bindings.get(chatRef) || null };
@@ -2404,7 +2404,7 @@ async function testChatBindingDeclarationReportsBrokerValidationFailure() {
         message: {
           message_id: "topic-bind-fail",
           message_type: "text",
-          content: JSON.stringify({ text: "这个群只聊 碰碰酷奇 bad-topic" }),
+          content: JSON.stringify({ text: "这个群只聊 示例交付 bad-topic" }),
           chat_type: "group",
           chat_id: "chat-topic-fail",
         },
@@ -2414,7 +2414,7 @@ async function testChatBindingDeclarationReportsBrokerValidationFailure() {
       assert.equal(result.ok, true);
       assert.equal(result.direct, true);
       assert.match(result.replyPreview, /绑定没有成功/);
-      assert.match(result.replyPreview, /科技馆/);
+      assert.match(result.replyPreview, /展馆线/);
       assert.equal(await service.getBindingForConversationKey("chat-topic-fail"), null);
     },
   );
@@ -2446,7 +2446,7 @@ async function testPausedProjectReturnsPauseSummary() {
               chat_ref: "chat-paused",
               bridge: "feishu",
               binding_scope: "project",
-              project_name: "TINT",
+              project_name: "SampleProj",
               topic_name: "",
               session_id: "",
               metadata: {},
@@ -2460,7 +2460,7 @@ async function testPausedProjectReturnsPauseSummary() {
             reason: "project_paused",
             error_type: "project_paused",
             pause: {
-              summary: "项目 `TINT` 当前已暂停执行，请先恢复后再发起任务。",
+              summary: "项目 `SampleProj` 当前已暂停执行，请先恢复后再发起任务。",
             },
           };
         }
@@ -2491,7 +2491,7 @@ async function testPausedProjectReturnsPauseSummary() {
   });
 
   assert.equal(result.ok, true);
-  assert.match(result.replyPreview, /TINT/);
+  assert.match(result.replyPreview, /SampleProj/);
   assert.match(result.replyPreview, /暂停执行/);
 }
 
@@ -2595,9 +2595,9 @@ async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
   await withTempProjectRegistry(
     [
       {
-        project_name: "TINT",
-        aliases: ["Tint", "TINT"],
-        path: "03_semantic/projects/TINT.md",
+        project_name: "SampleProj",
+        aliases: ["Sample", "SampleProj"],
+        path: "03_semantic/projects/SampleProj.md",
         status: "active",
         summary_note: "Sample education project",
       },
@@ -2634,7 +2634,7 @@ async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
             if (command === "codex-exec") {
               return {
                 ok: true,
-                stdout: "已切到 TINT 上下文并完成摘要。",
+                stdout: "已切到 SampleProj 上下文并完成摘要。",
                 stderr: "session id: 019ce000-0000-7000-8000-000000000999",
               };
             }
@@ -2659,7 +2659,7 @@ async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
         message: {
           message_id: "route-tint-1",
           message_type: "text",
-          content: JSON.stringify({ text: "继续看一下 TINT 项目当前的情况，然后汇报。" }),
+          content: JSON.stringify({ text: "继续看一下 SampleProj 项目当前的情况，然后汇报。" }),
           chat_type: "group",
           chat_id: "chat-soft-route",
         },
@@ -2669,9 +2669,9 @@ async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
       assert.equal(result.ok, true);
       const execCall = brokerCalls.find((item) => item.command === "codex-exec");
       assert.ok(execCall);
-      assert.equal(execCall.payload.project_name, "TINT");
+      assert.equal(execCall.payload.project_name, "SampleProj");
       const binding = bindings.get("chat-soft-route");
-      assert.equal(binding?.project_name, "TINT");
+      assert.equal(binding?.project_name, "SampleProj");
       assert.equal(binding?.session_id, "019ce000-0000-7000-8000-000000000999");
       assert.equal(binding?.metadata?.last_route_source, "message_project_alias");
     },

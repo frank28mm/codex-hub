@@ -1335,7 +1335,7 @@ def test_bridge_conversations_suppress_attention_for_stale_threads(sample_env, m
             "chat_id": "chat_stale",
             "chat_type": "group",
             "open_id": "ou_stale",
-            "text": "这个群只聊 TINT",
+            "text": "这个群只聊 SampleProj",
             "created_at": "2026-03-14T00:00:00Z",
         },
     )
@@ -1343,7 +1343,7 @@ def test_bridge_conversations_suppress_attention_for_stale_threads(sample_env, m
         bridge="feishu",
         chat_ref="chat_stale",
         binding_scope="project",
-        project_name="TINT",
+        project_name="SampleProj",
         topic_name="",
         session_id="sess-stale",
     )

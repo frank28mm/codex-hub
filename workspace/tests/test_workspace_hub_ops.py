@@ -61,9 +61,18 @@ def test_workspace_hub_route_check_ignores_shadow_vault_override_outside_fixture
     monkeypatch.setenv("WORKSPACE_HUB_EXPECTED_VAULT_ROOT", "/tmp/codex-hub-shadow-workspace")
     workspace_hub_route_check = importlib.reload(route_module)
 
-    assert workspace_hub_route_check.expected_vault_root() == Path(
-        "/tmp/codex-hub-shadow-memory"
-    )
+    assert workspace_hub_route_check.expected_vault_root() == workspace_hub_route_check.DEFAULT_VAULT_ROOT
+
+
+def test_workspace_hub_route_check_default_cases_skip_missing_topic_boards(sample_env) -> None:
+    from ops import workspace_hub_route_check as route_module
+
+    workspace_hub_route_check = importlib.reload(route_module)
+    names = {case.name for case in workspace_hub_route_check.default_cases()}
+
+    assert "workspace-system-project" in names
+    assert "workspace-system-legacy-alias" in names
+    assert len(names) == 2
 
 
 def test_workspace_hub_health_check_codex_automation_status_uses_expected_roots(sample_env, monkeypatch, tmp_path: Path) -> None:
@@ -126,12 +135,8 @@ def test_workspace_hub_health_check_ignores_shadow_vault_override_outside_fixtur
     monkeypatch.setenv("WORKSPACE_HUB_EXPECTED_VAULT_ROOT", "/tmp/codex-hub-shadow-workspace")
     workspace_hub_health_check = importlib.reload(health_module)
 
-    assert workspace_hub_health_check.expected_vault_root() == Path(
-        "/tmp/codex-hub-shadow-memory"
-    )
-    assert workspace_hub_health_check.vault_root() == Path(
-        "/tmp/codex-hub-shadow-memory"
-    )
+    assert workspace_hub_health_check.expected_vault_root() == workspace_hub_health_check.DEFAULT_VAULT_ROOT
+    assert workspace_hub_health_check.vault_root() == workspace_hub_health_check.DEFAULT_VAULT_ROOT
 
 
 def test_workspace_hub_health_check_writes_logs_and_syncs_board(sample_env, monkeypatch) -> None:

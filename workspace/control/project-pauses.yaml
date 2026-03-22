@@ -1,14 +1,2 @@
 version: 1
-entries:
-  - id: ppkq-rest-day-2026-03-14
-    project_name: 工作-碰碰酷奇
-    start_date: 2026-03-14
-    end_date: 2026-03-14
-    scopes:
-      - session_start
-      - session_writeback
-      - automation
-      - broker_execution
-    reason: 用户于 2026-03-14 休息；当天不执行该项目相关日报、自动化与新开工会话。
-    requested_by: Frank
-    requested_at: 2026-03-14T10:00:00+08:00
+entries: []

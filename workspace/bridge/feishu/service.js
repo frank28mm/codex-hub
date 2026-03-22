@@ -735,7 +735,7 @@ function buildBindingFailureReply(payload) {
     if (declaredTarget) {
       lines.push(`我没有在这句话里识别出正式项目名：\`${declaredTarget}\``);
     }
-    lines.push("首次绑定时，请先用正式项目名或项目别名重新声明，例如：这个群只聊 TINT。");
+    lines.push("首次绑定时，请先用正式项目名或项目别名重新声明，例如：这个群只聊 SampleProj。");
     return lines.join("\n");
   }
   const lines = ["这个群的绑定没有成功。", summarizeBrokerFailure(payload, "绑定失败")];
@@ -745,7 +745,7 @@ function buildBindingFailureReply(payload) {
   if (availableTopics.length) {
     lines.push(`当前可用专题：${availableTopics.join(" / ")}`);
   }
-  lines.push("请先用正式项目名或项目别名重新声明，例如：这个群只聊 TINT。");
+  lines.push("请先用正式项目名或项目别名重新声明，例如：这个群只聊 SampleProj。");
   return lines.join("\n");
 }
 
@@ -2316,9 +2316,9 @@ function createFeishuLongConnectionService({
     return addressReply(
       [
         "如果你希望这个群默认聚焦某个项目，可以告诉我：",
-        "- 这个群只聊 TINT",
+        "- 这个群只聊 SampleProj",
         "- 这个群只聊 Codex Hub 前端",
-        "- 这个群只聊 工作-碰碰酷奇 科技馆",
+        "- 这个群只聊 示例交付 展馆线",
         "不声明也可以，我会优先根据你当前消息里提到的项目来路由上下文。",
       ].join("\n"),
     );
