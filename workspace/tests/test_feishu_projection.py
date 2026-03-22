@@ -45,6 +45,15 @@ class ProjectionAgent:
             "tables": [{"table_id": item["table_id"], "name": item["name"]} for item in self.tables.values()],
         }
 
+    def table_get_app(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = payload
+        return {"app": {"app_token": self.app_token, "name": "Codex Hub 项目任务看板"}}
+
+    def table_delete_table(self, payload: dict[str, Any]) -> dict[str, Any]:
+        table_id = str(payload.get("table") or "")
+        self.tables.pop(table_id, None)
+        return {"ok": True}
+
     def table_create(self, payload: dict[str, Any]) -> dict[str, Any]:
         table = self._new_table(str(payload.get("name") or "新表"), str(payload.get("default_view_name") or "默认视图"))
         for field in list(payload.get("fields") or []):
@@ -65,9 +74,32 @@ class ProjectionAgent:
             if str(existing.get("field_name") or "").strip() == field_name:
                 return {"field_id": existing["field_id"], "field_name": existing["field_name"]}
         self._field_counter += 1
-        created = {"field_id": f"fld_projection_{self._field_counter}", **field}
+        created = {
+            "field_id": f"fld_projection_{self._field_counter}",
+            "is_primary": not table["fields"],
+            **field,
+        }
         table["fields"].append(created)
         return {"field_id": created["field_id"], "field_name": created["field_name"]}
+
+    def table_update_field(self, payload: dict[str, Any]) -> dict[str, Any]:
+        table = self.tables[str(payload.get("table") or "")]
+        field_id = str(payload.get("field_id") or payload.get("field") or "")
+        for field in table["fields"]:
+            if field["field_id"] != field_id:
+                continue
+            if payload.get("field_name") or payload.get("name"):
+                field["field_name"] = str(payload.get("field_name") or payload.get("name") or "")
+            if payload.get("property") is not None:
+                field["property"] = payload.get("property")
+            return {"field": dict(field)}
+        raise AssertionError(f"unknown field {field_id}")
+
+    def table_delete_field(self, payload: dict[str, Any]) -> dict[str, Any]:
+        table = self.tables[str(payload.get("table") or "")]
+        field_id = str(payload.get("field_id") or payload.get("field") or "")
+        table["fields"] = [field for field in table["fields"] if field["field_id"] != field_id]
+        return {"ok": True}
 
     def table_views(self, payload: dict[str, Any]) -> dict[str, Any]:
         table = self.tables[str(payload.get("table") or "")]
@@ -88,6 +120,7 @@ class ProjectionAgent:
             "view_id": f"vew_projection_{self._view_counter}",
             "view_name": str(payload.get("name") or payload.get("view_name") or ""),
             "view_type": str(payload.get("type") or payload.get("view_type") or "grid"),
+            "property": None,
         }
         table["views"].append(created)
         return {"view": created}
@@ -102,8 +135,16 @@ class ProjectionAgent:
                 view["view_name"] = str(payload.get("name") or "")
             if payload.get("type"):
                 view["view_type"] = str(payload.get("type") or "")
+            if payload.get("property") is not None:
+                view["property"] = payload.get("property")
             return {"view": dict(view)}
         raise AssertionError(f"unknown view {view_id}")
+
+    def table_delete_view(self, payload: dict[str, Any]) -> dict[str, Any]:
+        table = self.tables[str(payload.get("table") or "")]
+        view_id = str(payload.get("view") or payload.get("view_id") or "")
+        table["views"] = [view for view in table["views"] if view["view_id"] != view_id]
+        return {"ok": True}
 
     def table_records(self, payload: dict[str, Any]) -> dict[str, Any]:
         table = self.tables[str(payload.get("table") or "")]
@@ -186,20 +227,24 @@ def test_snapshot_builds_project_and_task_rows_from_structured_facts(monkeypatch
 
     assert payload["ok"] is True
     assert payload["schema_version"] == "feishu-projection.v2"
-    assert payload["row_counts"] == {"projects_overview": 1, "tasks_current": 2}
+    assert payload["row_counts"]["projects_overview"] == 1
+    assert payload["row_counts"]["tasks_current"] == 2
+    assert payload["row_counts"]["operations_overview"] >= 7
     assert payload["projects_overview_rows"][0]["阻塞任务数"] == 1
     assert payload["projects_overview_rows"][0]["未完成任务数"] == 2
     assert payload["tasks_current_rows"][0]["projection_key"].startswith("task::SampleProj::")
     assert {item["状态"] for item in payload["tasks_current_rows"]} == {"doing", "blocked"}
     assert any(item["专题"] == "需求" for item in payload["tasks_current_rows"])
+    assert any(item["指标名称"] == "Blocked" and item["数值"] == 1 for item in payload["operations_overview_rows"])
 
 
 def test_bitable_target_status_and_preview_reflect_projection_contract(monkeypatch) -> None:
     rows = {
         "ok": True,
-        "row_counts": {"projects_overview": 1, "tasks_current": 2},
+        "row_counts": {"projects_overview": 1, "tasks_current": 2, "operations_overview": 1},
         "projects_overview_rows": [{"projection_key": "project::SampleProj", "项目名": "SampleProj"}],
         "tasks_current_rows": [{"projection_key": "task::SampleProj::project::SP-1", "任务标题": "冻结主线契约"}],
+        "operations_overview_rows": [{"projection_key": "overview::active_tasks", "指标名称": "当前任务总数"}],
     }
     monkeypatch.setattr(feishu_projection, "snapshot", lambda project_name="": rows)
 
@@ -207,10 +252,106 @@ def test_bitable_target_status_and_preview_reflect_projection_contract(monkeypat
     preview = feishu_projection.bitable_publish_preview(project_name="SampleProj")
 
     assert target["bitable_mode"] == "read_only_projection"
-    assert target["tables"]["projects_overview"]["view_names"] == ["全部项目", "按状态看板", "按优先级", "最近更新", "需关注项目"]
-    assert target["tables"]["tasks_current"]["view_names"] == ["全部任务", "按状态看板", "按项目分组", "阻塞项", "最近更新任务"]
-    assert preview["preview_counts"] == {"projects_overview": 1, "tasks_current": 2}
+    assert target["tables"]["projects_overview"]["view_names"] == ["全部项目", "状态看板", "高优先级项目", "需关注项目", "阻塞项目"]
+    assert target["tables"]["tasks_current"]["view_names"] == ["全部任务", "状态看板", "项目任务表", "Doing任务", "阻塞项"]
+    assert target["tables"]["operations_overview"]["view_names"] == ["全部指标", "数字卡片", "重点指标"]
+    assert preview["preview_counts"]["projects_overview"] == 1
+    assert preview["preview_counts"]["tasks_current"] == 2
     assert preview["preview_rows"]["projects_overview"][0]["项目名"] == "SampleProj"
+    assert preview["preview_rows"]["operations_overview"][0]["指标名称"]
+
+
+def test_build_view_property_uses_snake_case_and_hidden_fields() -> None:
+    field_map = {
+        "项目名": {"field_id": "fld_project_name"},
+        "状态": {"field_id": "fld_status"},
+        "优先级": {"field_id": "fld_priority"},
+        "projection_key": {"field_id": "fld_projection_key"},
+    }
+    view = {
+        "hidden_fields_by_name": ["projection_key"],
+        "groups": [{"field_name": "状态"}],
+        "sorts": [{"field_name": "优先级", "desc": True}],
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_name": "状态", "operator": "is", "value": ["doing"]},
+            ],
+        },
+    }
+
+    property_payload = feishu_projection._build_view_property(view, field_map)
+
+    assert property_payload == {
+        "hidden_fields": ["fld_projection_key"],
+        "group_info": [{"field_id": "fld_status", "desc": False}],
+        "sort_info": [{"field_id": "fld_priority", "desc": True}],
+        "filter_info": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_id": "fld_status", "operator": "is", "value": ["doing"]},
+            ],
+        },
+    }
+
+
+def test_build_view_property_normalizes_legacy_checkbox_filters() -> None:
+    field_map = {
+        "是否重点": {"field_id": "fld_focus"},
+    }
+    view = {
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_name": "是否重点", "operator": "isChecked", "value": "true"},
+            ],
+        },
+    }
+
+    property_payload = feishu_projection._build_view_property(view, field_map)
+
+    assert property_payload == {
+        "filter_info": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_id": "fld_focus", "operator": "is", "value": True},
+            ],
+        },
+    }
+
+
+def test_build_view_property_maps_single_select_names_to_option_ids() -> None:
+    field_map = {
+        "状态": {
+            "field_id": "fld_status",
+            "type": 3,
+            "property": {
+                "options": [
+                    {"id": "opt_todo", "name": "todo"},
+                    {"id": "opt_blocked", "name": "blocked"},
+                ]
+            },
+        },
+    }
+    view = {
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_name": "状态", "operator": "is", "value": "[\"blocked\"]"},
+            ],
+        },
+    }
+
+    property_payload = feishu_projection._build_view_property(view, field_map)
+
+    assert property_payload == {
+        "filter_info": {
+            "conjunction": "and",
+            "conditions": [
+                {"field_id": "fld_status", "operator": "is", "value": "[\"opt_blocked\"]"},
+            ],
+        },
+    }
 
 
 def test_ensure_projection_resources_creates_app_tables_fields_views_and_persists_registry(sample_env, monkeypatch) -> None:
@@ -224,15 +365,55 @@ def test_ensure_projection_resources_creates_app_tables_fields_views_and_persist
     assert registry["projection"]["app"]["app_token"] == "app_projection"
     assert registry["projection"]["tables"]["projects_overview"]["table_id"]
     assert registry["projection"]["tables"]["tasks_current"]["table_id"]
+    assert registry["projection"]["tables"]["operations_overview"]["table_id"]
     assert registry["aliases"]["tables"]["codex_hub_projects_overview"]["table_id"] == registry["projection"]["tables"]["projects_overview"]["table_id"]
     assert registry["aliases"]["tables"]["codex_hub_tasks_current"]["table_id"] == registry["projection"]["tables"]["tasks_current"]["table_id"]
+    assert registry["aliases"]["tables"]["codex_hub_operations_overview"]["table_id"] == registry["projection"]["tables"]["operations_overview"]["table_id"]
 
     projects_table = fake_agent.tables[registry["projection"]["tables"]["projects_overview"]["table_id"]]
     tasks_table = fake_agent.tables[registry["projection"]["tables"]["tasks_current"]["table_id"]]
+    overview_table = fake_agent.tables[registry["projection"]["tables"]["operations_overview"]["table_id"]]
     assert {field["field_name"] for field in projects_table["fields"]} >= {"projection_key", "项目名", "状态", "需关注"}
     assert {field["field_name"] for field in tasks_table["fields"]} >= {"projection_key", "项目", "任务标题", "状态"}
-    assert {view["view_name"] for view in projects_table["views"]} >= {"全部项目", "按状态看板", "最近更新"}
-    assert {view["view_name"] for view in tasks_table["views"]} >= {"全部任务", "按项目分组", "阻塞项"}
+    assert {field["field_name"] for field in overview_table["fields"]} >= {"projection_key", "指标名称", "数值"}
+    assert {view["view_name"] for view in projects_table["views"]} >= {"全部项目", "状态看板", "阻塞项目"}
+    assert {view["view_name"] for view in tasks_table["views"]} >= {"全部任务", "项目任务表", "阻塞项"}
+    assert {view["view_name"] for view in overview_table["views"]} >= {"全部指标", "数字卡片", "重点指标"}
+
+
+def test_ensure_projection_resources_rebuilds_dirty_projection_tables(sample_env, monkeypatch) -> None:
+    fake_agent = ProjectionAgent()
+    dirty_projects = fake_agent._new_table("数据表", "表格")
+    for field_name, field_type, is_primary in (
+        ("文本", 1, True),
+        ("单选", 3, False),
+        ("日期", 5, False),
+        ("附件", 17, False),
+        ("项目名", 1, False),
+    ):
+        created = fake_agent.table_create_field(
+            {"app": fake_agent.app_token, "table": dirty_projects["table_id"], "field": {"field_name": field_name, "type": field_type}}
+        )
+        if is_primary:
+            for item in dirty_projects["fields"]:
+                item["is_primary"] = item["field_id"] == created["field_id"]
+    dirty_tasks = fake_agent._new_table("当前任务", "全部任务")
+    fake_agent.table_create_field({"app": fake_agent.app_token, "table": dirty_tasks["table_id"], "field": {"field_name": "projection_key", "type": 1}})
+    monkeypatch.setattr(feishu_projection.feishu_agent, "FeishuAgent", lambda *args, **kwargs: fake_agent)
+
+    registry = feishu_projection.load_projection_registry()
+    registry["projection"]["app"]["app_token"] = fake_agent.app_token
+    registry["projection"]["tables"]["projects_overview"]["table_id"] = dirty_projects["table_id"]
+    registry["projection"]["tables"]["tasks_current"]["table_id"] = dirty_tasks["table_id"]
+    feishu_projection.save_projection_registry(registry)
+
+    result = feishu_projection.ensure_projection_resources()
+
+    rebuilt_projects = result["tables"]["projects_overview"]["table_id"]
+    rebuilt_tasks = result["tables"]["tasks_current"]["table_id"]
+    assert rebuilt_projects != dirty_projects["table_id"]
+    assert rebuilt_tasks != dirty_tasks["table_id"]
+    assert "数据表" not in {table["name"] for table in fake_agent.tables.values()}
 
 
 def test_run_sync_consumes_queue_and_upserts_projection_rows(sample_env, monkeypatch) -> None:
@@ -243,7 +424,7 @@ def test_run_sync_consumes_queue_and_upserts_projection_rows(sample_env, monkeyp
 
     first_snapshot = {
         "ok": True,
-        "row_counts": {"projects_overview": 1, "tasks_current": 2},
+        "row_counts": {"projects_overview": 1, "tasks_current": 2, "operations_overview": 2},
         "projects_overview_rows": [
             {
                 "projection_key": "project::SampleProj",
@@ -288,11 +469,35 @@ def test_run_sync_consumes_queue_and_upserts_projection_rows(sample_env, monkeyp
                 "来源板链接": "obsidian://topic",
             },
         ],
+        "operations_overview_rows": [
+            {
+                "projection_key": "overview::active_tasks",
+                "指标名称": "当前任务总数",
+                "指标分组": "任务",
+                "数值": 2,
+                "说明": "当前未完成任务总数",
+                "目标视图": "全部任务",
+                "目标链接": "https://example.com/tasks",
+                "是否重点": True,
+                "更新时间": "2026-03-12T12:00:00Z",
+            },
+            {
+                "projection_key": "overview::blocked_tasks",
+                "指标名称": "Blocked",
+                "指标分组": "任务",
+                "数值": 1,
+                "说明": "阻塞任务数",
+                "目标视图": "阻塞项",
+                "目标链接": "https://example.com/blocked",
+                "是否重点": True,
+                "更新时间": "2026-03-12T12:00:00Z",
+            },
+        ],
         "errors": [],
     }
     second_snapshot = {
         **first_snapshot,
-        "row_counts": {"projects_overview": 1, "tasks_current": 1},
+        "row_counts": {"projects_overview": 1, "tasks_current": 1, "operations_overview": 2},
         "projects_overview_rows": [{**first_snapshot["projects_overview_rows"][0], "阻塞任务数": 0, "未完成任务数": 1, "需关注": False}],
         "tasks_current_rows": [first_snapshot["tasks_current_rows"][0]],
     }

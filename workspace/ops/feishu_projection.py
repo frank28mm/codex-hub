@@ -53,6 +53,8 @@ LOG_STDOUT = DEFAULT_WORKSPACE_ROOT / "logs" / "feishu-projection-sync.log"
 LOG_STDERR = DEFAULT_WORKSPACE_ROOT / "logs" / "feishu-projection-sync.err.log"
 PROJECTS_TABLE_KEY = "projects_overview"
 TASKS_TABLE_KEY = "tasks_current"
+OVERVIEW_TABLE_KEY = "operations_overview"
+TABLE_KEYS = (PROJECTS_TABLE_KEY, TASKS_TABLE_KEY, OVERVIEW_TABLE_KEY)
 
 DEFAULT_PROJECTION_CONFIG: dict[str, Any] = {
     "app": {
@@ -74,27 +76,89 @@ DEFAULT_PROJECTION_CONFIG: dict[str, Any] = {
             "table_id": "",
             "default_view_name": "全部任务",
         },
+        OVERVIEW_TABLE_KEY: {
+            "alias": "codex_hub_operations_overview",
+            "name": "运营总览",
+            "table_id": "",
+            "default_view_name": "全部指标",
+        },
     },
     "views": {
         PROJECTS_TABLE_KEY: [
-            {"name": "全部项目", "type": "grid"},
-            {"name": "按状态看板", "type": "kanban"},
-            {"name": "按优先级", "type": "grid"},
-            {"name": "最近更新", "type": "grid"},
-            {"name": "需关注项目", "type": "grid"},
+            {"name": "全部项目", "type": "grid", "hidden_fields_by_name": ["projection_key", "NEXT_ACTIONS 链接"]},
+            {"name": "状态看板", "type": "kanban"},
+            {
+                "name": "高优先级项目",
+                "type": "grid",
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{"field_name": "优先级", "operator": "is", "value": "[\"high\"]"}],
+                },
+                "hidden_fields_by_name": ["projection_key", "NEXT_ACTIONS 链接"],
+            },
+            {
+                "name": "需关注项目",
+                "type": "grid",
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{"field_name": "需关注", "operator": "isChecked", "value": "true"}],
+                },
+                "hidden_fields_by_name": ["projection_key", "NEXT_ACTIONS 链接"],
+            },
+            {
+                "name": "阻塞项目",
+                "type": "grid",
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{"field_name": "状态", "operator": "is", "value": "[\"blocked\"]"}],
+                },
+                "hidden_fields_by_name": ["projection_key", "NEXT_ACTIONS 链接"],
+            },
         ],
         TASKS_TABLE_KEY: [
-            {"name": "全部任务", "type": "grid"},
-            {"name": "按状态看板", "type": "kanban"},
-            {"name": "按项目分组", "type": "kanban"},
-            {"name": "阻塞项", "type": "grid"},
-            {"name": "最近更新任务", "type": "grid"},
+            {"name": "全部任务", "type": "grid", "hidden_fields_by_name": ["projection_key", "来源板链接"]},
+            {"name": "状态看板", "type": "kanban"},
+            {
+                "name": "项目任务表",
+                "type": "grid",
+                "hidden_fields_by_name": ["projection_key", "来源板链接", "任务 ID"],
+            },
+            {
+                "name": "Doing任务",
+                "type": "grid",
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{"field_name": "状态", "operator": "is", "value": "[\"doing\"]"}],
+                },
+                "hidden_fields_by_name": ["projection_key", "来源板链接"],
+            },
+            {
+                "name": "阻塞项",
+                "type": "grid",
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{"field_name": "状态", "operator": "is", "value": "[\"blocked\"]"}],
+                },
+                "hidden_fields_by_name": ["projection_key", "来源板链接"],
+            },
+        ],
+        OVERVIEW_TABLE_KEY: [
+            {"name": "全部指标", "type": "grid", "hidden_fields_by_name": ["projection_key"]},
+            {"name": "数字卡片", "type": "gallery"},
+            {
+                "name": "重点指标",
+                "type": "grid",
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [{"field_name": "是否重点", "operator": "isChecked", "value": "true"}],
+                },
+                "hidden_fields_by_name": ["projection_key"],
+            },
         ],
     },
 }
 
 PROJECT_OVERVIEW_FIELDS: list[dict[str, Any]] = [
-    {"field_name": "projection_key", "type": 1},
     {"field_name": "项目名", "type": 1},
     {
         "field_name": "状态",
@@ -112,16 +176,16 @@ PROJECT_OVERVIEW_FIELDS: list[dict[str, Any]] = [
     {"field_name": "未完成任务数", "type": 2},
     {"field_name": "阻塞任务数", "type": 2},
     {"field_name": "需关注", "type": 7},
+    {"field_name": "projection_key", "type": 1},
     {"field_name": "项目板链接", "type": 1},
     {"field_name": "NEXT_ACTIONS 链接", "type": 1},
 ]
 
 CURRENT_TASK_FIELDS: list[dict[str, Any]] = [
-    {"field_name": "projection_key", "type": 1},
+    {"field_name": "任务标题", "type": 1},
     {"field_name": "项目", "type": 1},
     {"field_name": "专题", "type": 1},
     {"field_name": "任务 ID", "type": 1},
-    {"field_name": "任务标题", "type": 1},
     {
         "field_name": "状态",
         "type": 3,
@@ -135,8 +199,31 @@ CURRENT_TASK_FIELDS: list[dict[str, Any]] = [
     {"field_name": "下一步", "type": 1},
     {"field_name": "是否阻塞", "type": 7},
     {"field_name": "更新时间", "type": 1},
+    {"field_name": "projection_key", "type": 1},
     {"field_name": "来源板链接", "type": 1},
 ]
+
+OPERATIONS_OVERVIEW_FIELDS: list[dict[str, Any]] = [
+    {"field_name": "指标名称", "type": 1},
+    {
+        "field_name": "指标分组",
+        "type": 3,
+        "property": {"options": [{"name": "项目"}, {"name": "任务"}, {"name": "更新"}]},
+    },
+    {"field_name": "数值", "type": 2},
+    {"field_name": "说明", "type": 1},
+    {"field_name": "目标视图", "type": 1},
+    {"field_name": "目标链接", "type": 1},
+    {"field_name": "是否重点", "type": 7},
+    {"field_name": "更新时间", "type": 1},
+    {"field_name": "projection_key", "type": 1},
+]
+
+TABLE_FIELD_DEFS: dict[str, list[dict[str, Any]]] = {
+    PROJECTS_TABLE_KEY: PROJECT_OVERVIEW_FIELDS,
+    TASKS_TABLE_KEY: CURRENT_TASK_FIELDS,
+    OVERVIEW_TABLE_KEY: OPERATIONS_OVERVIEW_FIELDS,
+}
 
 
 def workspace_root() -> Path:
@@ -166,6 +253,10 @@ def _int(value: Any) -> int:
         return 0
 
 
+def _ensure_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def obsidian_url(path: str | Path) -> str:
     target = str(path or "").strip()
     if not target:
@@ -184,9 +275,7 @@ def _merge_projection_defaults(registry: dict[str, Any]) -> dict[str, Any]:
         table = tables.setdefault(table_key, {})
         for key, value in defaults.items():
             table.setdefault(key, value)
-    views = projection.setdefault("views", {})
-    for table_key, defaults in DEFAULT_PROJECTION_CONFIG["views"].items():
-        views.setdefault(table_key, json.loads(json.dumps(defaults, ensure_ascii=False)))
+    projection["views"] = json.loads(json.dumps(DEFAULT_PROJECTION_CONFIG["views"], ensure_ascii=False))
     aliases = payload.setdefault("aliases", {})
     aliases.setdefault("tables", {})
     return payload
@@ -216,6 +305,7 @@ def projection_contract() -> dict[str, Any]:
         "tables": {
             PROJECTS_TABLE_KEY: {"fields": [item["field_name"] for item in PROJECT_OVERVIEW_FIELDS]},
             TASKS_TABLE_KEY: {"fields": [item["field_name"] for item in CURRENT_TASK_FIELDS]},
+            OVERVIEW_TABLE_KEY: {"fields": [item["field_name"] for item in OPERATIONS_OVERVIEW_FIELDS]},
         },
     }
 
@@ -311,6 +401,157 @@ def build_task_rows(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _parse_timestamp(value: Any) -> dt.datetime | None:
+    raw = _text(value)
+    if not raw:
+        return None
+    for candidate in (raw, raw.replace("Z", "+00:00")):
+        try:
+            parsed = dt.datetime.fromisoformat(candidate)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _bitable_view_url(app_token: str, table_id: str, view_id: str = "") -> str:
+    app = _text(app_token)
+    table = _text(table_id)
+    view = _text(view_id)
+    if not app or not table:
+        return ""
+    params = {"table": table}
+    if view:
+        params["view"] = view
+    return "https://feishu.cn/base/" + urllib.parse.quote(app, safe="") + "?" + urllib.parse.urlencode(params)
+
+
+def build_operations_overview_rows(
+    facts: list[dict[str, Any]],
+    *,
+    target_links: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    project_rows = build_project_rows(facts)
+    all_task_rows: list[dict[str, Any]] = []
+    for fact in facts:
+        all_task_rows.extend(list(fact.get("project_rows", [])))
+        all_task_rows.extend(list(fact.get("rollup_rows", [])))
+    status_counts = {"todo": 0, "doing": 0, "blocked": 0, "done": 0}
+    recent_updates = 0
+    recent_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
+    for row in all_task_rows:
+        status = _status(row.get("状态", "todo")) or "todo"
+        if status not in status_counts:
+            status = "todo"
+        status_counts[status] += 1
+        updated_at = _parse_timestamp(row.get("更新时间", ""))
+        if updated_at and updated_at >= recent_cutoff:
+            recent_updates += 1
+    targets = target_links or {}
+    metrics = [
+        {
+            "projection_key": "overview::total_projects",
+            "指标名称": "项目总数",
+            "指标分组": "项目",
+            "数值": len(project_rows),
+            "说明": "当前投影中的项目总数",
+            "目标视图": "全部项目",
+            "目标链接": _text(targets.get(PROJECTS_TABLE_KEY, {}).get("全部项目", "")),
+            "是否重点": True,
+        },
+        {
+            "projection_key": "overview::focused_projects",
+            "指标名称": "需关注项目",
+            "指标分组": "项目",
+            "数值": sum(1 for row in project_rows if bool(row.get("需关注"))),
+            "说明": "阻塞或需重点跟进的项目数",
+            "目标视图": "需关注项目",
+            "目标链接": _text(targets.get(PROJECTS_TABLE_KEY, {}).get("需关注项目", "")),
+            "是否重点": True,
+        },
+        {
+            "projection_key": "overview::active_tasks",
+            "指标名称": "当前任务总数",
+            "指标分组": "任务",
+            "数值": status_counts["todo"] + status_counts["doing"] + status_counts["blocked"],
+            "说明": "当前未完成任务总数",
+            "目标视图": "全部任务",
+            "目标链接": _text(targets.get(TASKS_TABLE_KEY, {}).get("全部任务", "")),
+            "是否重点": True,
+        },
+        {
+            "projection_key": "overview::todo_tasks",
+            "指标名称": "Todo",
+            "指标分组": "任务",
+            "数值": status_counts["todo"],
+            "说明": "待开始任务数",
+            "目标视图": "状态看板",
+            "目标链接": _text(targets.get(TASKS_TABLE_KEY, {}).get("状态看板", "")),
+            "是否重点": False,
+        },
+        {
+            "projection_key": "overview::doing_tasks",
+            "指标名称": "Doing",
+            "指标分组": "任务",
+            "数值": status_counts["doing"],
+            "说明": "执行中任务数",
+            "目标视图": "Doing任务",
+            "目标链接": _text(targets.get(TASKS_TABLE_KEY, {}).get("Doing任务", "")),
+            "是否重点": True,
+        },
+        {
+            "projection_key": "overview::blocked_tasks",
+            "指标名称": "Blocked",
+            "指标分组": "任务",
+            "数值": status_counts["blocked"],
+            "说明": "阻塞任务数",
+            "目标视图": "阻塞项",
+            "目标链接": _text(targets.get(TASKS_TABLE_KEY, {}).get("阻塞项", "")),
+            "是否重点": True,
+        },
+        {
+            "projection_key": "overview::done_tasks",
+            "指标名称": "Done",
+            "指标分组": "任务",
+            "数值": status_counts["done"],
+            "说明": "已完成任务数",
+            "目标视图": "全部任务",
+            "目标链接": _text(targets.get(TASKS_TABLE_KEY, {}).get("全部任务", "")),
+            "是否重点": False,
+        },
+        {
+            "projection_key": "overview::recent_updates",
+            "指标名称": "近 7 天更新",
+            "指标分组": "更新",
+            "数值": recent_updates,
+            "说明": "近 7 天有更新时间的任务数",
+            "目标视图": "全部任务",
+            "目标链接": _text(targets.get(TASKS_TABLE_KEY, {}).get("全部任务", "")),
+            "是否重点": False,
+        },
+    ]
+    now_text = iso_now()
+    for item in metrics:
+        item["更新时间"] = now_text
+    return metrics
+
+
+def _attach_overview_target_links(
+    rows: list[dict[str, Any]], *, target_links: dict[str, dict[str, str]]
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        view_name = _text(item.get("目标视图", ""))
+        for table_key in (PROJECTS_TABLE_KEY, TASKS_TABLE_KEY, OVERVIEW_TABLE_KEY):
+            link = _text(target_links.get(table_key, {}).get(view_name, ""))
+            if link:
+                item["目标链接"] = link
+                break
+        enriched.append(item)
+    return enriched
+
+
 def _filter_facts(project_name: str = "") -> tuple[list[dict[str, Any]], list[str]]:
     facts, errors = project_board_facts(load_project_registry())
     if not project_name:
@@ -323,6 +564,7 @@ def snapshot(project_name: str = "") -> dict[str, Any]:
     facts, errors = _filter_facts(project_name)
     project_rows = build_project_rows(facts)
     task_rows = build_task_rows(facts)
+    overview_rows = build_operations_overview_rows(facts)
     return {
         "ok": not errors,
         "bridge": BRIDGE_NAME,
@@ -333,9 +575,11 @@ def snapshot(project_name: str = "") -> dict[str, Any]:
         "row_counts": {
             PROJECTS_TABLE_KEY: len(project_rows),
             TASKS_TABLE_KEY: len(task_rows),
+            OVERVIEW_TABLE_KEY: len(overview_rows),
         },
         "projects_overview_rows": project_rows,
         "tasks_current_rows": task_rows,
+        "operations_overview_rows": overview_rows,
         "errors": errors,
     }
 
@@ -373,7 +617,7 @@ def bitable_target_status(project_name: str = "") -> dict[str, Any]:
                 "view_names": [item.get("name", "") for item in projection.get("views", {}).get(table_key, [])],
                 "row_count": int(snapshot_payload["row_counts"].get(table_key, 0)),
             }
-            for table_key in (PROJECTS_TABLE_KEY, TASKS_TABLE_KEY)
+            for table_key in TABLE_KEYS
         },
     }
 
@@ -381,6 +625,7 @@ def bitable_target_status(project_name: str = "") -> dict[str, Any]:
 def bitable_publish_preview(project_name: str = "") -> dict[str, Any]:
     payload = snapshot(project_name=project_name)
     target_status = bitable_target_status(project_name=project_name)
+    overview_rows = list(payload.get("operations_overview_rows") or [])
     return {
         "ok": payload["ok"],
         "bridge": BRIDGE_NAME,
@@ -392,6 +637,7 @@ def bitable_publish_preview(project_name: str = "") -> dict[str, Any]:
         "preview_rows": {
             PROJECTS_TABLE_KEY: _preview_rows(payload["projects_overview_rows"]),
             TASKS_TABLE_KEY: _preview_rows(payload["tasks_current_rows"]),
+            OVERVIEW_TABLE_KEY: _preview_rows(overview_rows),
         },
     }
 
@@ -407,38 +653,232 @@ def _normalize_table_aliases(registry: dict[str, Any], *, app_token: str, table_
         aliases[table_alias] = {"app_token": app_token, "table_id": table_id}
 
 
-def _ensure_table_fields(agent: feishu_agent.FeishuAgent, *, app_token: str, table_id: str, field_defs: list[dict[str, Any]]) -> list[str]:
-    existing = agent.table_fields({"app": app_token, "table": table_id}).get("fields", [])
-    existing_names = {str(item.get("field_name") or "").strip() for item in existing if str(item.get("field_name") or "").strip()}
-    created: list[str] = []
+def _table_field_defs(table_key: str) -> list[dict[str, Any]]:
+    return TABLE_FIELD_DEFS[table_key]
+
+
+def _desired_field_names(table_key: str) -> list[str]:
+    return [_text(item.get("field_name", "")) for item in _table_field_defs(table_key) if _text(item.get("field_name", ""))]
+
+
+def _table_fields(agent: feishu_agent.FeishuAgent, *, app_token: str, table_id: str) -> list[dict[str, Any]]:
+    return list(agent.table_fields({"app": app_token, "table": table_id}).get("fields", []))
+
+
+def _field_name_map(fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        _text(item.get("field_name", "")): item
+        for item in fields
+        if _text(item.get("field_name", ""))
+    }
+
+
+def _table_rebuild_reasons(table_key: str, *, table_name: str, fields: list[dict[str, Any]], desired_name: str) -> list[str]:
+    reasons: list[str] = []
+    if _text(table_name) != desired_name:
+        reasons.append("table_name")
+    desired_names = _desired_field_names(table_key)
+    existing_names = [_text(item.get("field_name", "")) for item in fields if _text(item.get("field_name", ""))]
+    if not existing_names:
+        reasons.append("missing_fields")
+        return reasons
+    if existing_names[: len(desired_names)] != desired_names or len(existing_names) != len(desired_names):
+        reasons.append("field_layout")
+    primary_name = next((_text(item.get("field_name", "")) for item in fields if bool(item.get("is_primary"))), "")
+    if desired_names and primary_name != desired_names[0]:
+        reasons.append("primary_field")
+    return sorted(set(reasons))
+
+
+def _build_view_property(view: dict[str, Any], field_map: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    def _normalize_filter_operator(operator: Any) -> str:
+        op = _text(operator)
+        if op == "isChecked":
+            return "is"
+        if op == "isUnchecked":
+            return "isNot"
+        return op
+
+    def _normalize_filter_value(field_meta: dict[str, Any], value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = value
+            else:
+                parsed = value
+        else:
+            parsed = _clone_json(value)
+        field_type = int(field_meta.get("type") or 0)
+        if field_type == 3:
+            option_by_name = {
+                _text(option.get("name", "")): _text(option.get("id", ""))
+                for option in list(_ensure_dict(field_meta.get("property")).get("options") or [])
+                if _text(option.get("name", "")) and _text(option.get("id", ""))
+            }
+            if isinstance(parsed, list):
+                raw_values = parsed
+            else:
+                raw_values = [parsed]
+            option_ids: list[str] = []
+            for item in raw_values:
+                item_text = _text(item)
+                if not item_text:
+                    continue
+                option_ids.append(option_by_name.get(item_text, item_text))
+            return json.dumps(option_ids, ensure_ascii=False)
+        if field_type == 7:
+            if isinstance(parsed, list) and len(parsed) == 1:
+                parsed = parsed[0]
+            if isinstance(parsed, str):
+                lowered = parsed.strip().lower()
+                if lowered == "true":
+                    return True
+                if lowered == "false":
+                    return False
+        return parsed
+
+    property_payload: dict[str, Any] = {}
+    hidden_field_ids: list[str] = []
+    for field_name in list(view.get("hidden_fields_by_name") or []):
+        field_meta = field_map.get(_text(field_name))
+        if field_meta:
+            hidden_field_ids.append(_text(field_meta.get("field_id", "")))
+    if hidden_field_ids:
+        property_payload["hidden_fields"] = [field_id for field_id in hidden_field_ids if field_id]
+    groups_payload: list[dict[str, Any]] = []
+    for group in list(view.get("groups") or []):
+        field_meta = field_map.get(_text(group.get("field_name", "")))
+        if field_meta:
+            groups_payload.append({"field_id": _text(field_meta.get("field_id", "")), "desc": bool(group.get("desc", False))})
+    if groups_payload:
+        property_payload["group_info"] = groups_payload
+    sorts_payload: list[dict[str, Any]] = []
+    for sort in list(view.get("sorts") or []):
+        field_meta = field_map.get(_text(sort.get("field_name", "")))
+        if field_meta:
+            sorts_payload.append({"field_id": _text(field_meta.get("field_id", "")), "desc": bool(sort.get("desc", False))})
+    if sorts_payload:
+        property_payload["sort_info"] = sorts_payload
+    filter_def = view.get("filter")
+    if isinstance(filter_def, dict):
+        conditions_payload: list[dict[str, Any]] = []
+        for condition in list(filter_def.get("conditions") or []):
+            field_meta = field_map.get(_text(condition.get("field_name", "")))
+            if not field_meta:
+                continue
+            conditions_payload.append(
+                {
+                    "field_id": _text(field_meta.get("field_id", "")),
+                    "operator": _normalize_filter_operator(condition.get("operator", "")),
+                    "value": _normalize_filter_value(field_meta, condition.get("value")),
+                }
+            )
+        if conditions_payload:
+            property_payload["filter_info"] = {
+                "conjunction": _text(filter_def.get("conjunction", "and")) or "and",
+                "conditions": conditions_payload,
+            }
+    return property_payload or None
+
+
+def _ensure_table_schema(agent: feishu_agent.FeishuAgent, *, app_token: str, table_id: str, table_key: str) -> dict[str, dict[str, Any]]:
+    field_defs = _table_field_defs(table_key)
+    fields = _table_fields(agent, app_token=app_token, table_id=table_id)
+    existing_by_name = _field_name_map(fields)
     for field in field_defs:
         field_name = _text(field.get("field_name", ""))
-        if not field_name or field_name in existing_names:
+        if not field_name:
             continue
-        agent.table_create_field({"app": app_token, "table": table_id, "field": field})
-        created.append(field_name)
-    return created
+        existing = existing_by_name.get(field_name)
+        if existing is None:
+            agent.table_create_field({"app": app_token, "table": table_id, "field": field})
+            fields = _table_fields(agent, app_token=app_token, table_id=table_id)
+            existing_by_name = _field_name_map(fields)
+    return existing_by_name
 
 
-def _ensure_table_views(agent: feishu_agent.FeishuAgent, *, app_token: str, table_id: str, view_defs: list[dict[str, Any]]) -> list[str]:
-    existing = agent.table_views({"app": app_token, "table": table_id}).get("views", [])
+def _ensure_table_views(
+    agent: feishu_agent.FeishuAgent,
+    *,
+    app_token: str,
+    table_id: str,
+    table_key: str,
+    view_defs: list[dict[str, Any]],
+    field_map: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    existing = list(agent.table_views({"app": app_token, "table": table_id}).get("views", []))
     existing_by_name = {str(item.get("view_name") or "").strip(): item for item in existing if str(item.get("view_name") or "").strip()}
+    desired_names = {_text(item.get("name", "")) for item in view_defs if _text(item.get("name", ""))}
     created_or_updated: list[str] = []
+    property_attempted = False
+    property_applied = True
     for view in view_defs:
         view_name = _text(view.get("name", ""))
         view_type = _text(view.get("type", "grid")) or "grid"
         current = existing_by_name.get(view_name)
         if current is None:
-            agent.table_create_view({"app": app_token, "table": table_id, "name": view_name, "type": view_type})
+            created = agent.table_create_view({"app": app_token, "table": table_id, "name": view_name, "type": view_type})
+            current = _ensure_dict(created.get("view"))
+            existing_by_name[view_name] = current
             created_or_updated.append(view_name)
-            continue
-        current_type = _text(current.get("view_type", "grid")) or "grid"
-        if current_type != view_type:
+        elif _text(current.get("view_type", "grid")) != view_type:
+            view_id = _text(current.get("view_id", ""))
+            if view_id:
+                agent.table_delete_view({"app": app_token, "table": table_id, "view": view_id})
+            recreated = agent.table_create_view({"app": app_token, "table": table_id, "name": view_name, "type": view_type})
+            current = _ensure_dict(recreated.get("view")) or current
+            existing_by_name[view_name] = current
+            created_or_updated.append(view_name)
+        property_payload = _build_view_property(view, field_map)
+        if property_payload:
+            property_attempted = True
             agent.table_update_view(
-                {"app": app_token, "table": table_id, "view": current.get("view_id"), "type": view_type}
+                {
+                    "app": app_token,
+                    "table": table_id,
+                    "view": _text(current.get("view_id", "")),
+                    "property": property_payload,
+                }
             )
-            created_or_updated.append(view_name)
-    return created_or_updated
+            refreshed = agent.table_get_view({"app": app_token, "table": table_id, "view": _text(current.get("view_id", ""))})
+            current = _ensure_dict(refreshed.get("view")) or current
+            existing_by_name[view_name] = current
+            if _ensure_dict(current.get("property")) != property_payload:
+                property_applied = False
+    stale_views = [item for item in existing_by_name.values() if _text(item.get("view_name", "")) not in desired_names]
+    for stale in stale_views:
+        view_id = _text(stale.get("view_id", ""))
+        if view_id:
+            agent.table_delete_view({"app": app_token, "table": table_id, "view": view_id})
+    final_views = list(agent.table_views({"app": app_token, "table": table_id}).get("views", []))
+    final_by_name = {str(item.get("view_name") or "").strip(): item for item in final_views if str(item.get("view_name") or "").strip()}
+    return {
+        "view_ids_by_name": {name: _text(item.get("view_id", "")) for name, item in final_by_name.items()},
+        "created_or_updated": created_or_updated,
+        "property_attempted": property_attempted,
+        "property_applied": property_applied,
+    }
+
+
+def _find_table_by_name(tables: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    target = _text(name)
+    for item in tables:
+        if _text(item.get("name", "")) == target:
+            return item
+    return None
+
+
+def _delete_table_if_exists(agent: feishu_agent.FeishuAgent, *, app_token: str, table_id: str) -> None:
+    target = _text(table_id)
+    if not target:
+        return
+    try:
+        agent.table_delete_table({"app": app_token, "table": target})
+    except Exception:
+        return
 
 
 def ensure_projection_resources() -> dict[str, Any]:
@@ -450,7 +890,6 @@ def ensure_projection_resources() -> dict[str, Any]:
     changed = False
 
     app_token = _text(app_cfg.get("app_token", ""))
-    default_table_id = _text(table_cfg[PROJECTS_TABLE_KEY].get("table_id", ""))
     if not app_token:
         created = agent.table_create_app(
             {
@@ -460,43 +899,71 @@ def ensure_projection_resources() -> dict[str, Any]:
         )
         app_token = _text(created.get("app_token", ""))
         app_cfg["app_token"] = app_token
-        if not default_table_id:
-            created_table = created.get("table", {})
-            default_table_id = _text(created_table.get("table_id", "")) or _text(created.get("default_table_id", ""))
-            table_cfg[PROJECTS_TABLE_KEY]["table_id"] = default_table_id
         changed = True
+    keep_table_ids: set[str] = set()
+    table_runtime: dict[str, dict[str, Any]] = {}
+    tables = list(agent.table_tables({"app": app_token}).get("tables", []))
 
-    for table_key in (PROJECTS_TABLE_KEY, TASKS_TABLE_KEY):
+    for table_key in TABLE_KEYS:
+        desired_name = _text(table_cfg[table_key].get("name", ""))
         table_id = _text(table_cfg[table_key].get("table_id", ""))
-        if not table_id:
-            if table_key == PROJECTS_TABLE_KEY:
-                tables = agent.table_tables({"app": app_token}).get("tables", [])
-                default_table = next((item for item in tables if _text(item.get("table_id", "")) == default_table_id), None)
-                table_id = _text(default_table.get("table_id", "")) if isinstance(default_table, dict) else ""
-                if not table_id and tables:
-                    table_id = _text(tables[0].get("table_id", ""))
-            else:
-                field_defs = CURRENT_TASK_FIELDS if table_key == TASKS_TABLE_KEY else PROJECT_OVERVIEW_FIELDS
-                created = agent.table_create(
-                    {
-                        "app": app_token,
-                        "name": _text(table_cfg[table_key].get("name", "")),
-                        "default_view_name": _text(table_cfg[table_key].get("default_view_name", "")),
-                        "fields": field_defs,
-                    }
-                )
-                table_id = _text(created.get("table_id", ""))
-            table_cfg[table_key]["table_id"] = table_id
+        table_meta = next((item for item in tables if _text(item.get("table_id", "")) == table_id), None) if table_id else None
+        if table_meta is None:
+            table_meta = _find_table_by_name(tables, desired_name)
+            if table_meta:
+                table_id = _text(table_meta.get("table_id", ""))
+        rebuild_reasons: list[str] = []
+        if table_meta is not None:
+            fields = _table_fields(agent, app_token=app_token, table_id=table_id)
+            rebuild_reasons = _table_rebuild_reasons(
+                table_key,
+                table_name=_text(table_meta.get("name", "")),
+                fields=fields,
+                desired_name=desired_name,
+            )
+        if table_meta is None or rebuild_reasons:
+            if table_meta is not None and table_id:
+                _delete_table_if_exists(agent, app_token=app_token, table_id=table_id)
+                tables = list(agent.table_tables({"app": app_token}).get("tables", []))
+            created = agent.table_create(
+                {
+                    "app": app_token,
+                    "name": desired_name,
+                    "default_view_name": _text(table_cfg[table_key].get("default_view_name", "")),
+                    "fields": _table_field_defs(table_key),
+                }
+            )
+            table_id = _text(created.get("table_id", ""))
+            table_meta = {"table_id": table_id, "name": desired_name}
+            tables = list(agent.table_tables({"app": app_token}).get("tables", []))
             changed = True
+        table_cfg[table_key]["table_id"] = table_id
         _normalize_table_aliases(registry, app_token=app_token, table_key=table_key, table_id=table_id)
-        field_defs = PROJECT_OVERVIEW_FIELDS if table_key == PROJECTS_TABLE_KEY else CURRENT_TASK_FIELDS
-        _ensure_table_fields(agent, app_token=app_token, table_id=table_id, field_defs=field_defs)
-        _ensure_table_views(
+        field_map = _ensure_table_schema(agent, app_token=app_token, table_id=table_id, table_key=table_key)
+        view_result = _ensure_table_views(
             agent,
             app_token=app_token,
             table_id=table_id,
+            table_key=table_key,
             view_defs=projection.get("views", {}).get(table_key, []),
+            field_map=field_map,
         )
+        keep_table_ids.add(table_id)
+        table_runtime[table_key] = {
+            "table_id": table_id,
+            "name": desired_name,
+            "views": [_text(item.get("name", "")) for item in projection.get("views", {}).get(table_key, [])],
+            "view_ids_by_name": view_result["view_ids_by_name"],
+            "rebuild_reasons": rebuild_reasons,
+            "view_property_supported": bool(view_result["property_applied"] or not view_result["property_attempted"]),
+        }
+
+    tables = list(agent.table_tables({"app": app_token}).get("tables", []))
+    for table in tables:
+        stale_table_id = _text(table.get("table_id", ""))
+        if stale_table_id and stale_table_id not in keep_table_ids:
+            _delete_table_if_exists(agent, app_token=app_token, table_id=stale_table_id)
+            changed = True
 
     if changed:
         save_projection_registry(registry)
@@ -506,14 +973,7 @@ def ensure_projection_resources() -> dict[str, Any]:
     return {
         "registry_path": str(feishu_agent.default_registry_path()),
         "app_token": app_token,
-        "tables": {
-            table_key: {
-                "table_id": _text(table_cfg[table_key].get("table_id", "")),
-                "name": _text(table_cfg[table_key].get("name", "")),
-                "views": [_text(item.get("name", "")) for item in projection.get("views", {}).get(table_key, [])],
-            }
-            for table_key in (PROJECTS_TABLE_KEY, TASKS_TABLE_KEY)
-        },
+        "tables": table_runtime,
     }
 
 
@@ -536,6 +996,10 @@ def _record_fields(record: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_fields_for_compare(fields: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(fields, ensure_ascii=False, sort_keys=True))
+
+
+def _clone_json(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
 def _sync_table_rows(
@@ -639,9 +1103,26 @@ def run_sync(*, force_full: bool = False, project_name: str = "") -> dict[str, A
         try:
             resources = ensure_projection_resources()
             payload = snapshot(project_name=project_name)
+            target_links = {
+                table_key: {
+                    view_name: _bitable_view_url(
+                        resources["app_token"],
+                        _text(resources["tables"][table_key]["table_id"]),
+                        _text(view_id),
+                    )
+                    for view_name, view_id in dict(resources["tables"][table_key].get("view_ids_by_name", {})).items()
+                }
+                for table_key in TABLE_KEYS
+            }
+            payload["operations_overview_rows"] = _attach_overview_target_links(
+                list(payload.get("operations_overview_rows") or []),
+                target_links=target_links,
+            )
+            payload["row_counts"][OVERVIEW_TABLE_KEY] = len(payload["operations_overview_rows"])
             agent = feishu_agent.FeishuAgent()
             projects_table_id = resources["tables"][PROJECTS_TABLE_KEY]["table_id"]
             tasks_table_id = resources["tables"][TASKS_TABLE_KEY]["table_id"]
+            overview_table_id = resources["tables"][OVERVIEW_TABLE_KEY]["table_id"]
             app_token = resources["app_token"]
             projects_result = _sync_table_rows(
                 agent,
@@ -655,6 +1136,12 @@ def run_sync(*, force_full: bool = False, project_name: str = "") -> dict[str, A
                 table_id=tasks_table_id,
                 desired_rows=payload["tasks_current_rows"],
             )
+            overview_result = _sync_table_rows(
+                agent,
+                app_token=app_token,
+                table_id=overview_table_id,
+                desired_rows=payload["operations_overview_rows"],
+            )
             result = {
                 "status": "ok",
                 "schema_version": SCHEMA_VERSION,
@@ -665,9 +1152,11 @@ def run_sync(*, force_full: bool = False, project_name: str = "") -> dict[str, A
                 "tables": {
                     PROJECTS_TABLE_KEY: projects_result,
                     TASKS_TABLE_KEY: tasks_result,
+                    OVERVIEW_TABLE_KEY: overview_result,
                 },
                 "row_counts": payload["row_counts"],
                 "errors": payload.get("errors", []),
+                "target_links": target_links,
                 "synced_at": iso_now(),
             }
             save_state(

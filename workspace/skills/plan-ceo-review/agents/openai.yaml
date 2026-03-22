@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan CEO Review"
+  short_description: "Help judge whether a direction is worth doing now"
+  default_prompt: "Use $plan-ceo-review to evaluate this proposal from a product, leverage, and opportunity-cost perspective."

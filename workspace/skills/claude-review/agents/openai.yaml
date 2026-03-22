@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Review"
+  short_description: "Ask for a focused second-opinion review on an existing judgment"
+  default_prompt: "Use $claude-review to get a second-opinion review on this plan, diff, or decision."

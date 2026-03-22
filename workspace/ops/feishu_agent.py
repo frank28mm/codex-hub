@@ -1223,6 +1223,18 @@ class FeishuAgent:
         result = self.api("GET", f"/bitable/v1/apps/{app_token}/tables", params={"page_size": 50})
         return {"app_token": app_token, "tables": list(result.get("items") or [])}
 
+    def table_get_app(self, payload: dict[str, Any]) -> dict[str, Any]:
+        app_token, _table_id = self.resolve_table_refs(str(payload.get("app") or ""), "")
+        result = self.api("GET", f"/bitable/v1/apps/{app_token}")
+        return {"app_token": app_token, "app": _ensure_dict(result.get("app"))}
+
+    def table_delete_table(self, payload: dict[str, Any]) -> dict[str, Any]:
+        app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
+        if not table_id:
+            raise FeishuAgentError("table id is required", code="missing_table_id")
+        self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}")
+        return {"ok": True, "app_token": app_token, "table_id": table_id}
+
     def table_fields(self, payload: dict[str, Any]) -> dict[str, Any]:
         app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
         if not table_id:
@@ -1233,6 +1245,35 @@ class FeishuAgent:
             params={"page_size": 100},
         )
         return {"app_token": app_token, "table_id": table_id, "fields": list(result.get("items") or [])}
+
+    def table_update_field(self, payload: dict[str, Any]) -> dict[str, Any]:
+        app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
+        field_id = str(payload.get("field_id") or payload.get("field") or "").strip()
+        if not table_id or not field_id:
+            raise FeishuAgentError("table and field are required", code="missing_table_or_field")
+        data: dict[str, Any] = {}
+        if payload.get("field_name") or payload.get("name"):
+            data["field_name"] = str(payload.get("field_name") or payload.get("name") or "").strip()
+        if payload.get("property") is not None:
+            data["property"] = _json_clone(payload.get("property"))
+        if payload.get("description") is not None:
+            data["description"] = str(payload.get("description") or "")
+        if not data:
+            raise FeishuAgentError("field update payload is empty", code="missing_field_update")
+        result = self.user_api(
+            "PUT",
+            f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}",
+            data=data,
+        )
+        return {"ok": True, "app_token": app_token, "table_id": table_id, "field": _ensure_dict(result.get("field"))}
+
+    def table_delete_field(self, payload: dict[str, Any]) -> dict[str, Any]:
+        app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
+        field_id = str(payload.get("field_id") or payload.get("field") or "").strip()
+        if not table_id or not field_id:
+            raise FeishuAgentError("table and field are required", code="missing_table_or_field")
+        self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}")
+        return {"ok": True, "app_token": app_token, "table_id": table_id, "field_id": field_id}
 
     def table_views(self, payload: dict[str, Any]) -> dict[str, Any]:
         app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
@@ -1288,6 +1329,14 @@ class FeishuAgent:
             data=data,
         )
         return {"ok": True, "app_token": app_token, "table_id": table_id, "view": _ensure_dict(result.get("view"))}
+
+    def table_delete_view(self, payload: dict[str, Any]) -> dict[str, Any]:
+        app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
+        view_id = str(payload.get("view") or payload.get("view_id") or "").strip()
+        if not table_id or not view_id:
+            raise FeishuAgentError("table and view are required", code="missing_table_or_view")
+        self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/views/{view_id}")
+        return {"ok": True, "app_token": app_token, "table_id": table_id, "view_id": view_id}
 
     def table_create_app(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = str(payload.get("name") or payload.get("title") or "").strip()
@@ -1654,11 +1703,16 @@ class FeishuAgent:
             "table update": self.table_update,
             "table delete": self.table_delete,
             "table tables": self.table_tables,
+            "table get-app": self.table_get_app,
+            "table delete-table": self.table_delete_table,
             "table fields": self.table_fields,
+            "table update-field": self.table_update_field,
+            "table delete-field": self.table_delete_field,
             "table views": self.table_views,
             "table get-view": self.table_get_view,
             "table create-view": self.table_create_view,
             "table update-view": self.table_update_view,
+            "table delete-view": self.table_delete_view,
             "table create-app": self.table_create_app,
             "table create": self.table_create,
             "table create-field": self.table_create_field,

@@ -9,7 +9,7 @@ PROJECT_ALIASES = (
     "workspace hub",
     "Codex Obsidian记忆与行动系统",
 )
-DEFAULT_WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_HUB_ROOT", str(Path(__file__).resolve().parents[1]))).resolve()
+DEFAULT_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOCAL_VAULT_ROOT = Path(
     os.environ.get("WORKSPACE_HUB_VAULT_ROOT", str(DEFAULT_WORKSPACE_ROOT.parent / "memory"))
 ).resolve()

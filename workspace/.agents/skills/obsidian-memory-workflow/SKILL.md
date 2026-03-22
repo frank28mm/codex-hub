@@ -1,16 +1,16 @@
 ---
 name: obsidian-memory-workflow
-description: Use when working inside the current Codex Hub workspace on the Obsidian-backed memory system, including project routing, progressive memory loading, project discovery, session writeback, and Vault updates.
+description: Use when working inside workspace on the Codex Obsidian memory system, including project routing, progressive memory loading, project discovery, session writeback, and Vault updates.
 ---
 
 # Obsidian Memory Workflow
 
-Use this skill whenever the task touches the `Codex Hub workspace + sibling memory` system.
+Use this skill whenever the task touches the `workspace-hub + Obsidian Vault` system.
 
 ## Fixed Paths
 
-1. Workspace root: the current Codex Hub `workspace/` directory
-2. Vault root: the sibling `memory/` directory
+1. Workspace root: `workspace`
+2. Vault root: `../memory`
 3. Standard launcher: `ops/start-codex`
 4. Memory utility: `ops/codex_memory.py`
 
@@ -27,15 +27,15 @@ Use this skill whenever the task touches the `Codex Hub workspace + sibling memo
    - `T2.8`: current project summary note when long-term background is needed
    - `T3`: semantic expansion only when needed
    - `T4`: episodic logs only when needed
-5. Do not commit `projects/` contents to the Codex Hub product repo.
+5. Do not commit `projects/` contents to the `workspace-hub` repo.
 6. Treat project summary pages as long-term memory only; do not use them as the current task fact source.
 7. Current fact-source chain is `topic board -> project board -> NEXT_ACTIONS -> dashboards`.
 8. Do not overwrite human-maintained `summary` with the latest session output; write recent session metadata into `last_writeback_*` and `## 自动写回`.
-9. The workspace itself is a formal project; system-evolution work should bind to its project board instead of living only in reports or chat.
+9. `workspace-hub` itself is now a formal project; system-evolution work should bind to its project board instead of living only in reports or chat.
 
 ## Direct Codex App Mode
 
-If Codex is opened directly in the app with the current product workspace root:
+If Codex is opened directly in the app with workspace root `workspace`:
 
 1. Follow the same workflow as `ops/start-codex` as closely as possible.
 2. Before substantial project work, run:

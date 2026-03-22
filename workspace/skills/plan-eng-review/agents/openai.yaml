@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan Eng Review"
+  short_description: "Help review a plan for feasibility and delivery risk"
+  default_prompt: "Use $plan-eng-review to assess this plan for technical feasibility, architecture risks, and the safest delivery path."

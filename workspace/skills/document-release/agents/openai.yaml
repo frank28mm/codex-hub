@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Release"
+  short_description: "Sync release-facing docs from verified changes"
+  default_prompt: "Use $document-release to turn verified work into clear release notes or updated docs."

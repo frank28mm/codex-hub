@@ -1,0 +1,4 @@
+interface:
+  display_name: "Careful"
+  short_description: "Shift work into a narrower, explicit caution posture"
+  default_prompt: "Use $careful to narrow this task into a safer, more explicit execution path."

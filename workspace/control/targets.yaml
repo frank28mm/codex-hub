@@ -19,8 +19,8 @@ targets:
   - id: workspace-local
     target_class: owned-low
     target_prefixes:
-      - "file://__WORKSPACE_ROOT__"
-      - "local://codex-hub"
+      - "file://workspace"
+      - "local://workspace-hub"
   - id: ssh-endpoints
     target_class: owned-high
     target_prefixes:

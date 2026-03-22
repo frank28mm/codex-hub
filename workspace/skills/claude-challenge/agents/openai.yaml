@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Challenge"
+  short_description: "Pressure-test a plan with the strongest counterargument"
+  default_prompt: "Use $claude-challenge to challenge this plan or decision and surface the strongest counterargument."

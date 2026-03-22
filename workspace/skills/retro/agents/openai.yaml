@@ -1,0 +1,4 @@
+interface:
+  display_name: "Retro"
+  short_description: "Run a structured retrospective for a completed work slice"
+  default_prompt: "Use $retro to extract lessons, friction, and concrete changes from this completed phase."

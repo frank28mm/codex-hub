@@ -1,0 +1,4 @@
+interface:
+  display_name: "Office Hours"
+  short_description: "Help reframe scattered requests into a clear next step"
+  default_prompt: "Use $office-hours to reframe this request before planning or implementation."

@@ -89,12 +89,6 @@
    - 用户批准后可以继续完成什么
 3. 在可由用户补授权的场景下，应主动向用户申请批准，而不是把权限不足误判成任务失败。
 4. 用户一旦明确批准，后续会话应继续沿原任务执行，并把需要重试的步骤补完。
-5. Feishu 默认权限分层固定为：
-   - 普通项目任务：默认执行
-   - 飞书对象操作：默认执行
-   - 写入 `~/.codex/skills/`、`~/.codex/agents/`：默认执行，不额外审批
-   - 本地系统级动作（如 `~/Library/LaunchAgents`、shell profile、`launchctl`、`/Applications`、`brew services`）：先审批
-   - 高风险远程或不可逆动作（如 `git push`、`ssh`、deploy、release）：先审批
 
 ## 热记忆与写回
 
