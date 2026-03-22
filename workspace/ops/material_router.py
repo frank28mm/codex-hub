@@ -258,6 +258,7 @@ def suggest_material_route(project_name: str, prompt: str) -> dict[str, Any]:
         "timeline_hits": context.get("timeline_hits", []),
         "detail_hits": context.get("detail_hits", []),
         "reasoning_tags": context.get("reasoning_tags", []),
+        "workflow_recommendation": context.get("workflow_recommendation", {}),
         "fallback_used": not config["config_present"],
         "material_hits": [],
         "report_hits": [],

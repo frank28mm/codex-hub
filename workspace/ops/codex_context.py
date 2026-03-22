@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from ops import codex_retrieval, workspace_hub_project
+    from ops import codex_retrieval, gstack_phase1_entry, workspace_hub_project
 except ImportError:  # pragma: no cover
     import codex_retrieval  # type: ignore
+    import gstack_phase1_entry  # type: ignore
     import workspace_hub_project  # type: ignore
 
 
@@ -25,8 +26,6 @@ REGISTRY_RE = re.compile(
     r"<!-- PROJECT_REGISTRY_DATA_START -->\s*```json\s*(.*?)\s*```\s*<!-- PROJECT_REGISTRY_DATA_END -->",
     re.S,
 )
-
-
 def safe_search(query: str, *, project_name: str = "", topic_name: str = "", limit: int = 6) -> list[dict[str, Any]]:
     try:
         return codex_retrieval.search_index(query, project_name=project_name, topic_name=topic_name, limit=limit)
@@ -219,6 +218,50 @@ def resolve_board_binding(project_name: str, prompt: str = "") -> dict[str, str]
     return matches[0] if len(matches) == 1 else result
 
 
+def build_workflow_recommendation(prompt: str) -> dict[str, Any]:
+    text = prompt.strip()
+    if not text:
+        return {}
+    try:
+        recommendation = gstack_phase1_entry.detect_workflow_path(text)
+    except Exception:
+        return {}
+    if recommendation.get("status") != "workflow-recommended":
+        return {}
+    suggestion = {
+        "recognized_stage": recommendation.get("recognized_stage", ""),
+        "suggested_path": list(recommendation.get("suggested_path", [])),
+        "assistant_message": str(recommendation.get("assistant_message", "")).strip(),
+        "initial_action_plan": list(recommendation.get("initial_action_plan", [])),
+    }
+    second_opinion = gstack_phase1_entry.suggest_second_opinion_skill_from_path(
+        suggestion["suggested_path"]
+    )
+    if second_opinion:
+        package = gstack_phase1_entry.build_second_opinion_package(
+            second_opinion["skill"],
+            prompt=text,
+            trigger_path=suggestion["suggested_path"],
+            source=second_opinion.get("source", "manual"),
+            workflow_detection=recommendation,
+        )
+        execution = gstack_phase1_entry.build_second_opinion_main_thread_execution(
+            skill=second_opinion["skill"],
+            packaged_request=package,
+            prompt=text,
+            trigger_path=suggestion["suggested_path"],
+        )
+        second_opinion["package_template_id"] = package["template_id"]
+        second_opinion["material_source"] = package.get("material_source", "template")
+        second_opinion["packaged_request"] = {
+            "autofilled_fields": list(package.get("autofilled_fields", [])),
+            "request": dict(package.get("request", {})),
+        }
+        second_opinion["main_thread_execution"] = execution
+        suggestion["second_opinion"] = second_opinion
+    return suggestion
+
+
 def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
     project_name = canonical_project_name(project_name) if project_name else ""
     payload: dict[str, Any] = {
@@ -231,6 +274,7 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
         "detail_hits": [],
         "retrieval_protocol": {},
         "reasoning_tags": [],
+        "workflow_recommendation": {},
     }
     recommendations: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -332,6 +376,12 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
         payload["reasoning_tags"].append("retrieval-hit")
     if prompt.strip():
         payload["reasoning_tags"].append("prompt-aware")
+        workflow_recommendation = build_workflow_recommendation(prompt)
+        if workflow_recommendation:
+            payload["workflow_recommendation"] = workflow_recommendation
+            payload["reasoning_tags"].append("workflow-recommended")
+            if workflow_recommendation.get("second_opinion"):
+                payload["reasoning_tags"].append("second-opinion-ready")
 
     payload["recommended_files"] = recommendations[:8]
     payload["search_hits"] = search_hits
