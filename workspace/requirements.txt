@@ -1,0 +1,6 @@
+PyYAML
+python-docx
+openpyxl
+pypdf
+qrcode[pil]
+certifi

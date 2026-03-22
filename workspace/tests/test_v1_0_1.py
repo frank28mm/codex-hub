@@ -6,7 +6,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from ops import codex_context, codex_retrieval, controlled_gh, controlled_git, controlled_ssh, tint_backup_sync
+from ops import codex_context, codex_retrieval, controlled_gh, controlled_git, controlled_ssh
 from ops.workspace_hub_project import PROJECT_NAME
 
 
@@ -244,31 +244,6 @@ def test_controlled_gh_and_ssh_and_browser(sample_env) -> None:
     assert payload["executed"] is False
 
 
-def test_tint_backup_sync_uses_controlled_git(monkeypatch, sample_env) -> None:
-    calls: list[dict[str, object]] = []
-
-    def fake_run_git_command(**kwargs):
-        calls.append(
-            {
-                "git_args": tuple(kwargs["git_args"]),
-                "execution_context": kwargs["execution_context"],
-                "explicit_remote": kwargs["explicit_remote"],
-            }
-        )
-        return {"stdout": "ok\n", "stderr": ""}, 0
-
-    monkeypatch.setattr(tint_backup_sync, "run_git_command", fake_run_git_command)
-    output = tint_backup_sync.run_git(sample_env["workspace_root"], "fetch", "backup", "--prune", remote="backup")
-    assert output == "ok"
-    assert calls == [
-        {
-            "git_args": ("fetch", "backup", "--prune"),
-            "execution_context": "noninteractive",
-            "explicit_remote": "backup",
-        }
-    ]
-
-
 def test_start_codex_dry_run_prints_context(sample_env) -> None:
     codex_retrieval.build_index()
     env = make_env(sample_env)
@@ -292,6 +267,76 @@ def test_start_codex_dry_run_prints_context(sample_env) -> None:
     assert "context_retrieval_next_step=" in result.stdout
     assert "context_retrieval_counts=" in result.stdout
     assert "context_detail_path=" in result.stdout
+
+
+def test_start_codex_dry_run_canonicalizes_workspace_hub_alias(sample_env) -> None:
+    env = make_env(sample_env)
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "ops" / "start-codex"),
+            "--project",
+            "workspace-hub",
+            "--prompt",
+            "继续 workspace-hub 项目",
+            "--dry-run",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "project=Codex Hub" in result.stdout
+
+
+def test_start_codex_exec_adds_skip_git_repo_check_for_prompt_flow(sample_env, tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    args_log = tmp_path / "codex-args.txt"
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                'printf "%s\\n" "$@" > "$FAKE_CODEX_ARGS_PATH"',
+                'out=""',
+                'prev=""',
+                'for arg in "$@"; do',
+                '  if [ "$prev" = "-o" ]; then out="$arg"; break; fi',
+                '  prev="$arg"',
+                'done',
+                'if [ -n "$out" ]; then printf "ok\\n" > "$out"; fi',
+                "exit 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+
+    env = make_env(sample_env)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["FAKE_CODEX_ARGS_PATH"] = str(args_log)
+
+    subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "ops" / "start-codex"),
+            "--project",
+            "SampleProj",
+            "--prompt",
+            "继续处理 SampleProj 当前状态",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    args = args_log.read_text(encoding="utf-8").splitlines()
+    assert "exec" in args
+    assert "--skip-git-repo-check" in args
 
 
 def test_start_codex_dry_run_prints_launch_source_context(sample_env) -> None:

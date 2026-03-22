@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -10,13 +11,25 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:  # pragma: no cover - bootstrap must be able to install its own deps
+    yaml = None  # type: ignore
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 SITE_CONFIG_PATH = WORKSPACE_ROOT / "control" / "site.yaml"
 BOOTSTRAP_STATUS_PATH = WORKSPACE_ROOT / "runtime" / "bootstrap-status.json"
 CODEX_CONFIG_PATH = WORKSPACE_ROOT / ".codex" / "config.toml"
+REQUIREMENTS_PATH = WORKSPACE_ROOT / "requirements.txt"
+PYTHON_DEPENDENCIES = (
+    ("yaml", "PyYAML"),
+    ("docx", "python-docx"),
+    ("openpyxl", "openpyxl"),
+    ("pypdf", "pypdf"),
+    ("qrcode", "qrcode[pil]"),
+    ("certifi", "certifi"),
+)
 
 
 @dataclass
@@ -55,18 +68,45 @@ def resolve_root(raw: object, default: Path) -> Path:
     return (WORKSPACE_ROOT / path).resolve()
 
 
+def ensure_yaml_available() -> None:
+    if yaml is not None:
+        return
+    raise SystemExit(
+        "PyYAML is required to read control/site.yaml. "
+        "Run `python3 ops/bootstrap_workspace_hub.py install-python-deps` "
+        "or `python3 ops/bootstrap_workspace_hub.py setup` first."
+    )
+
+
+def default_site_config() -> SiteConfig:
+    return SiteConfig(
+        product_name="Codex Hub",
+        workspace_root=WORKSPACE_ROOT.resolve(),
+        memory_root=(WORKSPACE_ROOT.parent / "memory").resolve(),
+        operator_name="",
+        timezone="Asia/Shanghai",
+        launchagent_prefix="com.codexhub",
+        feishu_enabled=False,
+        electron_enabled=True,
+    )
+
+
 def load_site_config() -> SiteConfig:
+    if yaml is None:
+        return default_site_config()
+    if not SITE_CONFIG_PATH.exists():
+        return default_site_config()
     raw = yaml.safe_load(SITE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     site = raw.get("site") or {}
     return SiteConfig(
-        product_name=str(site.get("product_name") or "Codex Hub"),
-        workspace_root=resolve_root(site.get("workspace_root"), WORKSPACE_ROOT),
-        memory_root=resolve_root(site.get("memory_root"), WORKSPACE_ROOT.parent / "memory"),
+        product_name=str(site.get("product_name") or default_site_config().product_name),
+        workspace_root=resolve_root(site.get("workspace_root"), default_site_config().workspace_root),
+        memory_root=resolve_root(site.get("memory_root"), default_site_config().memory_root),
         operator_name=str(site.get("operator_name") or ""),
-        timezone=str(site.get("timezone") or "Asia/Shanghai"),
-        launchagent_prefix=str(site.get("launchagent_prefix") or "com.codexhub"),
-        feishu_enabled=bool(site.get("feishu_enabled", False)),
-        electron_enabled=bool(site.get("electron_enabled", True)),
+        timezone=str(site.get("timezone") or default_site_config().timezone),
+        launchagent_prefix=str(site.get("launchagent_prefix") or default_site_config().launchagent_prefix),
+        feishu_enabled=bool(site.get("feishu_enabled", default_site_config().feishu_enabled)),
+        electron_enabled=bool(site.get("electron_enabled", default_site_config().electron_enabled)),
     )
 
 
@@ -136,6 +176,15 @@ def command_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def python_module_status() -> dict[str, bool]:
+    return {module: importlib.util.find_spec(module) is not None for module, _ in PYTHON_DEPENDENCIES}
+
+
+def missing_python_packages() -> list[str]:
+    status = python_module_status()
+    return [package for module, package in PYTHON_DEPENDENCIES if not status.get(module, False)]
+
+
 def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
     proc = subprocess.run(
         cmd,
@@ -169,6 +218,7 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "npm": command_available("npm"),
             "codex": command_available("codex"),
         },
+        "python_modules": python_module_status(),
         "apps": {
             "obsidian": app_installed("Obsidian"),
             "codex_desktop": app_installed("Codex"),
@@ -193,7 +243,13 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
 def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[str]:
     actions: list[str] = []
     commands = payload.get("commands", {})
+    module_status = payload.get("python_modules", {})
     apps = payload.get("apps", {})
+    missing_packages = [package for module, package in PYTHON_DEPENDENCIES if not module_status.get(module, False)]
+    if missing_packages:
+        actions.append(
+            "Install Python dependencies with `python3 ops/bootstrap_workspace_hub.py install-python-deps`."
+        )
     if not commands.get("codex"):
         actions.append("Install Codex CLI and complete `codex login`.")
     else:
@@ -228,12 +284,33 @@ def maybe_sync(site: SiteConfig, skip_sync: bool) -> dict[str, object]:
     return {name: run_command(cmd, site.workspace_root) for name, cmd in commands.items()}
 
 
+def install_python_dependencies(*, force: bool = False) -> dict[str, object]:
+    missing = missing_python_packages()
+    if not missing and not force:
+        return {
+            "installed": False,
+            "skipped": True,
+            "missing_packages": [],
+            "requirements_path": str(REQUIREMENTS_PATH),
+        }
+    if REQUIREMENTS_PATH.exists():
+        command = [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)]
+    else:
+        command = [sys.executable, "-m", "pip", "install", *missing]
+    result = run_command(command, WORKSPACE_ROOT)
+    result["installed"] = result.get("returncode") == 0
+    result["missing_packages"] = missing
+    result["requirements_path"] = str(REQUIREMENTS_PATH)
+    result["python_modules_after"] = python_module_status()
+    return result
+
+
 def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, object]:
     if not install:
         return {"installed": False, "skipped": True}
     results = {
         "watcher": run_command(
-            ["python3", "ops/codex_session_watcher.py", "install-launchagent", "--interval", "300"],
+            ["python3", "ops/codex_session_watcher.py", "install-launchagent", "--poll-interval", "300"],
             site.workspace_root,
         ),
         "dashboard_sync": run_command(
@@ -272,8 +349,7 @@ def maybe_install_feishu_bridge(site: SiteConfig, install: bool) -> dict[str, ob
     }
 
 
-def cmd_init(args: argparse.Namespace) -> int:
-    site = load_site_config()
+def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object]:
     ensure_dirs(required_workspace_dirs(site.workspace_root))
     ensure_dirs(required_memory_dirs(site.memory_root))
     write_codex_config(site)
@@ -289,8 +365,50 @@ def cmd_init(args: argparse.Namespace) -> int:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    return payload
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    site = load_site_config()
+    payload = perform_init(site, args)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_install_python_deps(args: argparse.Namespace) -> int:
+    payload = install_python_dependencies(force=args.force)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("installed", True) else 0
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    dependency_result = {"installed": False, "skipped": True}
+    if not args.skip_python_deps:
+        dependency_result = install_python_dependencies(force=args.force_python_deps)
+        if dependency_result.get("returncode", 0) != 0:
+            print(
+                json.dumps(
+                    {"ok": False, "stage": "install-python-deps", "python_dependencies": dependency_result},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return int(dependency_result.get("returncode") or 1)
+    site = load_site_config()
+    bootstrap_result = perform_init(site, args)
+    acceptance_result = {"skipped": True}
+    acceptance_rc = 0
+    if not args.skip_acceptance:
+        acceptance_result = run_command([sys.executable, "ops/accept_product.py", "run"], site.workspace_root)
+        acceptance_rc = int(acceptance_result.get("returncode") or 0)
+    payload = {
+        "ok": acceptance_rc == 0 and dependency_result.get("returncode", 0) == 0,
+        "python_dependencies": dependency_result,
+        "bootstrap": bootstrap_result,
+        "acceptance": acceptance_result,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload["ok"] else 1
 
 
 def cmd_status(_: argparse.Namespace) -> int:
@@ -307,6 +425,13 @@ def cmd_status(_: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bootstrap the portable Codex Hub product workspace.")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    install_deps_parser = sub.add_parser(
+        "install-python-deps",
+        help="Install the Python packages required by bootstrap, acceptance, and bridge helpers.",
+    )
+    install_deps_parser.add_argument("--force", action="store_true", help="Run pip install even if the modules already exist.")
+    install_deps_parser.set_defaults(func=cmd_install_python_deps)
 
     init_parser = sub.add_parser("init", help="Initialize runtime folders, generated config, and optional launchagents.")
     init_parser.add_argument(
@@ -325,6 +450,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run npm install for Electron and install the Feishu bridge launch agent.",
     )
     init_parser.set_defaults(func=cmd_init)
+
+    setup_parser = sub.add_parser(
+        "setup",
+        help="Install Python dependencies, run bootstrap, and then run acceptance in one command.",
+    )
+    setup_parser.add_argument(
+        "--skip-python-deps",
+        action="store_true",
+        help="Skip the Python dependency installation stage.",
+    )
+    setup_parser.add_argument(
+        "--force-python-deps",
+        action="store_true",
+        help="Force reinstall Python dependencies before bootstrap.",
+    )
+    setup_parser.add_argument(
+        "--skip-sync",
+        action="store_true",
+        help="Skip refresh-index / rebuild-all / verify-consistency during bootstrap.",
+    )
+    setup_parser.add_argument(
+        "--install-launchagents",
+        action="store_true",
+        help="Install launchd tasks for watcher, dashboard sync, health check, and Feishu projection.",
+    )
+    setup_parser.add_argument(
+        "--install-feishu-bridge",
+        action="store_true",
+        help="Run npm install for Electron and install the Feishu bridge launch agent.",
+    )
+    setup_parser.add_argument(
+        "--skip-acceptance",
+        action="store_true",
+        help="Skip the final acceptance run after bootstrap.",
+    )
+    setup_parser.set_defaults(func=cmd_setup)
 
     status_parser = sub.add_parser("status", help="Show the latest bootstrap status snapshot.")
     status_parser.set_defaults(func=cmd_status)

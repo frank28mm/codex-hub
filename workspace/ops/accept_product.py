@@ -2,18 +2,30 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:  # pragma: no cover - acceptance should report missing deps, not crash before reporting
+    yaml = None  # type: ignore
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 SITE_CONFIG_PATH = WORKSPACE_ROOT / "control" / "site.yaml"
 BOOTSTRAP_STATUS_PATH = WORKSPACE_ROOT / "runtime" / "bootstrap-status.json"
 REPORT_PATH = WORKSPACE_ROOT / "reports" / "system" / "product-acceptance-latest.md"
+REQUIRED_PYTHON_MODULES = (
+    ("yaml", "PyYAML"),
+    ("docx", "python-docx"),
+    ("openpyxl", "openpyxl"),
+    ("pypdf", "pypdf"),
+    ("qrcode", "qrcode[pil]"),
+    ("certifi", "certifi"),
+)
 
 FORBIDDEN_PATTERNS = [
     "/Users/" + "frank" + "/workspace-hub",
@@ -28,6 +40,8 @@ def utc_now() -> str:
 
 
 def load_site() -> tuple[Path, Path]:
+    if yaml is None:
+        return WORKSPACE_ROOT.resolve(), (WORKSPACE_ROOT.parent / "memory").resolve()
     raw = yaml.safe_load(SITE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     site = raw.get("site") or {}
     workspace_root = site.get("workspace_root")
@@ -66,6 +80,13 @@ def check_commands() -> list[tuple[str, bool, str]]:
         ("python3", shutil.which("python3") is not None, "required command"),
         ("node", shutil.which("node") is not None, "required command"),
         ("codex", shutil.which("codex") is not None, "required command"),
+    ]
+
+
+def check_python_modules() -> list[tuple[str, bool, str]]:
+    return [
+        (package, importlib.util.find_spec(module) is not None, f"required Python package ({module})")
+        for module, package in REQUIRED_PYTHON_MODULES
     ]
 
 
@@ -108,6 +129,10 @@ def write_report(results: dict[str, object]) -> None:
     for item in results["command_checks"]:
         name, ok, note = item
         lines.append(f"- {'OK' if ok else 'FAIL'} `{name}`：{note}")
+    lines.extend(["", "## Python Package Checks", ""])
+    for item in results["python_module_checks"]:
+        name, ok, note = item
+        lines.append(f"- {'OK' if ok else 'FAIL'} `{name}`：{note}")
     lines.extend(["", "## Forbidden Pattern Scan", ""])
     forbidden_hits = results["forbidden_hits"]
     if forbidden_hits:
@@ -125,10 +150,12 @@ def cmd_run(_: argparse.Namespace) -> int:
     workspace_root, memory_root = load_site()
     path_checks = check_paths(workspace_root, memory_root)
     command_checks = check_commands()
+    python_module_checks = check_python_modules()
     forbidden_hits = scan_forbidden(workspace_root)
     passed = (
         all(ok for _, ok, _ in path_checks)
         and all(ok for _, ok, _ in command_checks)
+        and all(ok for _, ok, _ in python_module_checks)
         and not forbidden_hits
         and BOOTSTRAP_STATUS_PATH.exists()
     )
@@ -138,6 +165,7 @@ def cmd_run(_: argparse.Namespace) -> int:
         "memory_root": str(memory_root),
         "path_checks": path_checks,
         "command_checks": command_checks,
+        "python_module_checks": python_module_checks,
         "forbidden_hits": forbidden_hits,
         "bootstrap_status_exists": BOOTSTRAP_STATUS_PATH.exists(),
         "passed": passed,

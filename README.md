@@ -56,6 +56,24 @@
 > **用微信扫一扫本地弹出的二维码。**
 
 > [!TIP]
+> 如果你想让 `Codex` 直接帮你把公开版激活起来，当前最短就是两句 prompt：
+>
+> 1. `请按 AGENTS 和 README 帮我完成这套 Codex Hub 的本地初始化。先检查依赖和目录，再执行 setup 和 acceptance。如果需要我确认，再明确告诉我。`
+> 2. `帮我接微信私聊入口，启用微信私聊版 CoCo。请完成二维码登录、等待我扫码、安装后台常驻并验证状态。`
+>
+> 正常情况下，你只需要：
+> - 先完成一次 `codex login`
+> - 然后在第二句里扫一下二维码
+
+> [!TIP]
+> 如果你暂时先不走 Feishu，只想把公开版**快速手工跑起来**，当前最短路径已经收成两步：
+>
+> 1. `codex login`
+> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents`
+>
+> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance。
+
+> [!TIP]
 > 真正驱动系统运行的协议文件在：
 > - [workspace/AGENTS.md](./workspace/AGENTS.md)
 > - [workspace/MEMORY_SYSTEM.md](./workspace/MEMORY_SYSTEM.md)

@@ -93,7 +93,6 @@ def main() -> int:
             "ops/controlled_gh.py",
             "ops/controlled_ssh.py",
             "ops/controlled_browser.py",
-            "ops/tint_backup_sync.py",
             "ops/accept_v1_0_1.py",
             "tests/conftest.py",
             "tests/fixture_builder.py",

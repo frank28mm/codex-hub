@@ -193,6 +193,22 @@
 >
 > 对人类用户来说，通常只需要：
 > **扫一下二维码。**
+>
+> 如果你想让 `Codex` 直接帮你把公开版激活起来，当前最短就是两句 prompt：
+>
+> 1. `请按 AGENTS 和 README 帮我完成这套 Codex Hub 的本地初始化。先检查依赖和目录，再执行 setup 和 acceptance。如果需要我确认，再明确告诉我。`
+> 2. `帮我接微信私聊入口，启用微信私聊版 CoCo。请完成二维码登录、等待我扫码、安装后台常驻并验证状态。`
+>
+> 正常情况下，你只需要：
+> - 先完成一次 `codex login`
+> - 然后在第二句里扫一下二维码
+>
+> 如果你暂时先不走 Feishu，只想把公开版**快速手工跑起来**，当前最短路径已经收成两步：
+>
+> 1. `codex login`
+> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents`
+>
+> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance。
 
 > [!TIP]
 > `Codex` 只要从当前 `workspace/` 启动，就会自动读取：
@@ -233,13 +249,43 @@ cd codex-hub/workspace
 
 如果你不想改目录结构，通常不需要改这两个值。
 
-### 3. 执行一键初始化
+### 3. 执行一键 setup
+
+```bash
+python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
+```
+
+这个 `setup` 会自动完成：
+
+- 安装 `requirements.txt` 里的 Python 依赖
+- 生成本地 `.codex/config.toml`
+- 建立 `runtime/`、`logs/`、`reports/ops/`
+- 确保 sibling `memory/` 骨架存在
+- 执行：
+  - `refresh-index`
+  - `rebuild-all`
+  - `verify-consistency`
+- 安装：
+  - watcher
+  - dashboard sync
+  - health check
+  - Feishu projection
+- 最后自动跑：
+  - `python3 ops/accept_product.py run`
+
+如果你想把 Python 依赖安装和 bootstrap 拆开，也可以先运行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py install-python-deps
+```
+
+然后再使用旧的初始化命令：
 
 ```bash
 python3 ops/bootstrap_workspace_hub.py init
 ```
 
-这个命令会：
+单独的 `init` 现在更适合高级或调试场景。它会：
 
 - 生成本地 `.codex/config.toml`
 - 建立 `runtime/`、`logs/`、`reports/ops/`
@@ -251,7 +297,7 @@ python3 ops/bootstrap_workspace_hub.py init
 - 输出：
   - `runtime/bootstrap-status.json`
 
-如果你已经确认要把后台自动任务也一起装上，再运行：
+如果你在高级模式下想把后台自动任务也一起装上，再运行：
 
 ```bash
 python3 ops/bootstrap_workspace_hub.py init --install-launchagents
@@ -263,7 +309,7 @@ python3 ops/bootstrap_workspace_hub.py init --install-launchagents
 python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
 ```
 
-### 4. 执行一键验收
+### 4. 执行验收（如果你没有走 setup）
 
 ```bash
 python3 ops/accept_product.py run
@@ -273,6 +319,7 @@ python3 ops/accept_product.py run
 
 - 路径是否完整
 - `python3 / node / codex` 是否可用
+- `PyYAML / python-docx / openpyxl / pypdf / qrcode / certifi` 是否已经装好
 - 是否还残留个人现网路径
 - bootstrap 是否完成
 
@@ -418,6 +465,19 @@ npm run workspace
 
 启用后，你就可以通过微信私聊把任务送入同一套 `broker -> start-codex -> memory writeback` 主链。
 
+如果你需要一条手工命令来完成同一件事，当前最短路径是：
+
+```bash
+python3 ops/weixin_bridge.py enable
+```
+
+这个命令会：
+
+- 生成并打开本地二维码
+- 等待你扫码登录
+- 安装微信 bridge 的 LaunchAgent
+- 最后输出当前 bridge 状态
+
 ## 部署等级
 
 ### A. 本地单机版
@@ -488,6 +548,8 @@ npm run workspace
 ### 初始化与验收
 
 ```bash
+python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
+python3 ops/bootstrap_workspace_hub.py install-python-deps
 python3 ops/bootstrap_workspace_hub.py init
 python3 ops/bootstrap_workspace_hub.py status
 python3 ops/accept_product.py run
@@ -520,6 +582,8 @@ npm test
 ### Weixin
 
 ```bash
+python3 ops/weixin_bridge.py enable
+python3 ops/weixin_bridge.py login
 python3 ops/weixin_bridge.py contract
 python3 ops/weixin_bridge.py status
 python3 ops/weixin_bridge.py install-launchagent
