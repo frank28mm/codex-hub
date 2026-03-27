@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Knowledge Base - Highlight",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} highlight {{title|safe_name}}",
+  "path": "02_episodic/clips/Knowledge Base/inbox",
+  "vault": "memory",
+  "context": "{{highlights|trim}}",
+  "properties": [
+    {
+      "name": "title",
+      "value": "{{title}}",
+      "id": "kb-highlight--title"
+    },
+    {
+      "name": "url",
+      "value": "{{url}}",
+      "id": "kb-highlight--url"
+    },
+    {
+      "name": "domain",
+      "value": "{{site}}",
+      "id": "kb-highlight--domain"
+    },
+    {
+      "name": "clipped_at",
+      "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+      "id": "kb-highlight--clipped-at"
+    },
+    {
+      "name": "source_type",
+      "value": "web-highlight",
+      "id": "kb-highlight--source-type"
+    },
+    {
+      "name": "processing_status",
+      "value": "inbox",
+      "id": "kb-highlight--processing-status"
+    },
+    {
+      "name": "topic_candidates",
+      "value": "",
+      "type": "multitext",
+      "id": "kb-highlight--topic-candidates"
+    }
+  ],
+  "triggers": [
+    "schema:@Article"
+  ],
+  "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n## Highlights\n\n{{context}}\n",
+  "id": "kb-highlight"
+}

@@ -6,5 +6,6 @@ site:
   operator_name: ""
   timezone: Asia/Shanghai
   launchagent_prefix: com.codexhub
+  knowledge_base_project_name: Knowledge Base
   feishu_enabled: false
   electron_enabled: true
