@@ -9,6 +9,7 @@
     "test": "node feishu_long_connection_service.test.js && node feishu_outbound.test.js"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.48.0"
+    "@larksuiteoapi/node-sdk": "^1.48.0",
+    "silk-wasm": "^3.7.1"
   }
 }

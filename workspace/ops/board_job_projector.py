@@ -24,10 +24,49 @@ RUNNABLE_STATUSES = {"todo", "doing"}
 DEFAULT_STAGE_PLAN = ["discover", "frame", "execute", "verify", "adapt", "handoff"]
 STATUS_PRIORITY = {"doing": 0, "todo": 1}
 
-# Public Codex Hub ships the shared projection/runtime contract without bundling
-# the author's private task templates. Downstream users can inject project
-# background-job specs through project boards or control overlays.
-TASK_JOB_SPECS: dict[str, dict[str, Any]] = {}
+# Public Codex Hub ships a generic sample task catalog so downstream users can
+# experience long-running programs immediately, without depending on the
+# author's private board ids or private report paths.
+TASK_JOB_SPECS: dict[str, dict[str, Any]] = {
+    "SP-EXEC-01": {
+        "job_slug": "sample-program-loop",
+        "executor_kind": "research_brief",
+        "automation_mode": "background_assist",
+        "allowed_actions": ["read", "write_report", "write_board"],
+        "delivery_targets": ["board", "report"],
+        "gate_policy": "none",
+        "max_rounds": 3,
+        "time_budget_minutes": 20,
+        "acceptance_criteria": [
+            "Freeze the project-scoped program contract for the sample task.",
+            "Capture a visible stage transition and handoff bundle for the sample task.",
+            "Write back the next-step summary so users can resume the loop cleanly.",
+        ],
+        "analysis_focus": [
+            "Treat the sample task as a real multi-stage program instead of a one-shot brief.",
+            "Show how wake/loop/handoff artifacts move together inside a project scope.",
+        ],
+    },
+    "SP-FS-01": {
+        "job_slug": "sample-feishu-followup",
+        "executor_kind": "research_brief",
+        "automation_mode": "background_assist",
+        "allowed_actions": ["read", "write_report", "write_board"],
+        "delivery_targets": ["board", "report"],
+        "gate_policy": "before_external_send",
+        "max_rounds": 3,
+        "time_budget_minutes": 20,
+        "acceptance_criteria": [
+            "Gather official Feishu references needed for a scoped follow-up.",
+            "Separate native Feishu capabilities from Codex Hub orchestration rules.",
+            "Produce a concrete next-step plan that can be resumed in a later wake.",
+        ],
+        "analysis_focus": [
+            "Demonstrate how a Feishu-facing research task becomes a resumable project program.",
+            "Keep delivery gated while still preserving the shared program harness flow.",
+        ],
+    },
+}
 
 
 def workspace_root() -> Path:

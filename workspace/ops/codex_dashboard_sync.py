@@ -540,7 +540,11 @@ def verify_project_rollup_consistency(project_name: str) -> list[str]:
             )
 
     expected_current = "\n".join(
-        build_current_task_lines(project_board["project_rows"], project_board["rollup_rows"])
+        build_current_task_lines(
+            project_board["project_rows"],
+            project_board["rollup_rows"],
+            project_board.get("gflow_rows", []),
+        )
     ).strip()
     actual_current = extract_marked_block(project_board["body"], AUTO_CURRENT_TASKS_MARKERS).strip()
     if actual_current != expected_current:

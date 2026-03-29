@@ -6,4 +6,5 @@ requests
 beautifulsoup4
 qrcode[pil]
 certifi
-requests
+cryptography
+openai
