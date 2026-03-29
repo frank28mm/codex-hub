@@ -4,6 +4,65 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+process.env.WORKSPACE_HUB_FEISHU_CLI_EVENT_TRANSPORT = "legacy";
+process.env.WORKSPACE_HUB_FEISHU_CLI_IM_TRANSPORT = "legacy";
+const TEST_VAULT_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "codex-hub-feishu-vault-"));
+fs.mkdirSync(path.join(TEST_VAULT_ROOT, "01_working"), { recursive: true });
+fs.writeFileSync(
+  path.join(TEST_VAULT_ROOT, "PROJECT_REGISTRY.md"),
+  [
+    "# PROJECT_REGISTRY",
+    "",
+    "<!-- PROJECT_REGISTRY_DATA_START -->",
+    "```json",
+    JSON.stringify(
+      [
+        {
+          project_name: "Codex Hub",
+          aliases: ["CodexHub", "codex hub", "coco workspace"],
+          path: "",
+          status: "active",
+          summary_note: "Public Codex Hub system workspace.",
+        },
+        {
+          project_name: "SampleProj",
+          aliases: ["sampleproj", "sample proj"],
+          path: "",
+          status: "active",
+          summary_note: "Generic sample project for bridge tests.",
+        },
+        {
+          project_name: "Example Workspace",
+          aliases: ["example workspace", "example"],
+          path: "",
+          status: "active",
+          summary_note: "Generic example workspace for bridge tests.",
+        },
+        {
+          project_name: "Old Project",
+          aliases: ["old project"],
+          path: "",
+          status: "active",
+          summary_note: "Existing binding fixture project.",
+        },
+        {
+          project_name: "Growth System",
+          aliases: ["growth system"],
+          path: "",
+          status: "active",
+          summary_note: "Generic growth workflow project.",
+        },
+      ],
+      null,
+      2,
+    ),
+    "```",
+    "<!-- PROJECT_REGISTRY_DATA_END -->",
+    "",
+  ].join("\n"),
+  "utf8",
+);
+process.env.WORKSPACE_HUB_VAULT_ROOT = TEST_VAULT_ROOT;
 const ACK_TEXT_PATTERN =
   /^Frank，(?:好的，我先处理。|收到，我马上跟进。|知道了，我先看一下。|明白，我这就开始处理。|收到，我先帮你过一遍。)$/;
 const {
@@ -19,10 +78,14 @@ const {
   normalizeSdkDomain,
   resolveExecutionProfileForMessage,
   sanitizeSettings,
+  summarizeErrorText,
   summarizeSettings,
   shouldAcceptMessage,
   shouldRunInBackground,
 } = require("./feishu_long_connection_service");
+const {
+  normalizeMessageEvent: normalizeInboundMessageEvent,
+} = require("./feishu/inbound");
 
 function parseReplyText(payload) {
   const content = JSON.parse(payload.data.content);
@@ -60,37 +123,6 @@ function parseReplyText(payload) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function withTempProjectRegistry(entries, fn) {
-  const previous = process.env.WORKSPACE_HUB_VAULT_ROOT;
-  const vaultRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-hub-feishu-vault-"));
-  const registryPath = path.join(vaultRoot, "PROJECT_REGISTRY.md");
-  fs.writeFileSync(
-    registryPath,
-    [
-      "# PROJECT_REGISTRY",
-      "",
-      "<!-- PROJECT_REGISTRY_DATA_START -->",
-      "```json",
-      JSON.stringify(entries, null, 2),
-      "```",
-      "<!-- PROJECT_REGISTRY_DATA_END -->",
-      "",
-    ].join("\n"),
-    "utf-8",
-  );
-  process.env.WORKSPACE_HUB_VAULT_ROOT = vaultRoot;
-  try {
-    return await fn();
-  } finally {
-    if (typeof previous === "string") {
-      process.env.WORKSPACE_HUB_VAULT_ROOT = previous;
-    } else {
-      delete process.env.WORKSPACE_HUB_VAULT_ROOT;
-    }
-    fs.rmSync(vaultRoot, { recursive: true, force: true });
-  }
 }
 
 async function testSanitizeAndSummarize() {
@@ -136,6 +168,122 @@ async function testNormalizeMessageEvent() {
   assert.equal(normalized.mentions.length, 1);
   assert.equal(normalized.text_mentions.length, 0);
   assert.equal(normalized.message_created_at, "2024-03-14T07:06:40.000Z");
+}
+
+async function testNormalizeMessageEventExtractsNestedPostContent() {
+  const normalized = normalizeMessageEvent({
+    message: {
+      message_id: "om_post",
+      message_type: "post",
+      content: JSON.stringify({
+        zh_cn: {
+          content: [
+            [{ tag: "text", text: "第一段" }],
+            [{ tag: "text", text: "第二段" }],
+          ],
+        },
+      }),
+      chat_type: "group",
+    },
+    sender: {
+      sender_id: { open_id: "ou_sender" },
+    },
+  });
+  assert.equal(normalized.message_type, "post");
+  assert.equal(normalized.text, "第一段\n第二段");
+}
+
+async function testNormalizeMessageEventIgnoresAttachmentMetadataInPostContent() {
+  const normalized = normalizeMessageEvent({
+    message: {
+      message_id: "om_post_mixed",
+      message_type: "post",
+      content: JSON.stringify({
+        zh_cn: {
+          content: [
+            [
+              { tag: "text", text: "第一段" },
+              { tag: "img", image_key: "img_v3_hidden" },
+            ],
+            [
+              { tag: "file", file_key: "file_v3_hidden" },
+              { tag: "text", text: "第二段" },
+            ],
+          ],
+        },
+      }),
+      chat_type: "group",
+    },
+    sender: {
+      sender_id: { open_id: "ou_sender" },
+    },
+  });
+  assert.equal(normalized.text, "第一段\n第二段");
+}
+
+async function testNormalizeMessageEventSkipsAttachmentOnlyPayloads() {
+  const imageMessage = normalizeMessageEvent({
+    message: {
+      message_id: "om_image",
+      message_type: "image",
+      content: JSON.stringify({ image_key: "img_v3_123456" }),
+      chat_type: "group",
+    },
+    sender: {
+      sender_id: { open_id: "ou_sender" },
+    },
+  });
+  assert.equal(imageMessage.text, "");
+
+  const fileMessage = normalizeMessageEvent({
+    message: {
+      message_id: "om_file",
+      message_type: "file",
+      content: JSON.stringify({ file_key: "file_v3_abcdef" }),
+      chat_type: "group",
+    },
+    sender: {
+      sender_id: { open_id: "ou_sender" },
+    },
+  });
+  assert.equal(fileMessage.text, "");
+}
+
+async function testInboundNormalizeMessageEventSkipsAttachmentMetadata() {
+  const imageMessage = normalizeInboundMessageEvent({
+    message: {
+      message_id: "om_inbound_image",
+      message_type: "image",
+      content: JSON.stringify({ image_key: "img_v3_hidden" }),
+      chat_type: "group",
+    },
+    sender: {
+      sender_id: { open_id: "ou_sender" },
+    },
+  });
+  assert.equal(imageMessage.text, "");
+
+  const postMessage = normalizeInboundMessageEvent({
+    message: {
+      message_id: "om_inbound_post",
+      message_type: "post",
+      content: JSON.stringify({
+        zh_cn: {
+          content: [
+            [
+              { tag: "text", text: "正文" },
+              { tag: "img", image_key: "img_v3_hidden" },
+            ],
+          ],
+        },
+      }),
+      chat_type: "group",
+    },
+    sender: {
+      sender_id: { open_id: "ou_sender" },
+    },
+  });
+  assert.equal(postMessage.text, "正文");
 }
 
 async function testNormalizeMessageEventDetectsTextMentionAlias() {
@@ -187,6 +335,76 @@ async function testShouldAcceptMessage() {
   });
   assert.equal(blocked.ok, false);
   assert.equal(blocked.reason, "mention_required");
+}
+
+async function testAttachmentMessagesDoNotRouteIntoCodex() {
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        brokerCalls.push(command);
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T13:00:00Z",
+              updated_at: "2026-03-28T13:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          return { ok: true, binding: null };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+      fetchBridgeExecutionLease: async () => ({
+        lease: {
+          bridge: "feishu",
+          conversation_key: "chat-timeout",
+          session_id: "sess-timeout",
+          state: "running",
+          started_at: "2026-03-24T00:00:00Z",
+          last_progress_at: "2026-03-24T00:00:05Z",
+          stale_after_seconds: 300,
+          metadata: {
+            source_message_id: "om_timeout_old",
+          },
+        },
+      }),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_attachment_only",
+      message_type: "image",
+      content: JSON.stringify({ image_key: "img_v3_123456" }),
+      chat_type: "group",
+      chat_id: "oc_attachment_only",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.replyPhase, "error");
+  assert.match(result.replyPreview, /empty_text/);
+  assert.equal(brokerCalls.includes("codex-exec"), false);
+  assert.equal(brokerCalls.includes("codex-resume"), false);
 }
 
 async function testShouldRunInBackgroundSkipsStatusQuestions() {
@@ -260,8 +478,32 @@ async function testExecutionProfileAndApprovalClassificationCoverFeishuLocalExte
   assert.equal(highRisk.required, true);
   assert.equal(highRisk.scope, "feishu_high_risk_execution");
 
+  const gitCommit = classifyApprovalRequirement("请帮我 git commit 当前改动");
+  assert.equal(gitCommit.required, true);
+  assert.equal(gitCommit.scope, "feishu_high_risk_execution");
+
+  const commitBundling = classifyApprovalRequirement("请帮我把这三组提交面直接收口");
+  assert.equal(commitBundling.required, true);
+  assert.equal(commitBundling.scope, "feishu_high_risk_execution");
+
   const skillInstall = classifyApprovalRequirement("请把 investigate 这个 skill 安装到 ~/.codex/skills/");
   assert.equal(skillInstall.required, false);
+}
+
+async function testSummarizeErrorTextPrefersMeaningfulExceptionLine() {
+  const text = [
+    "Traceback (most recent call last):",
+    '  File "/workspace/ops/local_broker.py", line 19, in <module>',
+    "    import material_router",
+    "During handling of the above exception, another exception occurred:",
+    '  File "/workspace/ops/codex_context.py", line 11',
+    "    from ops import codex_retrieval",
+    "IndentationError: expected an indented block after 'try' statement on line 10",
+  ].join("\n");
+  assert.equal(
+    summarizeErrorText(text),
+    "IndentationError: expected an indented block after 'try' statement on line 10",
+  );
 }
 
 async function testSkillInstallRoutesWithLocalExtensionProfile() {
@@ -324,6 +566,8 @@ async function testSkillInstallRoutesWithLocalExtensionProfile() {
 async function testHighRiskRequestDetectsChineseGitHubPushPhrasing() {
   assert.equal(isHighRiskRequest("那你先把当前的改动推到GitHub 吧。GitHub Action 会自动部署的"), true);
   assert.equal(isHighRiskRequest("请帮我把这个提交到 GitHub"), true);
+  assert.equal(isHighRiskRequest("请帮我 git commit 当前改动"), true);
+  assert.equal(isHighRiskRequest("请帮我把这三组提交面直接收口"), true);
 }
 
 async function testHandleMessageEventAcceptsTextMentionAlias() {
@@ -455,8 +699,7 @@ async function testBindingDeclarationResetsSessionAndReportsBindingPhase() {
   assert.equal(result.ok, true);
   assert.equal(result.direct, true);
   assert.equal(result.replyPhase, "binding_bound");
-  assert.match(result.replyPreview, /Codex Hub/);
-  assert.match(result.replyPreview, /绑定|锁定/);
+  assert.match(result.replyPreview, /绑定到项目 `Codex Hub`/);
   assert.equal(bindings.get("chat-bind").session_id, "");
   assert.equal(runtimeCalls.some((payload) => payload.last_binding_result === "bound"), true);
 }
@@ -1219,6 +1462,673 @@ async function testDifferentChatsBackgroundTasksRunInParallel() {
   await Promise.all([firstPromise, secondPromise]);
 }
 
+async function testSessionLaneMismatchForcesFreshExecPerChat() {
+  const bindings = new Map([
+    [
+      "chat-group-lane",
+      {
+        bridge: "feishu",
+        chat_ref: "chat-group-lane",
+        binding_scope: "project",
+        project_name: "Codex Hub",
+        topic_name: "",
+        session_id: "sess-shared",
+        metadata: {
+          session_lane: "oc_direct_coco",
+        },
+      },
+    ],
+  ]);
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload = {}) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-24T00:00:00Z",
+              updated_at: "2026-03-24T00:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const next = { ...(bindings.get(chatRef) || {}), bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
+            bindings.set(chatRef, next);
+            return { ok: true, binding: next };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        if (command === "codex-resume") {
+          throw new Error("unexpected resume");
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "新的群聊会话已建立。",
+            stderr: "session id: 019ce000-0000-7000-8000-00000000lane",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_lane_group",
+      message_type: "text",
+      content: JSON.stringify({ text: "请回复一下当前进展" }),
+      chat_type: "group",
+      chat_id: "chat-group-lane",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.replyPreview, /新的群聊会话已建立/);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-resume"), false);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-exec"), true);
+  assert.equal(bindings.get("chat-group-lane").metadata.session_lane, "chat-group-lane");
+}
+
+async function testTimedOutResumeClearsBindingAndAllowsFreshFollowup() {
+  const liveProgressAt = new Date().toISOString();
+  const bindings = new Map([
+    [
+      "chat-timeout",
+      {
+        bridge: "feishu",
+        chat_ref: "chat-timeout",
+        binding_scope: "project",
+        project_name: "Codex Hub",
+        topic_name: "",
+        session_id: "sess-timeout",
+        metadata: {
+          session_lane: "chat-timeout",
+        },
+      },
+    ],
+  ]);
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload = {}) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-24T00:00:00Z",
+              updated_at: "2026-03-24T00:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const next = { ...(bindings.get(chatRef) || {}), bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
+            bindings.set(chatRef, next);
+            return { ok: true, binding: next };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        if (command === "codex-resume") {
+          return new Promise(() => {});
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: `新会话完成：${payload.prompt}`,
+            stderr: "session id: 019ce000-0000-7000-8000-00000000fresh",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+      fetchBridgeExecutionLease: async () => ({
+        lease: {
+          bridge: "feishu",
+          conversation_key: "chat-timeout",
+          session_id: "sess-timeout",
+          state: "running",
+          started_at: liveProgressAt,
+          last_progress_at: liveProgressAt,
+          stale_after_seconds: 300,
+          metadata: {
+            source_message_id: "om_timeout_old",
+          },
+        },
+      }),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+    routeExecutionTimeoutMs: 10,
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const first = await service.handleMessageEvent({
+    message: {
+      message_id: "om_timeout_1",
+      message_type: "text",
+      content: JSON.stringify({ text: "@_user_1 你的意思是，做了一些，但没做完，是这样吗？" }),
+      chat_type: "group",
+      chat_id: "chat-timeout",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(first.replyPhase, "error");
+  assert.match(first.replyPreview, /长时间未返回/);
+  assert.equal(bindings.get("chat-timeout").session_id, "");
+
+  const second = await service.handleMessageEvent({
+    message: {
+      message_id: "om_timeout_2",
+      message_type: "text",
+      content: JSON.stringify({ text: "请继续回复这个问题" }),
+      chat_type: "group",
+      chat_id: "chat-timeout",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(second.ok, true);
+  assert.match(second.replyPreview, /新会话完成/);
+  assert.equal(brokerCalls.filter((entry) => entry.command === "codex-resume").length, 1);
+  assert.equal(brokerCalls.filter((entry) => entry.command === "codex-exec").length, 1);
+}
+
+async function testProgressStalledRunningLeaseForcesFreshExecWithoutResume() {
+  const bindings = new Map([
+    [
+      "chat-stalled",
+      {
+        bridge: "feishu",
+        chat_ref: "chat-stalled",
+        binding_scope: "project",
+        project_name: "Codex Hub",
+        topic_name: "",
+        session_id: "sess-stalled",
+        metadata: {
+          session_lane: "chat-stalled",
+        },
+      },
+    ],
+  ]);
+  const leaseWrites = [];
+  const brokerCalls = [];
+  const staleProgressAt = new Date(Date.now() - 10 * 60_000).toISOString();
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload = {}) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T13:00:00Z",
+              updated_at: "2026-03-28T13:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const next = { ...(bindings.get(chatRef) || {}), bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
+            bindings.set(chatRef, next);
+            return { ok: true, binding: next };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        if (command === "codex-resume") {
+          throw new Error("unexpected resume");
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "已改走新会话。",
+            stderr: "session id: 019ce000-0000-7000-8000-00000000fresh2",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+      saveBridgeExecutionLease: async (payload) => {
+        leaseWrites.push({ ...payload });
+        return { lease: payload };
+      },
+      fetchBridgeExecutionLease: async () => ({
+        lease: {
+          bridge: "feishu",
+          conversation_key: "chat-stalled",
+          session_id: "sess-stalled",
+          state: "running",
+          started_at: staleProgressAt,
+          last_progress_at: staleProgressAt,
+          stale_after_seconds: 300,
+          metadata: {
+            source_message_id: "om_old_stalled",
+          },
+        },
+      }),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_stalled_followup",
+      message_type: "text",
+      content: JSON.stringify({ text: "请继续处理现在这条新消息" }),
+      chat_type: "group",
+      chat_id: "chat-stalled",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.replyPreview, /已改走新会话/);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-resume"), false);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-exec"), true);
+  assert.equal(bindings.get("chat-stalled").session_id, "019ce000-0000-7000-8000-00000000fresh2");
+  assert.equal(bindings.get("chat-stalled").metadata.last_route_error, "lease_progress_stalled");
+  assert.equal(leaseWrites.some((item) => item.state === "failed" && item.last_error === "lease_progress_stalled"), true);
+}
+
+async function testMissingLeaseForcesFreshExecWithoutResume() {
+  const bindings = new Map([
+    [
+      "chat-missing-lease",
+      {
+        bridge: "feishu",
+        chat_ref: "chat-missing-lease",
+        binding_scope: "project",
+        project_name: "Codex Hub",
+        topic_name: "",
+        session_id: "sess-missing-lease",
+        metadata: {
+          session_lane: "chat-missing-lease",
+        },
+      },
+    ],
+  ]);
+  const leaseWrites = [];
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload = {}) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T13:00:00Z",
+              updated_at: "2026-03-28T13:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const next = { ...(bindings.get(chatRef) || {}), bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
+            bindings.set(chatRef, next);
+            return { ok: true, binding: next };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        if (command === "codex-resume") {
+          throw new Error("unexpected resume");
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "已改走新会话。",
+            stderr: "session id: 019ce000-0000-7000-8000-00000000fresh3",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+      saveBridgeExecutionLease: async (payload) => {
+        leaseWrites.push({ ...payload });
+        return { lease: payload };
+      },
+      fetchBridgeExecutionLease: async () => ({ lease: null }),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_missing_lease_followup",
+      message_type: "text",
+      content: JSON.stringify({ text: "请继续处理这条新消息" }),
+      chat_type: "group",
+      chat_id: "chat-missing-lease",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.replyPreview, /已改走新会话/);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-resume"), false);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-exec"), true);
+  assert.equal(bindings.get("chat-missing-lease").session_id, "019ce000-0000-7000-8000-00000000fresh3");
+  assert.equal(bindings.get("chat-missing-lease").metadata.last_route_error, "lease_missing");
+  assert.equal(leaseWrites.some((item) => item.state === "failed" && item.last_error === "lease_missing"), false);
+}
+
+async function testNonRunningLeaseForcesFreshExecWithoutResume() {
+  const bindings = new Map([
+    [
+      "chat-reported-lease",
+      {
+        bridge: "feishu",
+        chat_ref: "chat-reported-lease",
+        binding_scope: "project",
+        project_name: "Codex Hub",
+        topic_name: "",
+        session_id: "sess-reported-lease",
+        metadata: {
+          session_lane: "chat-reported-lease",
+        },
+      },
+    ],
+  ]);
+  const leaseWrites = [];
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload = {}) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T13:00:00Z",
+              updated_at: "2026-03-28T13:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const next = { ...(bindings.get(chatRef) || {}), bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
+            bindings.set(chatRef, next);
+            return { ok: true, binding: next };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        if (command === "codex-resume") {
+          throw new Error("unexpected resume");
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "已改走新会话。",
+            stderr: "session id: 019ce000-0000-7000-8000-00000000fresh4",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+      saveBridgeExecutionLease: async (payload) => {
+        leaseWrites.push({ ...payload });
+        return { lease: payload };
+      },
+      fetchBridgeExecutionLease: async () => ({
+        lease: {
+          bridge: "feishu",
+          conversation_key: "chat-reported-lease",
+          session_id: "sess-reported-lease",
+          state: "reported",
+          started_at: "2026-03-28T12:00:00Z",
+          last_progress_at: "2026-03-28T12:05:00Z",
+          stale_after_seconds: 300,
+          metadata: {
+            source_message_id: "om_reported_old",
+          },
+        },
+      }),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_reported_lease_followup",
+      message_type: "text",
+      content: JSON.stringify({ text: "请继续处理这条新消息" }),
+      chat_type: "group",
+      chat_id: "chat-reported-lease",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.replyPreview, /已改走新会话/);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-resume"), false);
+  assert.equal(brokerCalls.some((entry) => entry.command === "codex-exec"), true);
+  assert.equal(bindings.get("chat-reported-lease").session_id, "019ce000-0000-7000-8000-00000000fresh4");
+  assert.equal(bindings.get("chat-reported-lease").metadata.last_route_error, "lease_not_running:reported");
+  assert.equal(
+    leaseWrites.some((item) => item.state === "failed" && item.last_error === "lease_not_running:reported"),
+    false,
+  );
+}
+
+async function testHandleMessageEventPrefersFinalizeLaunchReplyText() {
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T13:00:00Z",
+              updated_at: "2026-03-28T13:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          return { ok: true, binding: null };
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "这是一段不该优先显示的原始 stdout。",
+            stderr: "session id: finalize-pref-1",
+            finalize_launch: {
+              status: "completed",
+              reply_text: "这是来自 finalize_launch 的正式回复。",
+              summary_excerpt: "短摘要",
+            },
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_finalize_reply",
+      message_type: "text",
+      content: JSON.stringify({ text: "请告诉我最终结论" }),
+      chat_type: "p2p",
+      chat_id: "",
+    },
+    sender: { sender_id: { open_id: "ou_finalize" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.replyPreview, /这是来自 finalize_launch 的正式回复/);
+  assert.equal(result.replyPreview.includes("原始 stdout"), false);
+}
+
+async function testNestedPostContentRoutesWithoutEmptyTextFailure() {
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload = {}) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T13:00:00Z",
+              updated_at: "2026-03-28T13:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+        }
+        if (command === "bridge-chat-binding") {
+          return { ok: true, binding: null };
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "富文本消息已正常进入执行链。",
+            stderr: "session id: post-route-1",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_post_route",
+      message_type: "post",
+      content: JSON.stringify({
+        zh_cn: {
+          content: [
+            [{ tag: "text", text: "@_user_1 " }, { tag: "text", text: "请继续排查这个问题" }],
+            [{ tag: "text", text: "补充说明也在这里" }],
+          ],
+        },
+      }),
+      chat_type: "group",
+      chat_id: "oc_post_route",
+    },
+    sender: { sender_id: { open_id: "ou_post_route" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.replyPreview, /富文本消息已正常进入执行链/);
+  const inboundRecord = brokerCalls.find(
+    (item) => item.command === "record-bridge-message" && item.payload.direction === "inbound",
+  );
+  assert.ok(inboundRecord);
+  assert.equal(inboundRecord.payload.payload.message_type, "post");
+  assert.equal(inboundRecord.payload.payload.text, "@_user_1\n请继续排查这个问题\n补充说明也在这里");
+}
+
 async function testLongBackgroundTasksStaySilentUntilFinalReply() {
   const statuses = [];
   const replies = [];
@@ -1484,8 +2394,613 @@ async function testConnectRecoversPendingConversationWithRecoveryNotice() {
   assert.equal(connected.ok, true);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(replies.length, 1);
-  assert.match(replies[0], /我刚恢复在线/);
+  assert.match(replies[0], /说明：我刚恢复在线/);
   assert.match(replies[0], /请把你当前还需要我处理的最新指令再发一遍/);
+}
+
+async function testReconnectNotifiesRecentActiveConversationAfterOutage() {
+  const replies = [];
+  const bridgeConversationRows = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "bridge-conversations") {
+          return { ok: true, rows: bridgeConversationRows.slice() };
+        }
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-23T03:00:00Z",
+              updated_at: "2026-03-23T03:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          return {
+            ok: true,
+            binding: { project_name: "Codex Hub", binding_scope: "project" },
+          };
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "先记录一条正常回复。",
+            stderr: "session id: 019ce000-0000-7000-8000-000000000777",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+  assert.equal((await service.connect()).ok, true);
+  await service.handleMessageEvent({
+    message: {
+      message_id: "om_seed_recent",
+      message_type: "text",
+      content: JSON.stringify({ text: "请总结当前状态" }),
+      chat_type: "p2p",
+      chat_id: "oc_recent",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  const replyCountBeforeReconnect = replies.length;
+
+  bridgeConversationRows.push({
+    chat_ref: "oc_recent",
+    chat_type: "group",
+    project_name: "Codex Hub",
+    topic_name: "",
+    participant_count: 1,
+    pending_request: true,
+    awaiting_report: false,
+    needs_attention: true,
+    attention_reason: "response_delayed",
+    last_user_request_age_seconds: 180,
+    last_message_age_seconds: 180,
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => originalNow() + 5 * 60 * 1000;
+  try {
+    assert.equal((await service.reconnect()).ok, true);
+  } finally {
+    Date.now = originalNow;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(replies.length, replyCountBeforeReconnect + 1);
+  assert.match(replies.at(-1), /说明：我刚恢复在线/);
+  assert.match(replies.at(-1), /请把你当前还需要我处理的最新指令再发一遍/);
+}
+
+async function testReconnectSkipsRecentConversationWithoutOpenWork() {
+  const replies = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+            rows: [
+              {
+                chat_ref: "oc_recent_idle",
+                chat_type: "group",
+                project_name: "Codex Hub",
+                topic_name: "",
+                participant_count: 1,
+                pending_request: false,
+                awaiting_report: false,
+                ack_pending: false,
+                needs_attention: false,
+                last_user_request_age_seconds: 180,
+                last_message_age_seconds: 180,
+              },
+            ],
+          };
+        }
+        if (command === "bridge-status") {
+          return {
+            ok: true,
+            connection_status: "disconnected",
+            last_event_at: "2026-03-23T03:00:00Z",
+            metadata: {
+              connected_at: "2026-03-23T02:55:00Z",
+              last_recovery_notice_at: "",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-03-23T03:10:00Z").getTime();
+  try {
+    assert.equal((await service.connect()).ok, true);
+  } finally {
+    Date.now = originalNow;
+  }
+  await delay(10);
+  assert.equal(replies.length, 0);
+}
+
+async function testReconnectWhilePreviouslyConnectedSkipsRecentRecoveryNotice() {
+  const replies = [];
+  const bridgeConversationRows = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "bridge-conversations") {
+          return { ok: true, rows: bridgeConversationRows.slice() };
+        }
+        if (command === "bridge-status") {
+          return {
+            ok: true,
+            connection_status: "connected",
+            last_event_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+            metadata: {
+              connected_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+  });
+  assert.equal((await service.connect()).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(replies.length, 0);
+
+  bridgeConversationRows.push({
+    chat_ref: "oc_recent_connected",
+    chat_type: "group",
+    project_name: "Growth System",
+    topic_name: "",
+    participant_count: 1,
+    pending_request: false,
+    awaiting_report: false,
+    needs_attention: false,
+    last_user_request_age_seconds: 180,
+    last_message_age_seconds: 180,
+  });
+
+  assert.equal((await service.connect()).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(replies.length, 0);
+}
+
+async function testConnectResetsEventClockAfterLongIdleGap() {
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async () => ({ ok: true }),
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "bridge-status") {
+          return {
+            ok: true,
+            connection_status: "connected",
+            last_event_at: "2026-03-23T03:00:00Z",
+            metadata: {
+              connected_at: "2026-03-23T02:55:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-03-23T03:45:00Z").getTime();
+  try {
+    assert.equal((await service.connect()).ok, true);
+  } finally {
+    Date.now = originalNow;
+  }
+
+  const currentStatus = service.getStatus();
+  assert.notEqual(currentStatus.connected_at, "2026-03-23T02:55:00Z");
+  assert.equal(currentStatus.last_event_at, currentStatus.connected_at);
+}
+
+async function testColdConnectLoadsPersistedBridgeStatusForRecoveryNotice() {
+  const replies = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "bridge-status") {
+          return {
+            ok: true,
+            last_event_at: "2026-03-23T03:00:00Z",
+            metadata: {
+              connected_at: "2026-03-23T02:55:00Z",
+              last_recovery_notice_at: "",
+              recent_message_count: 12,
+              recent_reply_count: 10,
+              last_message_preview: "preview",
+              last_sender_ref: "ou_sender",
+            },
+          };
+        }
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+        rows: [
+          {
+            chat_ref: "oc_cold_recover",
+            chat_type: "group",
+            project_name: "Codex Hub",
+            topic_name: "",
+            participant_count: 1,
+            pending_request: true,
+            awaiting_report: false,
+            ack_pending: false,
+            needs_attention: true,
+            attention_reason: "response_delayed",
+            last_user_request_age_seconds: 180,
+            last_message_age_seconds: 180,
+          },
+            ],
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-03-23T03:10:00Z").getTime();
+  try {
+    assert.equal((await service.connect()).ok, true);
+  } finally {
+    Date.now = originalNow;
+  }
+  await delay(10);
+  assert.equal(replies.length, 1);
+  assert.match(replies[0], /说明：我刚恢复在线/);
+}
+
+async function testColdConnectSkipsRecentRecoveryNoticeWhenPersistedStatusWasConnected() {
+  const replies = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "bridge-status") {
+          return {
+            ok: true,
+            connection_status: "connected",
+            last_event_at: "2026-03-23T03:00:00Z",
+            metadata: {
+              connected_at: "2026-03-23T02:55:00Z",
+              last_recovery_notice_at: "",
+            },
+          };
+        }
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+            rows: [
+              {
+                chat_ref: "oc_cold_connected",
+                chat_type: "group",
+                project_name: "Codex Hub",
+                topic_name: "",
+                participant_count: 1,
+                pending_request: false,
+                awaiting_report: false,
+                needs_attention: false,
+                last_user_request_age_seconds: 180,
+                last_message_age_seconds: 180,
+              },
+            ],
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-03-23T03:10:00Z").getTime();
+  try {
+    assert.equal((await service.connect()).ok, true);
+  } finally {
+    Date.now = originalNow;
+  }
+  await delay(10);
+  assert.equal(replies.length, 0);
 }
 
 async function testOnlyRuntimeQueriesStayDirect() {
@@ -1669,6 +3184,103 @@ async function testOnlyRuntimeQueriesStayDirect() {
   assert.match(result.replyPreview, /\/approve coco-allow9/);
 }
 
+async function testTopLevelHandlerSendsFallbackReplyOnUnexpectedFailure() {
+  const replies = [];
+  const wsStarts = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      constructor() {
+        this.handlers = {};
+      }
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start(payload) {
+        wsStarts.push(payload);
+      }
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command) => {
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-23T03:00:00Z",
+              updated_at: "2026-03-23T03:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          return {
+            ok: true,
+            binding: { project_name: "Codex Hub", binding_scope: "project" },
+          };
+        }
+        if (command === "codex-exec") {
+          throw new Error("route exploded");
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+  assert.equal((await service.connect()).ok, true);
+  const handler = wsStarts[0].eventDispatcher.handlers["im.message.receive_v1"];
+  await handler({
+    message: {
+      message_id: "om_handler_fail",
+      message_type: "text",
+      content: JSON.stringify({ text: "为什么现在会这样？" }),
+      chat_type: "p2p",
+      chat_id: "oc_failure",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  await delay(10);
+  assert.ok(replies.some((item) => /内部故障/.test(item)));
+  assert.ok(replies.some((item) => /请把当前仍需处理的最新指令再发一遍/.test(item)));
+}
+
 async function testServiceCanSendManualReport() {
   const replies = [];
   const brokerCalls = [];
@@ -1788,14 +3400,20 @@ async function testLongManualReportMirrorsToDocAndKeepsCardReply() {
             profile: { preferred_name: "Frank", relationship: "workspace owner" },
           };
         }
-        if (command === "feishu-op") {
-          assert.equal(payload.domain, "doc");
-          assert.equal(payload.action, "create");
+        if (command === "feishu-callback-executor") {
+          assert.equal(payload.action, "doc-create");
+          const callbackPayload = JSON.parse(payload.payload_json);
+          assert.equal(callbackPayload.target, "feishu:chat:oc_codex_hub");
+          assert.equal(callbackPayload.title.includes("CoCo 汇报摘要"), true);
           return {
             ok: true,
             result: {
-              document_id: "doc_456",
-              url: "https://feishu.cn/docx/doc_456",
+              ok: true,
+              action: "doc-create",
+              document: {
+                document_id: "doc_456",
+                url: "https://feishu.cn/docx/doc_456",
+              },
             },
           };
         }
@@ -1857,7 +3475,7 @@ async function testLongManualReportMirrorsToDocAndKeepsCardReply() {
   const rendered = parseReplyText(replies[0]);
   assert.match(rendered, /CoCo 汇报摘要/);
   assert.match(rendered, /结论：这一轮 Feishu UI 升级已进入验收/);
-  const docCall = brokerCalls.find((item) => item.command === "feishu-op");
+  const docCall = brokerCalls.find((item) => item.command === "feishu-callback-executor");
   assert.ok(docCall);
   const outbound = brokerCalls.find(
     (item) => item.command === "record-bridge-message" && item.payload.direction === "outbound",
@@ -2009,415 +3627,362 @@ async function testDelayedReplyNotice() {
     sender: { sender_id: { open_id: "ou_sender" } },
   });
   assert.equal(result.ok, true);
-  assert.match(result.replyPreview, /说明：你这条消息是延迟补回的/);
-  assert.match(result.replyPreview, /我现在已经在线/);
+  assert.doesNotMatch(result.replyPreview, /说明：你这条消息是延迟补回的/);
 }
 
 async function testChatBindingDeclarationRoutesWithProjectContext() {
   const brokerCalls = [];
   const bindings = new Map();
-  await withTempProjectRegistry(
-    [
-      {
-        project_name: "SampleProj",
-        aliases: ["Sample", "SampleProj"],
-        path: "03_semantic/projects/SampleProj.md",
-        status: "active",
-        summary_note: "Sample product project",
-      },
-    ],
-    async () => {
-      const service = createFeishuLongConnectionService({
-        brokerClient: {
-          call: async (command, payload) => {
-            brokerCalls.push({ command, payload });
-            if (command === "record-bridge-message") {
-              return {
-                ok: true,
-                record: {
-                  created_at: "2026-03-14T01:00:00Z",
-                  updated_at: "2026-03-14T01:00:00Z",
-                },
-              };
-            }
-            if (command === "user-profile") {
-              return {
-                ok: true,
-                profile: { preferred_name: "Frank", relationship: "workspace owner" },
-              };
-            }
-            if (command === "bridge-chat-binding") {
-              const chatRef = String(payload.chat_ref || "");
-              if (payload.binding_json) {
-                const binding = {
-                  chat_ref: chatRef,
-                  bridge: "feishu",
-                  ...payload.binding_json,
-                };
-                bindings.set(chatRef, binding);
-                return { ok: true, binding };
-              }
-              return { ok: true, binding: bindings.get(chatRef) || null };
-            }
-            return {
-              ok: true,
-              stdout: "这是第一轮回答。",
-              stderr: "session id: binding-session-1",
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-14T01:00:00Z",
+              updated_at: "2026-03-14T01:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const binding = {
+              chat_ref: chatRef,
+              bridge: "feishu",
+              ...payload.binding_json,
             };
-          },
-        },
-        runtimeState: {
-          saveBridgeStatus: async () => ({}),
-          saveBridgeSettings: async () => ({}),
-        },
-        sdkLoader: () => null,
-        logger: { info() {}, warn() {}, error() {} },
-      });
-      await service.loadSettings({
-        app_id: "cli_123",
-        app_secret: "secret",
-        group_policy: "all_messages",
-        require_mention: false,
-      });
-
-      const bindingResult = await service.handleMessageEvent({
-        message: {
-          message_id: "bind-msg",
-          message_type: "text",
-          content: JSON.stringify({ text: "哦不是，我说的是 SampleProj。在这个聊天群里面，我们只聊 SampleProj @_user_1" }),
-          chat_type: "group",
-          chat_id: "chat-bind",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      assert.equal(bindingResult.ok, true);
-      assert.equal(bindingResult.direct, true);
-      assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `SampleProj`/);
-
-      const binding = await service.getBindingForConversationKey("chat-bind");
-      assert.equal(binding?.project_name, "SampleProj");
-      assert.equal(binding?.topic_name, "");
-
-      const followupResult = await service.handleMessageEvent({
-        message: {
-          message_id: "bind-msg-2",
-          message_type: "text",
-          content: JSON.stringify({ text: "聊聊这个项目的进展" }),
-          chat_type: "group",
-          chat_id: "chat-bind",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      assert.equal(followupResult.ok, true);
-      const execCall = brokerCalls.find((item) => item.command === "codex-exec");
-      assert.ok(execCall);
-      assert.equal(execCall.payload.project_name, "SampleProj");
-      assert.equal(execCall.payload.topic_name, undefined);
-      assert.equal(execCall.payload.thread_label, "SampleProj");
-      assert.equal(execCall.payload.no_auto_resume, true);
-
-      await service.handleMessageEvent({
-        message: {
-          message_id: "bind-msg-3",
-          message_type: "text",
-          content: JSON.stringify({ text: "继续推进" }),
-          chat_type: "group",
-          chat_id: "chat-bind",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      const resumeCall = brokerCalls.find((item) => item.command === "codex-resume");
-      assert.ok(resumeCall);
-      assert.equal(resumeCall.payload.session_id, "binding-session-1");
-
-      await service.handleMessageEvent({
-        message: {
-          message_id: "bind-msg-4",
-          message_type: "text",
-          content: JSON.stringify({ text: "继续说 SampleProj 这个项目的后续安排" }),
-          chat_type: "group",
-          chat_id: "chat-bind",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      const resumeCalls = brokerCalls.filter((item) => item.command === "codex-resume");
-      assert.equal(resumeCalls.length, 2);
-      assert.equal(resumeCalls[1].payload.session_id, "binding-session-1");
+            bindings.set(chatRef, binding);
+            return { ok: true, binding };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        return {
+          ok: true,
+          stdout: "这是第一轮回答。",
+          stderr: "session id: binding-session-1",
+        };
+      },
     },
-  );
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const bindingResult = await service.handleMessageEvent({
+    message: {
+      message_id: "bind-msg",
+      message_type: "text",
+      content: JSON.stringify({ text: "哦不是，我说的是SampleProj。在这个聊天群里面，我们只聊SampleProj @_user_1" }),
+      chat_type: "group",
+      chat_id: "chat-bind",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  assert.equal(bindingResult.ok, true);
+  assert.equal(bindingResult.direct, true);
+  assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `SampleProj`/);
+
+  const binding = await service.getBindingForConversationKey("chat-bind");
+  assert.equal(binding?.project_name, "SampleProj");
+  assert.equal(binding?.topic_name, "");
+
+  const followupResult = await service.handleMessageEvent({
+    message: {
+      message_id: "bind-msg-2",
+      message_type: "text",
+      content: JSON.stringify({ text: "聊聊这个项目的进展" }),
+      chat_type: "group",
+      chat_id: "chat-bind",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  assert.equal(followupResult.ok, true);
+  const execCall = brokerCalls.find((item) => item.command === "codex-exec");
+  assert.ok(execCall);
+  assert.equal(execCall.payload.project_name, "SampleProj");
+  assert.equal(execCall.payload.topic_name, undefined);
+  assert.equal(execCall.payload.thread_label, "SampleProj");
+  assert.equal(execCall.payload.no_auto_resume, true);
+
+  await service.handleMessageEvent({
+    message: {
+      message_id: "bind-msg-3",
+      message_type: "text",
+      content: JSON.stringify({ text: "继续推进" }),
+      chat_type: "group",
+      chat_id: "chat-bind",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  const resumeCall = brokerCalls.find((item) => item.command === "codex-resume");
+  assert.ok(resumeCall);
+  assert.equal(resumeCall.payload.session_id, "binding-session-1");
+
+  await service.handleMessageEvent({
+    message: {
+      message_id: "bind-msg-4",
+      message_type: "text",
+      content: JSON.stringify({ text: "继续说 SampleProj 这个项目的后续安排" }),
+      chat_type: "group",
+      chat_id: "chat-bind",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  const resumeCalls = brokerCalls.filter((item) => item.command === "codex-resume");
+  assert.equal(resumeCalls.length, 2);
+  assert.equal(resumeCalls[1].payload.session_id, "binding-session-1");
 }
 
 async function testChatBindingDeclarationHandlesNaturalProjectPhrase() {
   const bindings = new Map();
-  await withTempProjectRegistry(
-    [
-      {
-        project_name: "示例交付",
-        aliases: ["示例交付", "示例交付项目"],
-        path: "03_semantic/projects/示例交付.md",
-        status: "active",
-        summary_note: "Sample delivery project",
-      },
-    ],
-    async () => {
-      const service = createFeishuLongConnectionService({
-        brokerClient: {
-          call: async (command, payload) => {
-            if (command === "record-bridge-message") {
-              return {
-                ok: true,
-                record: {
-                  created_at: "2026-03-14T02:30:00Z",
-                  updated_at: "2026-03-14T02:30:00Z",
-                },
-              };
-            }
-            if (command === "user-profile") {
-              return {
-                ok: true,
-                profile: { preferred_name: "Frank", relationship: "workspace owner" },
-              };
-            }
-            if (command === "bridge-chat-binding") {
-              const chatRef = String(payload.chat_ref || "");
-              if (payload.binding_json) {
-                const binding = {
-                  chat_ref: chatRef,
-                  bridge: "feishu",
-                  ...payload.binding_json,
-                };
-                bindings.set(chatRef, binding);
-                return { ok: true, binding };
-              }
-              return { ok: true, binding: bindings.get(chatRef) || null };
-            }
-            return {
-              ok: true,
-              stdout: "已绑定。",
-              stderr: "session id: binding-session-natural",
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-14T02:30:00Z",
+              updated_at: "2026-03-14T02:30:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const binding = {
+              chat_ref: chatRef,
+              bridge: "feishu",
+              ...payload.binding_json,
             };
-          },
-        },
-        runtimeState: {
-          saveBridgeStatus: async () => ({}),
-          saveBridgeSettings: async () => ({}),
-        },
-        sdkLoader: () => null,
-        logger: { info() {}, warn() {}, error() {} },
-      });
-      await service.loadSettings({
-        app_id: "cli_123",
-        app_secret: "secret",
-        group_policy: "all_messages",
-        require_mention: false,
-      });
-
-      const bindingResult = await service.handleMessageEvent({
-        message: {
-          message_id: "bind-natural",
-          message_type: "text",
-          content: JSON.stringify({
-            text: "@_user_1 这个群组只有你和我。你可以叫我吉祥或者Frank 。在这里，我们只聊示例交付的项目",
-          }),
-          chat_type: "group",
-          chat_id: "chat-natural",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      assert.equal(bindingResult.ok, true);
-      assert.equal(bindingResult.direct, true);
-      assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `示例交付`/);
-
-      const binding = await service.getBindingForConversationKey("chat-natural");
-      assert.equal(binding?.project_name, "示例交付");
-      assert.equal(binding?.topic_name, "");
+            bindings.set(chatRef, binding);
+            return { ok: true, binding };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        return {
+          ok: true,
+          stdout: "已绑定。",
+          stderr: "session id: binding-session-natural",
+        };
+      },
     },
-  );
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const bindingResult = await service.handleMessageEvent({
+    message: {
+      message_id: "bind-natural",
+      message_type: "text",
+      content: JSON.stringify({
+        text: "@_user_1 这个群组只有你和我。你可以叫我 Alex 或 Casey。在这里，我们只聊 Example Workspace 的项目",
+      }),
+      chat_type: "group",
+      chat_id: "chat-natural",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  assert.equal(bindingResult.ok, true);
+  assert.equal(bindingResult.direct, true);
+  assert.match(bindingResult.replyPreview, /已将本群绑定到项目 `Example Workspace`/);
+
+  const binding = await service.getBindingForConversationKey("chat-natural");
+  assert.equal(binding?.project_name, "Example Workspace");
+  assert.equal(binding?.topic_name, "");
 }
 
 async function testChatBindingDeclarationCapturesTopicHint() {
   const brokerCalls = [];
   const bindings = new Map();
-  await withTempProjectRegistry(
-    [
-      {
-        project_name: "示例交付",
-        aliases: ["示例交付"],
-        path: "03_semantic/projects/示例交付.md",
-        status: "active",
-        summary_note: "Sample delivery project",
-      },
-    ],
-    async () => {
-      const service = createFeishuLongConnectionService({
-        brokerClient: {
-          call: async (command, payload) => {
-            brokerCalls.push({ command, payload });
-            if (command === "record-bridge-message") {
-              return {
-                ok: true,
-                record: {
-                  created_at: "2026-03-14T02:00:00Z",
-                  updated_at: "2026-03-14T02:00:00Z",
-                },
-              };
-            }
-            if (command === "user-profile") {
-              return {
-                ok: true,
-                profile: { preferred_name: "Frank", relationship: "workspace owner" },
-              };
-            }
-            if (command === "bridge-chat-binding") {
-              const chatRef = String(payload.chat_ref || "");
-              if (payload.binding_json) {
-                const binding = {
-                  chat_ref: chatRef,
-                  bridge: "feishu",
-                  ...payload.binding_json,
-                };
-                bindings.set(chatRef, binding);
-                return { ok: true, binding };
-              }
-              return { ok: true, binding: bindings.get(chatRef) || null };
-            }
-            return {
-              ok: true,
-              stdout: "这是第一轮回答。",
-              stderr: "session id: binding-session-2",
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-14T02:00:00Z",
+              updated_at: "2026-03-14T02:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const binding = {
+              chat_ref: chatRef,
+              bridge: "feishu",
+              ...payload.binding_json,
             };
-          },
-        },
-        runtimeState: {
-          saveBridgeStatus: async () => ({}),
-          saveBridgeSettings: async () => ({}),
-        },
-        sdkLoader: () => null,
-        logger: { info() {}, warn() {}, error() {} },
-      });
-      await service.loadSettings({
-        app_id: "cli_123",
-        app_secret: "secret",
-        group_policy: "all_messages",
-        require_mention: false,
-      });
-
-      const bindingResult = await service.handleMessageEvent({
-        message: {
-          message_id: "topic-bind-msg",
-          message_type: "text",
-          content: JSON.stringify({ text: "这个群只聊 示例交付 展馆线" }),
-          chat_type: "group",
-          chat_id: "chat-topic",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      assert.equal(bindingResult.ok, true);
-      assert.equal(bindingResult.direct, true);
-      assert.match(bindingResult.replyPreview, /话题 `展馆线`/);
-
-      const binding = await service.getBindingForConversationKey("chat-topic");
-      assert.equal(binding?.project_name, "示例交付");
-      assert.equal(binding?.topic_name, "展馆线");
-
-      const followup = await service.handleMessageEvent({
-        message: {
-          message_id: "topic-followup",
-          message_type: "text",
-          content: JSON.stringify({ text: "继续" }),
-          chat_type: "group",
-          chat_id: "chat-topic",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-      assert.equal(followup.ok, true);
-      const execCall = brokerCalls.find((item) => item.command === "codex-exec");
-      assert.ok(execCall);
-      assert.equal(execCall.payload.project_name, "示例交付");
-      assert.equal(execCall.payload.topic_name, "展馆线");
-      assert.equal(execCall.payload.thread_label, "示例交付 / 展馆线");
-      assert.equal(execCall.payload.no_auto_resume, true);
+            bindings.set(chatRef, binding);
+            return { ok: true, binding };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        return {
+          ok: true,
+          stdout: "这是第一轮回答。",
+          stderr: "session id: binding-session-2",
+        };
+      },
     },
-  );
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const bindingResult = await service.handleMessageEvent({
+    message: {
+      message_id: "topic-bind-msg",
+      message_type: "text",
+      content: JSON.stringify({ text: "这个群只聊 Example Workspace PhaseA" }),
+      chat_type: "group",
+      chat_id: "chat-topic",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  assert.equal(bindingResult.ok, true);
+  assert.equal(bindingResult.direct, true);
+  assert.match(bindingResult.replyPreview, /话题 `PhaseA`/);
+
+  const binding = await service.getBindingForConversationKey("chat-topic");
+  assert.equal(binding?.project_name, "Example Workspace");
+  assert.equal(binding?.topic_name, "PhaseA");
+
+  const followup = await service.handleMessageEvent({
+    message: {
+      message_id: "topic-followup",
+      message_type: "text",
+      content: JSON.stringify({ text: "继续" }),
+      chat_type: "group",
+      chat_id: "chat-topic",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+  assert.equal(followup.ok, true);
+  const execCall = brokerCalls.find((item) => item.command === "codex-exec");
+  assert.ok(execCall);
+  assert.equal(execCall.payload.project_name, "Example Workspace");
+  assert.equal(execCall.payload.topic_name, "PhaseA");
+  assert.equal(execCall.payload.thread_label, "Example Workspace / PhaseA");
+  assert.equal(execCall.payload.no_auto_resume, true);
 }
 
 async function testChatBindingDeclarationReportsBrokerValidationFailure() {
   const bindings = new Map();
-  await withTempProjectRegistry(
-    [
-      {
-        project_name: "示例交付",
-        aliases: ["示例交付"],
-        path: "03_semantic/projects/示例交付.md",
-        status: "active",
-        summary_note: "Sample delivery project",
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-14T02:00:00Z",
+              updated_at: "2026-03-14T02:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            return {
+              ok: false,
+              error: "unknown topic_name `bad-topic` for project `Example Workspace`",
+              available_topics: ["PhaseA"],
+            };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        throw new Error(`unexpected command ${command}`);
       },
-    ],
-    async () => {
-      const service = createFeishuLongConnectionService({
-        brokerClient: {
-          call: async (command, payload) => {
-            if (command === "record-bridge-message") {
-              return {
-                ok: true,
-                record: {
-                  created_at: "2026-03-14T02:00:00Z",
-                  updated_at: "2026-03-14T02:00:00Z",
-                },
-              };
-            }
-            if (command === "user-profile") {
-              return {
-                ok: true,
-                profile: { preferred_name: "Frank", relationship: "workspace owner" },
-              };
-            }
-            if (command === "bridge-chat-binding") {
-              const chatRef = String(payload.chat_ref || "");
-              if (payload.binding_json) {
-                return {
-                  ok: false,
-                  error: "unknown topic_name `bad-topic` for project `示例交付`",
-                  available_topics: ["展馆线"],
-                };
-              }
-              return { ok: true, binding: bindings.get(chatRef) || null };
-            }
-            throw new Error(`unexpected command ${command}`);
-          },
-        },
-        runtimeState: {
-          saveBridgeStatus: async () => ({}),
-          saveBridgeSettings: async () => ({}),
-        },
-        sdkLoader: () => null,
-        logger: { info() {}, warn() {}, error() {} },
-      });
-      await service.loadSettings({
-        app_id: "cli_123",
-        app_secret: "secret",
-        group_policy: "all_messages",
-        require_mention: false,
-      });
-
-      const result = await service.handleMessageEvent({
-        message: {
-          message_id: "topic-bind-fail",
-          message_type: "text",
-          content: JSON.stringify({ text: "这个群只聊 示例交付 bad-topic" }),
-          chat_type: "group",
-          chat_id: "chat-topic-fail",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-
-      assert.equal(result.ok, true);
-      assert.equal(result.direct, true);
-      assert.match(result.replyPreview, /绑定没有成功/);
-      assert.match(result.replyPreview, /展馆线/);
-      assert.equal(await service.getBindingForConversationKey("chat-topic-fail"), null);
     },
-  );
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "topic-bind-fail",
+      message_type: "text",
+      content: JSON.stringify({ text: "这个群只聊 Example Workspace bad-topic" }),
+      chat_type: "group",
+      chat_id: "chat-topic-fail",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.direct, true);
+  assert.match(result.replyPreview, /绑定没有成功/);
+  assert.match(result.replyPreview, /PhaseA/);
+  assert.equal(await service.getBindingForConversationKey("chat-topic-fail"), null);
 }
 
 async function testPausedProjectReturnsPauseSummary() {
@@ -2592,90 +4157,77 @@ async function testUnboundGroupPromptsForBinding() {
 async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
   const bindings = new Map();
   const brokerCalls = [];
-  await withTempProjectRegistry(
-    [
-      {
-        project_name: "SampleProj",
-        aliases: ["Sample", "SampleProj"],
-        path: "03_semantic/projects/SampleProj.md",
-        status: "active",
-        summary_note: "Sample education project",
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-16T04:00:00Z",
+              updated_at: "2026-03-16T04:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          const chatRef = String(payload.chat_ref || "");
+          if (payload.binding_json) {
+            const binding = { bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
+            bindings.set(chatRef, binding);
+            return { ok: true, binding };
+          }
+          return { ok: true, binding: bindings.get(chatRef) || null };
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "已切到 SampleProj 上下文并完成摘要。",
+            stderr: "session id: 019ce000-0000-7000-8000-000000000999",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
       },
-    ],
-    async () => {
-      const service = createFeishuLongConnectionService({
-        brokerClient: {
-          call: async (command, payload) => {
-            brokerCalls.push({ command, payload });
-            if (command === "record-bridge-message") {
-              return {
-                ok: true,
-                record: {
-                  created_at: "2026-03-16T04:00:00Z",
-                  updated_at: "2026-03-16T04:00:00Z",
-                },
-              };
-            }
-            if (command === "user-profile") {
-              return {
-                ok: true,
-                profile: { preferred_name: "Frank", relationship: "workspace owner" },
-              };
-            }
-            if (command === "bridge-chat-binding") {
-              const chatRef = String(payload.chat_ref || "");
-              if (payload.binding_json) {
-                const binding = { bridge: "feishu", chat_ref: chatRef, ...payload.binding_json };
-                bindings.set(chatRef, binding);
-                return { ok: true, binding };
-              }
-              return { ok: true, binding: bindings.get(chatRef) || null };
-            }
-            if (command === "codex-exec") {
-              return {
-                ok: true,
-                stdout: "已切到 SampleProj 上下文并完成摘要。",
-                stderr: "session id: 019ce000-0000-7000-8000-000000000999",
-              };
-            }
-            throw new Error(`unexpected command ${command}`);
-          },
-        },
-        runtimeState: {
-          saveBridgeStatus: async () => ({}),
-          saveBridgeSettings: async () => ({}),
-        },
-        sdkLoader: () => null,
-        logger: { info() {}, warn() {}, error() {} },
-      });
-      await service.loadSettings({
-        app_id: "cli_123",
-        app_secret: "secret",
-        group_policy: "all_messages",
-        require_mention: false,
-      });
-
-      const result = await service.processMessageEvent({
-        message: {
-          message_id: "route-tint-1",
-          message_type: "text",
-          content: JSON.stringify({ text: "继续看一下 SampleProj 项目当前的情况，然后汇报。" }),
-          chat_type: "group",
-          chat_id: "chat-soft-route",
-        },
-        sender: { sender_id: { open_id: "ou_sender" } },
-      });
-
-      assert.equal(result.ok, true);
-      const execCall = brokerCalls.find((item) => item.command === "codex-exec");
-      assert.ok(execCall);
-      assert.equal(execCall.payload.project_name, "SampleProj");
-      const binding = bindings.get("chat-soft-route");
-      assert.equal(binding?.project_name, "SampleProj");
-      assert.equal(binding?.session_id, "019ce000-0000-7000-8000-000000000999");
-      assert.equal(binding?.metadata?.last_route_source, "message_project_alias");
     },
-  );
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+
+  const result = await service.processMessageEvent({
+    message: {
+      message_id: "route-tint-1",
+      message_type: "text",
+      content: JSON.stringify({ text: "继续看一下 SampleProj 项目当前的情况，然后汇报。" }),
+      chat_type: "group",
+      chat_id: "chat-soft-route",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  const execCall = brokerCalls.find((item) => item.command === "codex-exec");
+  assert.ok(execCall);
+  assert.equal(execCall.payload.project_name, "SampleProj");
+  const binding = bindings.get("chat-soft-route");
+  assert.equal(binding?.project_name, "SampleProj");
+  assert.equal(binding?.session_id, "019ce000-0000-7000-8000-000000000999");
+  assert.equal(binding?.metadata?.last_route_source, "message_project_alias");
 }
 
 async function testServiceBlocksWithoutSdk() {
@@ -2846,9 +4398,9 @@ async function testFeishuReplyCompactsLinksAndPaths() {
         return {
           ok: true,
           stdout:
-            "请查看 [详细报告](reports/system/feishu-bridge-runtime-plan.md)\n" +
+            "请查看 [详细报告](/workspace/reports/system/coco-feishu-development-plan.md)\n" +
             "完整日志在 https://example.com/report/12345\n" +
-            "问题点位于 workspace/bridge/feishu_long_connection_service.js",
+            "问题点位于 /workspace/bridge/feishu_long_connection_service.js",
           stderr: "session id: 019ce000-0000-7000-8000-000000000555",
         };
       },
@@ -2883,9 +4435,9 @@ async function testFeishuReplyCompactsLinksAndPaths() {
   });
   await new Promise((resolve) => setTimeout(resolve, 50));
   const finalReply = replies[replies.length - 1];
-  assert.match(finalReply, /详细报告/);
+  assert.match(finalReply, /`详细报告`/);
   assert.match(finalReply, /https:\/\/example\.com\/report\/12345/);
-  assert.match(finalReply, /workspace\/bridge\/feishu_long_connection_service\.js/);
+  assert.match(finalReply, /\/workspace\/bridge\/feishu_long_connection_service\.js/);
 }
 
 async function testHighRiskRequestReturnsApprovalTokenPrompt() {
@@ -2955,6 +4507,75 @@ async function testHighRiskRequestReturnsApprovalTokenPrompt() {
   assert.equal(saved.payload.token_json.scope, "feishu_high_risk_execution");
   assert.equal(saved.payload.token_json.status, "pending");
   assert.equal(saved.payload.token_json.metadata.requested_text, "请帮我 git push 当前分支");
+}
+
+async function testGitCommitRequestReturnsApprovalTokenPrompt() {
+  const brokerCalls = [];
+  const approvalItems = new Map();
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-28T01:00:00Z",
+              updated_at: "2026-03-28T01:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          if (payload.binding_json) {
+            return { ok: true, binding: { chat_ref: payload.chat_ref, ...payload.binding_json } };
+          }
+          return { ok: true, binding: { chat_ref: payload.chat_ref, project_name: "Codex Hub", binding_scope: "project" } };
+        }
+        if (command === "approval-token") {
+          if (payload.token_json) {
+            const item = { token: payload.token, ...payload.token_json };
+            approvalItems.set(payload.token, item);
+            return { ok: true, item };
+          }
+          return { ok: true, item: approvalItems.get(payload.token) || { token: payload.token, status: "" } };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_git_commit",
+      message_type: "text",
+      content: JSON.stringify({ text: "请帮我把这三组提交面直接收口" }),
+      chat_type: "p2p",
+      chat_id: "oc_direct",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.direct, true);
+  assert.match(result.replyPreview, /(高风险远程或不可逆动作|需要授权后才能继续)/);
+  assert.match(result.replyPreview, /\/approve coco-/);
+  const saved = brokerCalls.find((item) => item.command === "approval-token" && item.payload.token_json);
+  assert.ok(saved);
+  assert.equal(saved.payload.token_json.scope, "feishu_high_risk_execution");
+  assert.equal(saved.payload.token_json.status, "pending");
+  assert.equal(saved.payload.token_json.metadata.requested_text, "请帮我把这三组提交面直接收口");
 }
 
 async function testHighRiskRequestEventHandlerSendsInteractiveApprovalCard() {
@@ -3710,6 +5331,155 @@ async function testLegacyCardActionSourceMessageFallbackStillApproves() {
   assert.equal(approvalItems.get("coco-card-legacy").status, "approved");
 }
 
+async function testCardActionTriggerResumesBackgroundJobDelivery() {
+  const approvalItems = new Map([
+    [
+      "bgate-card-1",
+      {
+        token: "bgate-card-1",
+        scope: "background_job_external_delivery",
+        status: "pending",
+        project_name: "Codex Hub",
+        session_id: "bge-123",
+        expires_at: "2036-03-20T00:00:00Z",
+        metadata: {
+          task_id: "WH-FS-12",
+          job_id: "board-job.codex-hub.feishu-native-ai-followup",
+          open_id: "ou_sender",
+          approval_message_id: "msg-bg-card-approve",
+        },
+      },
+    ],
+  ]);
+  const brokerCalls = [];
+  const replies = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { ok: true };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-25T07:10:00Z",
+              updated_at: "2026-03-25T07:10:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "approval-token") {
+          if (payload.token_json) {
+            const existing = approvalItems.get(payload.token) || { token: payload.token };
+            const item = { ...existing, ...payload.token_json };
+            approvalItems.set(payload.token, item);
+            return { ok: true, item };
+          }
+          return { ok: true, item: approvalItems.get(payload.token) || { token: payload.token, status: "" } };
+        }
+        if (command === "bridge-chat-binding") {
+          return {
+            ok: true,
+            binding: {
+              chat_ref: payload.chat_ref,
+              project_name: "Codex Hub",
+              binding_scope: "project",
+            },
+          };
+        }
+        if (command === "feishu-callback-executor") {
+          return {
+            ok: true,
+            result_status: "success",
+            result: {
+              ok: true,
+              action: payload.action,
+              route: "background-job",
+              run_record: {
+                run_id: "bge-20260325-999999-demo",
+                delivery_status: "delivered",
+              },
+            },
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+  await service.connect();
+  const result = await service.handleCardActionEvent({
+    action: {
+      value: {
+        callback_data: "perm:allow:bgate-card-1",
+      },
+    },
+    context: {
+      open_chat_id: "oc_direct",
+      open_message_id: "msg-bg-card-approve",
+    },
+    operator: {
+      open_id: "ou_sender",
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(result.toast.content, "已批准，正在执行。");
+  assert.equal(approvalItems.get("bgate-card-1").status, "approved");
+  const backgroundJobCall = brokerCalls.find((item) => item.command === "feishu-callback-executor");
+  assert.ok(backgroundJobCall);
+  assert.equal(backgroundJobCall.payload.action, "approval-routed-action");
+  const callbackPayload = JSON.parse(backgroundJobCall.payload.payload_json);
+  assert.equal(callbackPayload.project_name, "Codex Hub");
+  assert.equal(callbackPayload.task_id, "WH-FS-12");
+  assert.equal(callbackPayload.approval_token, "bgate-card-1");
+  assert.ok(!brokerCalls.find((item) => item.command === "codex-exec"));
+  assert.match(replies[0], /已记录授权，开始执行。/);
+}
+
 async function testApproveCommandRejectsWrongThread() {
   const approvalItems = new Map([
     [
@@ -4008,14 +5778,173 @@ async function testApproveShorthandUsesPendingThreadToken() {
   assert.equal(approvalItems.get("coco-allow2").status, "approved");
 }
 
+async function testHandleMessageEventWritesExecutionLeaseForRunningRoute() {
+  const leaseWrites = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-26T03:00:00Z",
+              updated_at: "2026-03-26T03:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          return { ok: true, binding: null };
+        }
+        if (command === "codex-exec") {
+          return {
+            ok: true,
+            stdout: "这是一次排查结论。",
+            stderr: "session id: routed-lease-1",
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+      saveBridgeExecutionLease: async (payload) => {
+        leaseWrites.push({ ...payload });
+        return { lease: payload };
+      },
+      fetchBridgeExecutionLease: async () => ({ lease: null }),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "lease-route-1",
+      message_type: "text",
+      content: JSON.stringify({ text: "请继续排查 AI 辅导为什么前面的记录看不到了" }),
+      chat_type: "p2p",
+      chat_id: "",
+    },
+    sender: { sender_id: { open_id: "ou_lease_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  const runningLease = leaseWrites.find((item) => item.state === "running");
+  assert.ok(runningLease);
+  assert.equal(runningLease.conversation_key, "ou_lease_sender");
+  assert.equal(runningLease.session_id, "routed-lease-1");
+  assert.equal(runningLease.stale_after_seconds, 300);
+}
+
+async function testExecutionLeaseHeartbeatDoesNotInventProgress() {
+  const leaseWrites = [];
+  const capturedTimers = [];
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  global.setInterval = (callback, _interval) => {
+    const handle = { callback, unref() {} };
+    capturedTimers.push(handle);
+    return handle;
+  };
+  global.clearInterval = () => {};
+  try {
+    const service = createFeishuLongConnectionService({
+      brokerClient: {
+        call: async (command, payload) => {
+          if (command === "record-bridge-message") {
+            return {
+              ok: true,
+              record: {
+                created_at: "2026-03-26T03:00:00Z",
+                updated_at: "2026-03-26T03:00:00Z",
+              },
+            };
+          }
+          if (command === "user-profile") {
+            return {
+              ok: true,
+              profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            };
+          }
+          if (command === "bridge-chat-binding") {
+            return { ok: true, binding: null };
+          }
+          if (command === "codex-exec") {
+            return {
+              ok: true,
+              stdout: "这是一次排查结论。",
+              stderr: "session id: routed-lease-heartbeat-1",
+            };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+      runtimeState: {
+        saveBridgeStatus: async () => ({}),
+        saveBridgeSettings: async () => ({}),
+        saveBridgeExecutionLease: async (payload) => {
+          leaseWrites.push({ ...payload });
+          return { lease: payload };
+        },
+        fetchBridgeExecutionLease: async () => ({ lease: null }),
+      },
+      sdkLoader: () => null,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    const result = await service.handleMessageEvent({
+      message: {
+        message_id: "lease-route-heartbeat-1",
+        message_type: "text",
+        content: JSON.stringify({ text: "请继续排查这个飞书线程为什么没有后续结果" }),
+        chat_type: "p2p",
+        chat_id: "",
+      },
+      sender: { sender_id: { open_id: "ou_lease_heartbeat_sender" } },
+    });
+
+    assert.equal(result.ok, true);
+    const runningWrites = leaseWrites.filter((item) => item.state === "running");
+    assert.ok(runningWrites.length >= 1);
+    const initialProgressAt = runningWrites[0].last_progress_at;
+    assert.ok(initialProgressAt);
+    assert.ok(capturedTimers.length >= 1);
+
+    capturedTimers[0].callback();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const refreshedRunningWrites = leaseWrites.filter((item) => item.state === "running");
+    assert.ok(refreshedRunningWrites.length >= 2);
+    const latestRunning = refreshedRunningWrites[refreshedRunningWrites.length - 1];
+    assert.equal(latestRunning.last_progress_at, initialProgressAt);
+  } finally {
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+  }
+}
+
 async function main() {
   await testSanitizeAndSummarize();
   await testNormalizeSdkDomain();
   await testNormalizeMessageEvent();
+  await testNormalizeMessageEventExtractsNestedPostContent();
+  await testNormalizeMessageEventIgnoresAttachmentMetadataInPostContent();
+  await testNormalizeMessageEventSkipsAttachmentOnlyPayloads();
+  await testInboundNormalizeMessageEventSkipsAttachmentMetadata();
   await testNormalizeMessageEventDetectsTextMentionAlias();
   await testShouldAcceptMessage();
+  await testAttachmentMessagesDoNotRouteIntoCodex();
   await testShouldRunInBackgroundSkipsStatusQuestions();
   await testExecutionProfileAndApprovalClassificationCoverFeishuLocalExtensions();
+  await testSummarizeErrorTextPrefersMeaningfulExceptionLine();
   await testHighRiskRequestDetectsChineseGitHubPushPhrasing();
   await testSkillInstallRoutesWithLocalExtensionProfile();
   await testHandleMessageEventAcceptsTextMentionAlias();
@@ -4027,9 +5956,23 @@ async function main() {
   await testFastBackgroundTasksDoNotSendAck();
   await testSameChatBackgroundTasksSerialize();
   await testDifferentChatsBackgroundTasksRunInParallel();
+  await testSessionLaneMismatchForcesFreshExecPerChat();
+  await testTimedOutResumeClearsBindingAndAllowsFreshFollowup();
+  await testProgressStalledRunningLeaseForcesFreshExecWithoutResume();
+  await testMissingLeaseForcesFreshExecWithoutResume();
+  await testNonRunningLeaseForcesFreshExecWithoutResume();
+  await testHandleMessageEventPrefersFinalizeLaunchReplyText();
+  await testNestedPostContentRoutesWithoutEmptyTextFailure();
   await testLongBackgroundTasksStaySilentUntilFinalReply();
   await testConnectRecoversPendingConversationWithRecoveryNotice();
+  await testReconnectNotifiesRecentActiveConversationAfterOutage();
+  await testReconnectSkipsRecentConversationWithoutOpenWork();
+  await testReconnectWhilePreviouslyConnectedSkipsRecentRecoveryNotice();
+  await testConnectResetsEventClockAfterLongIdleGap();
+  await testColdConnectLoadsPersistedBridgeStatusForRecoveryNotice();
+  await testColdConnectSkipsRecentRecoveryNoticeWhenPersistedStatusWasConnected();
   await testOnlyRuntimeQueriesStayDirect();
+  await testTopLevelHandlerSendsFallbackReplyOnUnexpectedFailure();
   await testServiceCanSendManualReport();
   await testLongManualReportMirrorsToDocAndKeepsCardReply();
   await testStatusMessageUsesMetricDigestCard();
@@ -4045,6 +5988,7 @@ async function main() {
   await testLongRepliesAreSplitIntoMultipleMessages();
   await testFeishuReplyCompactsLinksAndPaths();
   await testHighRiskRequestReturnsApprovalTokenPrompt();
+  await testGitCommitRequestReturnsApprovalTokenPrompt();
   await testHighRiskRequestEventHandlerSendsInteractiveApprovalCard();
   await testLocalSystemApprovalPromptStoresScopedApprovedProfile();
   await testApproveCommandExecutesWithApprovedProfile();
@@ -4052,9 +5996,12 @@ async function main() {
   await testCardActionTriggerApprovesViaInteractiveCard();
   await testCardActionFallsBackToEmbeddedChatContext();
   await testLegacyCardActionSourceMessageFallbackStillApproves();
+  await testCardActionTriggerResumesBackgroundJobDelivery();
   await testApproveCommandRejectsWrongThread();
   await testApproveCommandRejectsExpiredToken();
   await testApproveShorthandUsesPendingThreadToken();
+  await testHandleMessageEventWritesExecutionLeaseForRunningRoute();
+  await testExecutionLeaseHeartbeatDoesNotInventProgress();
   console.log("ok");
 }
 

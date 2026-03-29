@@ -909,7 +909,7 @@ def run_growth_signal_scan(job: dict[str, Any]) -> dict[str, Any]:
     gaps.append("Feishu projection app 与 6 张表仍需落地，当前真相源仍以 Vault 主表为主。")
     gaps.append("Growth jobs、executor kinds 和平台写动作仍需接入现有 runtime。")
     next_steps = [
-        "先让 `增长与营销` 任务板稳定投影出 Growth jobs。",
+        "先让 `Growth System` 任务板稳定投影出 Growth jobs。",
         "再补 `growth_signal_scan / growth_offer_publish / growth_lead_cycle` 的 executor loop。",
         "最后把自动发布、自动互动、对象回写和飞书备份接成第一条闭环。",
     ]

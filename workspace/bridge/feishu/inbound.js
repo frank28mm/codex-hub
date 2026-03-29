@@ -6,6 +6,70 @@ const TEXT_MENTION_PATTERNS = [
   /(?:^|[\s(（【\[])[@＠]可可(?=$|[\s,.!?:;，。！？：；)\]】）])/,
 ];
 
+const TEXTUAL_MESSAGE_TYPES = new Set(["text", "post"]);
+const TEXT_CONTAINER_KEYS = [
+  "content",
+  "children",
+  "elements",
+  "body",
+  "title",
+  "header",
+  "paragraphs",
+  "lines",
+  "items",
+  "zh_cn",
+  "en_us",
+  "ja_jp",
+  "ko_kr",
+];
+
+function collectTextParts(value, parts = [], seen = new Set()) {
+  if (value == null) {
+    return parts;
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text) {
+      parts.push(text);
+    }
+    return parts;
+  }
+  if (typeof value !== "object") {
+    return parts;
+  }
+  if (seen.has(value)) {
+    return parts;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectTextParts(item, parts, seen));
+    return parts;
+  }
+  if (typeof value.text === "string") {
+    const text = value.text.trim();
+    if (text) {
+      parts.push(text);
+    }
+  }
+  TEXT_CONTAINER_KEYS.forEach((key) => {
+    if (!(key in value)) {
+      return;
+    }
+    collectTextParts(value[key], parts, seen);
+  });
+  return parts;
+}
+
+function extractMessageText(messageType, content) {
+  const normalizedType = String(messageType || "text").trim().toLowerCase();
+  if (!TEXTUAL_MESSAGE_TYPES.has(normalizedType)) {
+    return "";
+  }
+  const parts = collectTextParts(content);
+  if (!parts.length) return "";
+  return [...new Set(parts)].join("\n").trim();
+}
+
 function normalizeEventTimestamp(value) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -32,10 +96,7 @@ function safeParseContent(content) {
 }
 
 function extractText(content) {
-  if (!content) return "";
-  if (typeof content === "string") return content.trim();
-  if (typeof content.text === "string") return content.text.trim();
-  return "";
+  return extractMessageText("post", content);
 }
 
 function normalizeMessageEvent(event) {
@@ -43,12 +104,13 @@ function normalizeMessageEvent(event) {
   const sender = event?.sender || {};
   const mentions = Array.isArray(message?.mentions) ? message.mentions : [];
   const content = safeParseContent(message?.content);
-  const text = extractText(content);
+  const messageType = String(message?.message_type || "text").trim() || "text";
+  const text = extractMessageText(messageType, content);
   const messageCreatedAt = normalizeEventTimestamp(message?.create_time || message?.create_at || event?.create_time);
   return {
     event_type: event?.event_type || "im.message.receive_v1",
     message_id: String(message?.message_id || "").trim(),
-    message_type: String(message?.message_type || "text").trim() || "text",
+    message_type: messageType,
     chat_id: String(message?.chat_id || "").trim(),
     chat_type: String(message?.chat_type || "").trim(),
     open_id: String(sender?.sender_id?.open_id || sender?.open_id || "").trim(),

@@ -16,6 +16,8 @@ Before using this skill, read:
 
 Verify a real browser path, collect concrete evidence, and separate confirmed behavior from assumptions.
 
+For front-end or page-flow work, `browse` is normally the first half of a `browse -> qa` chain, not a standalone finish line.
+
 ## Workflow
 
 1. Clarify the target:
@@ -32,7 +34,13 @@ Verify a real browser path, collect concrete evidence, and separate confirmed be
    - verified behavior
    - broken behavior
    - still-unknown areas
-5. Recommend the next move:
+5. Package the browser evidence so the next stage can reuse it:
+   - page snapshot
+   - screenshot
+   - console or network findings
+   - exact path reproduced
+   - unresolved gaps
+6. Recommend the next move:
    - hand off to `qa`
    - hand off to `review`
    - hand off to `document-release`
@@ -44,14 +52,16 @@ Verify a real browser path, collect concrete evidence, and separate confirmed be
 2. Do not claim a UI issue is fixed without live evidence.
 3. If refs go stale or the page changes significantly, re-snapshot before continuing.
 4. Use headed browser mode when visual confirmation matters.
-5. End with evidence and a concrete next step.
+5. For front-end verification, prefer handing off to `qa` instead of declaring the work accepted inside `browse`.
+6. End with evidence and a concrete next step.
 
 ## Output Contract
 
 Return in this order:
 
-1. Status
+1. Current stage
 2. What I checked
 3. Verified behavior and failures
 4. Evidence collected
-5. Recommended next step
+5. QA-ready evidence handoff
+6. Recommended next step

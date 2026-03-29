@@ -40,7 +40,11 @@ Judge whether a change is safe, coherent, and ready to merge or ship.
 
 Return:
 
-1. Findings
-2. Open questions or assumptions
-3. Brief change summary only if useful
-
+1. Current stage
+2. Findings
+3. Review judgment
+4. Why this should move to `fix`, `qa`, `ship`, or stop here
+5. Next input needed
+6. Open questions or assumptions
+7. Recommended next step
+8. Brief change summary only if useful

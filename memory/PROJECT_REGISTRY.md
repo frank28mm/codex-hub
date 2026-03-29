@@ -11,7 +11,15 @@
 
 <!-- PROJECT_REGISTRY_DATA_START -->
 ```json
-[]
+[
+  {
+    "project_name": "Codex Hub",
+    "aliases": ["CodexHub", "codex hub", "coco workspace"],
+    "path": "",
+    "status": "active",
+    "summary_note": "Public Codex Hub system workspace and reference project."
+  }
+]
 ```
 <!-- PROJECT_REGISTRY_DATA_END -->
 
@@ -24,5 +32,4 @@
 5. `summary_note`
 
 ## Registered Projects
-
 

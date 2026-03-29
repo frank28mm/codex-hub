@@ -5,11 +5,16 @@ import json
 import os
 import sqlite3
 import hashlib
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 import datetime as dt
 import uuid
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     from ops import workspace_hub_project
@@ -74,6 +79,26 @@ RUNTIME_OWNERSHIP: dict[str, dict[str, Any]] = {
         "feishu_mode": "reserved",
         "purpose": "Future sidecar receipt state reserved for v1.0.6 and later.",
     },
+    "gflow_runs": {
+        "owner": "gflow_runtime",
+        "feishu_mode": "read_only",
+        "purpose": "Persisted GFlow workflow runs, gates, and current stage state.",
+    },
+    "gflow_stage_results": {
+        "owner": "gflow_runtime",
+        "feishu_mode": "read_only",
+        "purpose": "Persisted per-stage results and evidence handoff for GFlow runs.",
+    },
+    "bridge_execution_leases": {
+        "owner": "bridge/broker",
+        "feishu_mode": "writable",
+        "purpose": "Per-conversation execution lease truth for bridge-level stale detection.",
+    },
+    "growth_action_attempts": {
+        "owner": "growth_runtime",
+        "feishu_mode": "read_only",
+        "purpose": "Growth platform write attempts, idempotency, frequency, and failure tracking.",
+    },
 }
 
 STALE_THREAD_ATTENTION_AFTER_SECONDS = 12 * 60 * 60
@@ -105,10 +130,18 @@ def age_seconds(value: str) -> int | None:
     return max(0, int((dt.datetime.now(dt.timezone.utc) - parsed).total_seconds()))
 
 
+class ManagedConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):  # type: ignore[override]
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
     path = runtime_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30)
+    conn = sqlite3.connect(path, timeout=30, factory=ManagedConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
@@ -232,6 +265,26 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS bridge_execution_leases (
+        bridge TEXT NOT NULL,
+        conversation_key TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '',
+        project_name TEXT NOT NULL DEFAULT '',
+        topic_name TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL DEFAULT '',
+        last_progress_at TEXT NOT NULL DEFAULT '',
+        completed_at TEXT NOT NULL DEFAULT '',
+        stale_after_seconds INTEGER NOT NULL DEFAULT 0,
+        last_delivery_phase TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (bridge, conversation_key)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS runtime_events (
         event_key TEXT PRIMARY KEY,
         queue_name TEXT NOT NULL,
@@ -246,6 +299,56 @@ SCHEMA = [
         lease_expires_at TEXT NOT NULL DEFAULT '',
         attempt_count INTEGER NOT NULL DEFAULT 0,
         last_error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS gflow_runs (
+        run_id TEXT PRIMARY KEY,
+        project_name TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        invocation_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_stage_id TEXT NOT NULL DEFAULT '',
+        current_stage_skill TEXT NOT NULL DEFAULT '',
+        gate_type TEXT NOT NULL DEFAULT '',
+        gate_reason TEXT NOT NULL DEFAULT '',
+        gate_token TEXT NOT NULL DEFAULT '',
+        freeze_scope TEXT NOT NULL DEFAULT '',
+        latest_summary TEXT NOT NULL DEFAULT '',
+        latest_next_action TEXT NOT NULL DEFAULT '',
+        workflow_plan_json TEXT NOT NULL DEFAULT '{}',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS gflow_stage_results (
+        run_id TEXT NOT NULL,
+        stage_id TEXT NOT NULL,
+        skill TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        next_action TEXT NOT NULL DEFAULT '',
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        handoff_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, stage_id),
+        FOREIGN KEY (run_id) REFERENCES gflow_runs(run_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS growth_action_attempts (
+        idempotency_key TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        command TEXT NOT NULL,
+        action_status TEXT NOT NULL,
+        payload_fingerprint TEXT NOT NULL DEFAULT '',
+        risk_level TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -265,10 +368,13 @@ def init_db() -> dict[str, Any]:
             "review_items": scalar(conn, "SELECT COUNT(*) FROM review_items"),
             "coordination_items": scalar(conn, "SELECT COUNT(*) FROM coordination_items"),
             "sidecar_receipts": scalar(conn, "SELECT COUNT(*) FROM sidecar_receipts"),
+            "gflow_runs": scalar(conn, "SELECT COUNT(*) FROM gflow_runs"),
+            "gflow_stage_results": scalar(conn, "SELECT COUNT(*) FROM gflow_stage_results"),
             "bridge_settings": scalar(conn, "SELECT COUNT(*) FROM bridge_settings"),
             "bridge_connections": scalar(conn, "SELECT COUNT(*) FROM bridge_connections"),
             "bridge_chat_bindings": scalar(conn, "SELECT COUNT(*) FROM bridge_chat_bindings"),
             "runtime_events": scalar(conn, "SELECT COUNT(*) FROM runtime_events"),
+            "growth_action_attempts": scalar(conn, "SELECT COUNT(*) FROM growth_action_attempts"),
         }
     return {"db_path": str(runtime_db_path()), "initialized": True, "counts": counts}
 
@@ -346,7 +452,135 @@ def transaction() -> Iterator[sqlite3.Connection]:
 
 
 def json_text(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _payload_fingerprint(value: Any) -> str:
+    return hashlib.sha1(json_text(value).encode("utf-8")).hexdigest()
+
+
+def record_growth_action_attempt(
+    *,
+    idempotency_key: str,
+    platform: str,
+    command: str,
+    action_status: str,
+    payload: dict[str, Any] | None = None,
+    risk_level: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(idempotency_key or "").strip()
+    if not normalized_key:
+        raise ValueError("idempotency_key is required")
+    now = iso_now()
+    fingerprint = _payload_fingerprint(payload or {})
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO growth_action_attempts (
+                idempotency_key, platform, command, action_status, payload_fingerprint, risk_level, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                action_status = excluded.action_status,
+                payload_fingerprint = excluded.payload_fingerprint,
+                risk_level = excluded.risk_level,
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            """,
+            (
+                normalized_key,
+                str(platform or "").strip(),
+                str(command or "").strip(),
+                str(action_status or "").strip(),
+                fingerprint,
+                str(risk_level or "").strip(),
+                str(error or "").strip(),
+                now,
+                now,
+            ),
+        )
+    return fetch_growth_action_attempt(normalized_key)
+
+
+def fetch_growth_action_attempt(idempotency_key: str) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(idempotency_key or "").strip()
+    if not normalized_key:
+        return {
+            "idempotency_key": "",
+            "platform": "",
+            "command": "",
+            "action_status": "",
+            "payload_fingerprint": "",
+            "risk_level": "",
+            "error": "",
+            "created_at": "",
+            "updated_at": "",
+        }
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM growth_action_attempts WHERE idempotency_key = ?",
+            (normalized_key,),
+        ).fetchone()
+    payload = row_to_dict(row)
+    return payload if payload else {
+        "idempotency_key": normalized_key,
+        "platform": "",
+        "command": "",
+        "action_status": "",
+        "payload_fingerprint": "",
+        "risk_level": "",
+        "error": "",
+        "created_at": "",
+        "updated_at": "",
+    }
+
+
+def growth_action_recent_count(*, platform: str, since_seconds: int = 3600) -> int:
+    init_db()
+    since = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=max(0, int(since_seconds or 0)))
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with connect() as conn:
+        return scalar(
+            conn,
+            "SELECT COUNT(*) FROM growth_action_attempts WHERE platform = ? AND updated_at >= ?",
+            (str(platform or "").strip(), since),
+        )
+
+
+def growth_action_consecutive_failures(*, platform: str, command: str, limit: int = 10) -> int:
+    init_db()
+    query_limit = max(1, min(int(limit or 10), 50))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT action_status
+            FROM growth_action_attempts
+            WHERE platform = ? AND command = ?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (str(platform or "").strip(), str(command or "").strip(), query_limit),
+        ).fetchall()
+    count = 0
+    for row in rows:
+        if str(row["action_status"] or "").strip() == "failed":
+            count += 1
+            continue
+        break
+    return count
 
 
 def upsert_bridge_message(
@@ -765,6 +999,43 @@ def complete_runtime_event(
     return _decode_runtime_event(row)
 
 
+def renew_runtime_event_lease(
+    event_key: str,
+    *,
+    claim_token: str = "",
+    lease_seconds: int = 300,
+) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(event_key or "").strip()
+    if not normalized_key:
+        return _decode_runtime_event(None)
+    now_dt = dt.datetime.now(dt.timezone.utc)
+    now = now_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    lease_until = (
+        now_dt + dt.timedelta(seconds=max(30, int(lease_seconds or 300)))
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM runtime_events WHERE event_key = ?", (normalized_key,)).fetchone()
+        if row is None:
+            return _decode_runtime_event(None)
+        if claim_token and str(row["claim_token"] or "").strip() != claim_token:
+            return _decode_runtime_event(row)
+        if str(row["status"] or "").strip() != "processing":
+            return _decode_runtime_event(row)
+        conn.execute(
+            """
+            UPDATE runtime_events
+            SET leased_at = ?,
+                lease_expires_at = ?,
+                updated_at = ?
+            WHERE event_key = ?
+            """,
+            (now, lease_until, now, normalized_key),
+        )
+        row = conn.execute("SELECT * FROM runtime_events WHERE event_key = ?", (normalized_key,)).fetchone()
+    return _decode_runtime_event(row)
+
+
 def fail_runtime_event(
     event_key: str,
     *,
@@ -1000,6 +1271,68 @@ def fetch_bridge_messages(
     return items
 
 
+def fetch_bridge_message_activity(bridge: str = "feishu") -> dict[str, Any]:
+    init_db()
+    with connect() as conn:
+        inbound = conn.execute(
+            """
+            SELECT message_id, status, payload_json, created_at, updated_at
+            FROM bridge_messages
+            WHERE bridge = ? AND direction = 'inbound'
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (bridge,),
+        ).fetchone()
+        outbound = conn.execute(
+            """
+            SELECT message_id, status, payload_json, created_at, updated_at
+            FROM bridge_messages
+            WHERE bridge = ? AND direction = 'outbound'
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            (bridge,),
+        ).fetchone()
+
+    def normalize(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {
+                "message_id": "",
+                "status": "",
+                "created_at": "",
+                "updated_at": "",
+                "activity_at": "",
+                "text": "",
+                "sender_ref": "",
+                "phase": "",
+            }
+        payload = json.loads(row["payload_json"] or "{}")
+        created_at = str(row["created_at"] or "").strip()
+        updated_at = str(row["updated_at"] or "").strip()
+        return {
+            "message_id": str(row["message_id"] or "").strip(),
+            "status": str(row["status"] or "").strip(),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "activity_at": updated_at or created_at,
+            "text": str(payload.get("text") or "").strip(),
+            "sender_ref": str(
+                payload.get("open_id")
+                or payload.get("user_id")
+                or payload.get("sender_ref")
+                or ""
+            ).strip(),
+            "phase": str(payload.get("phase") or "").strip(),
+        }
+
+    return {
+        "bridge": bridge,
+        "inbound": normalize(inbound),
+        "outbound": normalize(outbound),
+    }
+
+
 def fetch_bridge_message_detail(
     *,
     bridge: str = "feishu",
@@ -1109,9 +1442,186 @@ def bridge_retrieval_protocol(*, bridge: str = "feishu", chat_ref: str = "", lim
     }
 
 
+def fetch_bridge_execution_lease(*, bridge: str = "feishu", conversation_key: str) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(conversation_key or "").strip()
+    if not normalized_key:
+        return {
+            "bridge": bridge,
+            "conversation_key": "",
+            "session_id": "",
+            "project_name": "",
+            "topic_name": "",
+            "state": "",
+            "started_at": "",
+            "last_progress_at": "",
+            "completed_at": "",
+            "stale_after_seconds": 0,
+            "last_delivery_phase": "",
+            "last_error": "",
+            "metadata": {},
+            "created_at": "",
+            "updated_at": "",
+        }
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM bridge_execution_leases WHERE bridge = ? AND conversation_key = ?",
+            (bridge, normalized_key),
+        ).fetchone()
+    payload = row_to_dict(row)
+    if not payload:
+        return {
+            "bridge": bridge,
+            "conversation_key": normalized_key,
+            "session_id": "",
+            "project_name": "",
+            "topic_name": "",
+            "state": "",
+            "started_at": "",
+            "last_progress_at": "",
+            "completed_at": "",
+            "stale_after_seconds": 0,
+            "last_delivery_phase": "",
+            "last_error": "",
+            "metadata": {},
+            "created_at": "",
+            "updated_at": "",
+        }
+    return {
+        "bridge": payload["bridge"],
+        "conversation_key": payload["conversation_key"],
+        "session_id": payload["session_id"],
+        "project_name": payload["project_name"],
+        "topic_name": payload["topic_name"],
+        "state": payload["state"],
+        "started_at": payload["started_at"],
+        "last_progress_at": payload["last_progress_at"],
+        "completed_at": payload["completed_at"],
+        "stale_after_seconds": int(payload.get("stale_after_seconds") or 0),
+        "last_delivery_phase": payload["last_delivery_phase"],
+        "last_error": payload["last_error"],
+        "metadata": json.loads(payload["metadata_json"]),
+        "created_at": payload["created_at"],
+        "updated_at": payload["updated_at"],
+    }
+
+
+def fetch_bridge_execution_leases(*, bridge: str = "feishu", limit: int = 100) -> list[dict[str, Any]]:
+    init_db()
+    query_limit = max(1, min(int(limit or 100), 500))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM bridge_execution_leases
+            WHERE bridge = ?
+            ORDER BY updated_at DESC, conversation_key ASC
+            LIMIT ?
+            """,
+            (bridge, query_limit),
+        ).fetchall()
+    payloads = []
+    for row in rows_to_dicts(rows):
+        payloads.append(
+            {
+                "bridge": row["bridge"],
+                "conversation_key": row["conversation_key"],
+                "session_id": row["session_id"],
+                "project_name": row["project_name"],
+                "topic_name": row["topic_name"],
+                "state": row["state"],
+                "started_at": row["started_at"],
+                "last_progress_at": row["last_progress_at"],
+                "completed_at": row["completed_at"],
+                "stale_after_seconds": int(row.get("stale_after_seconds") or 0),
+                "last_delivery_phase": row["last_delivery_phase"],
+                "last_error": row["last_error"],
+                "metadata": json.loads(row["metadata_json"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    return payloads
+
+
+def upsert_bridge_execution_lease(
+    *,
+    bridge: str,
+    conversation_key: str,
+    state: str,
+    session_id: str = "",
+    project_name: str = "",
+    topic_name: str = "",
+    started_at: str = "",
+    last_progress_at: str = "",
+    completed_at: str = "",
+    stale_after_seconds: int = 0,
+    last_delivery_phase: str = "",
+    last_error: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(conversation_key or "").strip()
+    if not normalized_key:
+        raise ValueError("conversation_key is required")
+    metadata = metadata or {}
+    now = iso_now()
+    existing = fetch_bridge_execution_lease(bridge=bridge, conversation_key=normalized_key)
+    normalized_started_at = str(started_at or "").strip() or str(existing.get("started_at") or "").strip() or now
+    normalized_progress_at = str(last_progress_at or "").strip() or now
+    normalized_completed_at = str(completed_at or "").strip()
+    if str(state or "").strip() in {"reported", "failed", "completed"} and not normalized_completed_at:
+        normalized_completed_at = now
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO bridge_execution_leases (
+                bridge, conversation_key, session_id, project_name, topic_name, state,
+                started_at, last_progress_at, completed_at, stale_after_seconds,
+                last_delivery_phase, last_error, metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bridge, conversation_key) DO UPDATE SET
+                session_id=excluded.session_id,
+                project_name=excluded.project_name,
+                topic_name=excluded.topic_name,
+                state=excluded.state,
+                started_at=excluded.started_at,
+                last_progress_at=excluded.last_progress_at,
+                completed_at=excluded.completed_at,
+                stale_after_seconds=excluded.stale_after_seconds,
+                last_delivery_phase=excluded.last_delivery_phase,
+                last_error=excluded.last_error,
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                bridge,
+                normalized_key,
+                session_id,
+                project_name,
+                topic_name,
+                state,
+                normalized_started_at,
+                normalized_progress_at,
+                normalized_completed_at,
+                max(0, int(stale_after_seconds or 0)),
+                last_delivery_phase,
+                last_error,
+                json_text(metadata),
+                str(existing.get("created_at") or "").strip() or now,
+                now,
+            ),
+        )
+    return fetch_bridge_execution_lease(bridge=bridge, conversation_key=normalized_key)
+
+
 def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> list[dict[str, Any]]:
     messages = fetch_bridge_messages(bridge=bridge, limit=max(200, limit * 8))
     bindings = {row["chat_ref"]: row for row in fetch_bridge_chat_bindings(bridge=bridge, limit=max(100, limit * 4))}
+    execution_leases = {
+        row["conversation_key"]: row
+        for row in fetch_bridge_execution_leases(bridge=bridge, limit=max(100, limit * 4))
+    }
     approval_rows = fetch_approval_tokens(limit=max(100, limit * 4))
     approvals_by_chat: dict[str, list[dict[str, Any]]] = {}
     for item in approval_rows:
@@ -1194,11 +1704,23 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
             row["last_error"] = str(payload.get("text") or "").strip()[:180]
     for chat_ref, row in grouped.items():
         binding = bindings.get(chat_ref, {})
+        lease = execution_leases.get(chat_ref, {})
         if binding:
             row["binding_scope"] = binding.get("binding_scope", "")
             row["topic_name"] = binding.get("topic_name", "")
             row["project_name"] = binding.get("project_name", "") or row.get("project_name", "")
             row["session_id"] = binding.get("session_id", "") or row.get("session_id", "")
+        if lease:
+            row["lease_state"] = str(lease.get("state") or "").strip()
+            row["lease_started_at"] = str(lease.get("started_at") or "").strip()
+            row["lease_last_progress_at"] = str(lease.get("last_progress_at") or "").strip()
+            row["lease_completed_at"] = str(lease.get("completed_at") or "").strip()
+            row["lease_stale_after_seconds"] = int(lease.get("stale_after_seconds") or 0)
+            row["lease_last_delivery_phase"] = str(lease.get("last_delivery_phase") or "").strip()
+            row["lease_last_error"] = str(lease.get("last_error") or "").strip()
+            row["project_name"] = str(lease.get("project_name") or row.get("project_name") or "").strip()
+            row["topic_name"] = str(lease.get("topic_name") or row.get("topic_name") or "").strip()
+            row["session_id"] = str(lease.get("session_id") or row.get("session_id") or "").strip()
     rows = []
     for row in grouped.values():
         ack_at = str(row.get("last_ack_at") or "").strip()
@@ -1208,9 +1730,16 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
         conversation_approvals = approvals_by_chat.get(chat_ref, [])
         pending_approvals = [item for item in conversation_approvals if approval_token_is_pending(item)]
         last_report_at = str(row.get("last_report_at") or "").strip()
+        lease_state = str(row.get("lease_state") or "").strip()
+        lease_started_at = str(row.get("lease_started_at") or "").strip()
+        lease_last_progress_at = str(row.get("lease_last_progress_at") or "").strip()
+        lease_completed_at = str(row.get("lease_completed_at") or "").strip()
+        lease_stale_after_seconds = max(0, int(row.get("lease_stale_after_seconds") or 0))
         pending_request = bool(user_request_at and (not terminal_at or terminal_at < user_request_at))
         execution_state = "idle"
-        if row.get("last_terminal_phase") == "error":
+        if lease_state in {"running", "approval_pending", "reported", "failed", "completed"}:
+            execution_state = "reported" if lease_state == "completed" else lease_state
+        elif row.get("last_terminal_phase") == "error":
             execution_state = "failed"
         elif row.get("last_terminal_phase"):
             execution_state = "reported"
@@ -1219,18 +1748,31 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
         elif pending_request:
             execution_state = "pending"
         binding_required = bool(row.get("chat_type") == "group" and not row.get("project_name"))
-        ack_pending = bool(pending_request and ack_at and ack_at >= user_request_at)
-        awaiting_report = bool(pending_request and last_report_at and last_report_at >= user_request_at)
+        ack_pending = bool(
+            execution_state == "running"
+            and str(row.get("lease_last_delivery_phase") or "").strip() == "ack"
+        ) or bool(pending_request and ack_at and ack_at >= user_request_at)
+        awaiting_report = execution_state == "running" or bool(
+            pending_request and last_report_at and last_report_at >= user_request_at
+        )
         last_user_request_age_seconds = age_seconds(user_request_at)
         last_ack_age_seconds = age_seconds(ack_at)
         last_report_age_seconds = age_seconds(str(row.get("last_report_at") or "").strip())
+        lease_last_progress_age_seconds = age_seconds(lease_last_progress_at or lease_started_at)
         attention_reason = ""
-        if row.get("last_terminal_phase") == "error":
+        if execution_state == "failed":
             attention_reason = "last_execution_failed"
         elif binding_required:
             attention_reason = "binding_required"
-        elif pending_approvals:
+        elif execution_state == "approval_pending" or pending_approvals:
             attention_reason = "approval_pending"
+        elif (
+            execution_state == "running"
+            and lease_last_progress_age_seconds is not None
+            and lease_stale_after_seconds > 0
+            and lease_last_progress_age_seconds >= lease_stale_after_seconds
+        ):
+            attention_reason = "progress_stalled"
         elif awaiting_report and (last_report_age_seconds or 0) >= PROGRESS_STALL_ATTENTION_AFTER_SECONDS:
             attention_reason = "progress_stalled"
         elif pending_request and (last_user_request_age_seconds or 0) >= RESPONSE_DELAY_ATTENTION_AFTER_SECONDS:
@@ -1268,6 +1810,14 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
                 "last_user_request_age_seconds": last_user_request_age_seconds,
                 "last_ack_age_seconds": last_ack_age_seconds,
                 "last_report_age_seconds": last_report_age_seconds,
+                "lease_state": lease_state,
+                "lease_started_at": lease_started_at,
+                "lease_last_progress_at": lease_last_progress_at,
+                "lease_last_progress_age_seconds": lease_last_progress_age_seconds,
+                "lease_completed_at": lease_completed_at,
+                "lease_stale_after_seconds": lease_stale_after_seconds,
+                "lease_last_delivery_phase": str(row.get("lease_last_delivery_phase") or "").strip(),
+                "lease_last_error": str(row.get("lease_last_error") or "").strip(),
                 "approval_pending": bool(pending_approvals),
                 "pending_approval_count": len(pending_approvals),
                 "pending_approval_token": str(pending_token.get("token") or "").strip(),
@@ -1497,7 +2047,9 @@ def fetch_runtime_summary() -> dict[str, Any]:
             "bridge_settings_count": scalar(conn, "SELECT COUNT(*) FROM bridge_settings"),
             "bridge_connection_count": scalar(conn, "SELECT COUNT(*) FROM bridge_connections"),
             "bridge_chat_binding_count": scalar(conn, "SELECT COUNT(*) FROM bridge_chat_bindings"),
+            "bridge_execution_lease_count": scalar(conn, "SELECT COUNT(*) FROM bridge_execution_leases"),
             "runtime_event_count": scalar(conn, "SELECT COUNT(*) FROM runtime_events"),
+            "growth_action_attempt_count": scalar(conn, "SELECT COUNT(*) FROM growth_action_attempts"),
             "runtime_queue": queue_status,
         }
 
@@ -1708,7 +2260,7 @@ def feishu_runtime_contract() -> dict[str, Any]:
     return {
         "truth_source": "obsidian_vault",
         "bitable_mode": "read_only_projection",
-        "writable_tables": ["bridge_messages", "delivery_status"],
+        "writable_tables": ["bridge_messages", "delivery_status", "bridge_execution_leases"],
         "reserved_tables": ["approval_tokens", "sidecar_receipts"],
         "read_only_tables": ["review_items", "coordination_items"],
         "queue_tables": ["runtime_events"],
@@ -1716,6 +2268,7 @@ def feishu_runtime_contract() -> dict[str, Any]:
             "retrieval_sync",
             "dashboard_sync",
             "feishu_projection_sync",
+            "growth_feishu_projection_sync",
             "bridge_message_log",
             "delivery_status_log",
             "approval_token_log",

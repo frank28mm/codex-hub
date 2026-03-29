@@ -124,6 +124,13 @@
 
 这时 Feishu 只是入口，底层仍然是同一套 `Codex Hub`。公开版当前也已经把官方 `Feishu CLI / lark-cli` 接入到底层 transport 与对象 backend，尽量复现私有版里“CoCo 继续像现在一样用”的体验。
 
+公开版当前已经进一步包含：
+
+- `GFlow / workflow-aware` 入口推荐与运行摘要
+- `Feishu callback + bridge recovery + execution lease`
+- 受审批保护的 `OpenCLI` 执行面
+- `health wake / catch-up` 自愈链
+
 ### 场景 3：长期记忆 + 可视化看板
 
 项目事实长期保存在 sibling `memory/` 中；
@@ -157,6 +164,13 @@
 - 自动写回项目板、报告和远程协作入口
 
 这也是公开版现在和“普通聊天机器人”最大的区别之一。
+
+如果你从旗舰版视角来理解，公开版现在的边界可以收成一句话：
+
+- 保留 `CoCo` 入口语义
+- 保留 `Codex Hub Core`
+- 公开掉足够多的 workflow / wake / bridge / execution 机制
+- 同时去掉个人项目、个人路径和敏感配置
 
 ## 依赖与官方链接
 

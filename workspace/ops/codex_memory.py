@@ -25,45 +25,133 @@ except ImportError:  # pragma: no cover
     import workspace_hub_project  # type: ignore
 
 
-WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_HUB_ROOT", str(workspace_hub_project.DEFAULT_WORKSPACE_ROOT)))
-VAULT_ROOT = Path(
-    os.environ.get(
-        "WORKSPACE_HUB_VAULT_ROOT",
-        str(workspace_hub_project.DEFAULT_LOCAL_VAULT_ROOT),
-    )
-)
-PROJECTS_ROOT = WORKSPACE_ROOT / "projects"
-RUNTIME_ROOT = WORKSPACE_ROOT / "runtime"
-WORKING_ROOT = VAULT_ROOT / "01_working"
-DASHBOARD_ROOT = VAULT_ROOT / "07_dashboards"
-REGISTRY_MD = VAULT_ROOT / "PROJECT_REGISTRY.md"
-ACTIVE_PROJECTS_MD = VAULT_ROOT / "ACTIVE_PROJECTS.md"
-NEXT_ACTIONS_MD = VAULT_ROOT / "NEXT_ACTIONS.md"
-NOW_MD = WORKING_ROOT / "NOW.md"
-REVIEW_ROOT = VAULT_ROOT / "04_review"
-REVIEW_INBOX_MD = REVIEW_ROOT / "INBOX.md"
-COORDINATION_ROOT = VAULT_ROOT / "04_coordination"
-COORDINATION_MD = COORDINATION_ROOT / "COORDINATION.md"
-DAILY_ROOT = VAULT_ROOT / "02_episodic" / "daily"
-PROJECT_SUMMARY_ROOT = VAULT_ROOT / "03_semantic" / "projects"
-SYSTEM_SUMMARY_ROOT = VAULT_ROOT / "03_semantic" / "systems"
-USER_PROFILE_MD = SYSTEM_SUMMARY_ROOT / "workspace-user-profile.md"
-HOME_DASHBOARD_MD = DASHBOARD_ROOT / "HOME.md"
-PROJECTS_DASHBOARD_MD = DASHBOARD_ROOT / "PROJECTS.md"
-ACTIONS_DASHBOARD_MD = DASHBOARD_ROOT / "ACTIONS.md"
-MEMORY_HEALTH_MD = DASHBOARD_ROOT / "MEMORY_HEALTH.md"
-MATERIALS_DASHBOARD_ROOT = DASHBOARD_ROOT / "materials"
-SESSION_ROUTER_JSON = RUNTIME_ROOT / "session-router.json"
-PROJECT_BINDINGS_JSON = RUNTIME_ROOT / "project-bindings.json"
-EVENTS_NDJSON = RUNTIME_ROOT / "events.ndjson"
-DASHBOARD_SYNC_STATE_JSON = RUNTIME_ROOT / "dashboard-sync-state.json"
-MEMORY_LOCK_PATH = RUNTIME_ROOT / ".memory-system.lock"
+WORKSPACE_ROOT = Path()
+VAULT_ROOT = Path()
+PROJECTS_ROOT = Path()
+RUNTIME_ROOT = Path()
+WORKING_ROOT = Path()
+DASHBOARD_ROOT = Path()
+REGISTRY_MD = Path()
+ACTIVE_PROJECTS_MD = Path()
+NEXT_ACTIONS_MD = Path()
+NOW_MD = Path()
+REVIEW_ROOT = Path()
+REVIEW_INBOX_MD = Path()
+COORDINATION_ROOT = Path()
+COORDINATION_MD = Path()
+DAILY_ROOT = Path()
+PROJECT_SUMMARY_ROOT = Path()
+SYSTEM_SUMMARY_ROOT = Path()
+USER_PROFILE_MD = Path()
+HOME_DASHBOARD_MD = Path()
+PROJECTS_DASHBOARD_MD = Path()
+ACTIONS_DASHBOARD_MD = Path()
+MEMORY_HEALTH_MD = Path()
+MATERIALS_DASHBOARD_ROOT = Path()
+SESSION_ROUTER_JSON = Path()
+PROJECT_BINDINGS_JSON = Path()
+EVENTS_NDJSON = Path()
+DASHBOARD_SYNC_STATE_JSON = Path()
+MEMORY_LOCK_PATH = Path()
 SESSION_INDEX_JSONL = Path.home() / ".codex" / "session_index.jsonl"
 HISTORY_JSONL = Path.home() / ".codex" / "history.jsonl"
 SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
 WORKSPACE_LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 WATCHER_NAME = "com.codexhub.codex-memory-watcher"
 DASHBOARD_SYNC_NAME = "com.codexhub.codex-dashboard-sync"
+GROWTH_PROJECT_NAME = str(os.environ.get("WORKSPACE_HUB_GROWTH_PROJECT_NAME", "Growth System")).strip() or "Growth System"
+GROWTH_CHAT_NAME = str(os.environ.get("WORKSPACE_HUB_GROWTH_CHAT_NAME", f"{GROWTH_PROJECT_NAME} Updates")).strip() or f"{GROWTH_PROJECT_NAME} Updates"
+
+
+def _int_env(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            print(f"[codex_memory] invalid {name}={raw!r}; falling back to {default}", file=sys.stderr)
+            value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+SYNC_TRIGGER_TIMEOUT_SECONDS = _int_env("WORKSPACE_HUB_SYNC_TRIGGER_TIMEOUT_SECONDS", 15, minimum=5)
+_WORKSPACE_LOCK_OWNER_PID = 0
+_WORKSPACE_LOCK_DEPTH = 0
+_WORKSPACE_LOCK_HANDLE: Any | None = None
+
+
+def _refresh_roots() -> None:
+    global WORKSPACE_ROOT
+    global VAULT_ROOT
+    global PROJECTS_ROOT
+    global RUNTIME_ROOT
+    global WORKING_ROOT
+    global DASHBOARD_ROOT
+    global REGISTRY_MD
+    global ACTIVE_PROJECTS_MD
+    global NEXT_ACTIONS_MD
+    global NOW_MD
+    global REVIEW_ROOT
+    global REVIEW_INBOX_MD
+    global COORDINATION_ROOT
+    global COORDINATION_MD
+    global DAILY_ROOT
+    global PROJECT_SUMMARY_ROOT
+    global SYSTEM_SUMMARY_ROOT
+    global USER_PROFILE_MD
+    global HOME_DASHBOARD_MD
+    global PROJECTS_DASHBOARD_MD
+    global ACTIONS_DASHBOARD_MD
+    global MEMORY_HEALTH_MD
+    global MATERIALS_DASHBOARD_ROOT
+    global SESSION_ROUTER_JSON
+    global PROJECT_BINDINGS_JSON
+    global EVENTS_NDJSON
+    global DASHBOARD_SYNC_STATE_JSON
+    global MEMORY_LOCK_PATH
+
+    workspace_root = Path(os.environ.get("WORKSPACE_HUB_ROOT", str(workspace_hub_project.DEFAULT_WORKSPACE_ROOT)))
+    vault_root = Path(
+        os.environ.get(
+            "WORKSPACE_HUB_VAULT_ROOT",
+            str(workspace_hub_project.DEFAULT_LOCAL_VAULT_ROOT),
+        )
+    )
+    WORKSPACE_ROOT = workspace_root
+    VAULT_ROOT = vault_root
+    PROJECTS_ROOT = workspace_root / "projects"
+    RUNTIME_ROOT = workspace_root / "runtime"
+    WORKING_ROOT = vault_root / "01_working"
+    DASHBOARD_ROOT = vault_root / "07_dashboards"
+    REGISTRY_MD = vault_root / "PROJECT_REGISTRY.md"
+    ACTIVE_PROJECTS_MD = vault_root / "ACTIVE_PROJECTS.md"
+    NEXT_ACTIONS_MD = vault_root / "NEXT_ACTIONS.md"
+    NOW_MD = WORKING_ROOT / "NOW.md"
+    REVIEW_ROOT = vault_root / "04_review"
+    REVIEW_INBOX_MD = REVIEW_ROOT / "INBOX.md"
+    COORDINATION_ROOT = vault_root / "04_coordination"
+    COORDINATION_MD = COORDINATION_ROOT / "COORDINATION.md"
+    DAILY_ROOT = vault_root / "02_episodic" / "daily"
+    PROJECT_SUMMARY_ROOT = vault_root / "03_semantic" / "projects"
+    SYSTEM_SUMMARY_ROOT = vault_root / "03_semantic" / "systems"
+    USER_PROFILE_MD = SYSTEM_SUMMARY_ROOT / "workspace-user-profile.md"
+    HOME_DASHBOARD_MD = DASHBOARD_ROOT / "HOME.md"
+    PROJECTS_DASHBOARD_MD = DASHBOARD_ROOT / "PROJECTS.md"
+    ACTIONS_DASHBOARD_MD = DASHBOARD_ROOT / "ACTIONS.md"
+    MEMORY_HEALTH_MD = DASHBOARD_ROOT / "MEMORY_HEALTH.md"
+    MATERIALS_DASHBOARD_ROOT = DASHBOARD_ROOT / "materials"
+    SESSION_ROUTER_JSON = RUNTIME_ROOT / "session-router.json"
+    PROJECT_BINDINGS_JSON = RUNTIME_ROOT / "project-bindings.json"
+    EVENTS_NDJSON = RUNTIME_ROOT / "events.ndjson"
+    DASHBOARD_SYNC_STATE_JSON = RUNTIME_ROOT / "dashboard-sync-state.json"
+    MEMORY_LOCK_PATH = RUNTIME_ROOT / ".memory-system.lock"
+
+
+_refresh_roots()
 
 REGISTRY_RE = re.compile(
     r"<!-- PROJECT_REGISTRY_DATA_START -->\s*```json\s*(.*?)\s*```\s*<!-- PROJECT_REGISTRY_DATA_END -->",
@@ -161,12 +249,31 @@ def display_date(text: str) -> str:
 
 @contextmanager
 def workspace_lock() -> Any:
-    MEMORY_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with MEMORY_LOCK_PATH.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    global _WORKSPACE_LOCK_OWNER_PID
+    global _WORKSPACE_LOCK_DEPTH
+    global _WORKSPACE_LOCK_HANDLE
+
+    current_pid = os.getpid()
+    if _WORKSPACE_LOCK_OWNER_PID == current_pid and _WORKSPACE_LOCK_HANDLE is not None:
+        _WORKSPACE_LOCK_DEPTH += 1
         try:
             yield
         finally:
+            _WORKSPACE_LOCK_DEPTH -= 1
+        return
+
+    MEMORY_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with MEMORY_LOCK_PATH.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _WORKSPACE_LOCK_OWNER_PID = current_pid
+        _WORKSPACE_LOCK_DEPTH = 1
+        _WORKSPACE_LOCK_HANDLE = handle
+        try:
+            yield
+        finally:
+            _WORKSPACE_LOCK_DEPTH = 0
+            _WORKSPACE_LOCK_OWNER_PID = 0
+            _WORKSPACE_LOCK_HANDLE = None
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -232,8 +339,7 @@ def recent_event_ids(path: Path, limit: int = 50) -> set[str]:
 
 
 def load_registry() -> list[dict[str, Any]]:
-    registry_path = Path(os.environ.get("WORKSPACE_HUB_VAULT_ROOT", str(VAULT_ROOT))) / "PROJECT_REGISTRY.md"
-    text = read_text(registry_path)
+    text = read_text(REGISTRY_MD)
     match = REGISTRY_RE.search(text)
     if not match:
         return []
@@ -254,13 +360,20 @@ def canonical_project_name(project_name: str) -> str:
 
 
 def normalize_vault_path(value: str | Path) -> str:
+    _refresh_roots()
     raw = str(value or "").strip()
     if not raw:
         return ""
     local_root = str(VAULT_ROOT.resolve())
     legacy_root = str(workspace_hub_project.LEGACY_ICLOUD_VAULT_ROOT.resolve())
-    if raw.startswith(legacy_root):
-        raw = f"{local_root}{raw[len(legacy_root):]}"
+    legacy_roots = [
+        legacy_root,
+        "/tmp/legacy-codex-hub-memory",
+    ]
+    for candidate in legacy_roots:
+        if raw.startswith(candidate):
+            raw = f"{local_root}{raw[len(candidate):]}"
+            break
     return str(Path(raw))
 
 
@@ -297,6 +410,7 @@ def render_registry(entries: list[dict[str, Any]]) -> str:
 
 
 def write_registry(entries: list[dict[str, Any]]) -> None:
+    _refresh_roots()
     write_text(REGISTRY_MD, render_registry(entries))
 
 
@@ -363,11 +477,13 @@ def render_frontmatter(data: dict[str, Any]) -> str:
 
 
 def project_summary_path(project_name: str) -> Path:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     return PROJECT_SUMMARY_ROOT / f"{project_name}.md"
 
 
 def user_profile_path() -> Path:
+    _refresh_roots()
     return USER_PROFILE_MD
 
 
@@ -431,16 +547,19 @@ def save_user_profile(
 
 
 def project_board_path(project_name: str) -> Path:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     return WORKING_ROOT / f"{project_name}-项目板.md"
 
 
 def materials_dashboard_path(project_name: str) -> Path:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     return MATERIALS_DASHBOARD_ROOT / f"{project_name}.md"
 
 
 def topic_board_paths(project_name: str) -> list[Path]:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     paths: list[Path] = []
     for path in sorted(WORKING_ROOT.glob(f"{project_name}-*跟进板.md")):
@@ -673,6 +792,7 @@ def validate_task_rows(rows: list[dict[str, str]], *, required_headers: list[str
 
 
 def create_project_board(project_name: str, *, status: str = "active", priority: str = "medium") -> None:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     path = project_board_path(project_name)
     if path.exists():
@@ -730,6 +850,7 @@ def create_project_board(project_name: str, *, status: str = "active", priority:
 
 
 def ensure_project_board(project_name: str) -> Path:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     summary = summary_metadata(project_name)
     create_project_board(project_name, status=summary.get("status", "active"), priority=summary.get("priority", "medium"))
@@ -737,6 +858,7 @@ def ensure_project_board(project_name: str) -> Path:
 
 
 def load_project_board(project_name: str) -> dict[str, Any]:
+    _refresh_roots()
     project_name = canonical_project_name(project_name)
     path = ensure_project_board(project_name)
     text = read_text(path)
@@ -790,6 +912,7 @@ def save_project_board(
     rollup_rows: list[dict[str, str]],
     gflow_rows: list[dict[str, str]] | None = None,
 ) -> None:
+    _refresh_roots()
     frontmatter["updated_at"] = dt.date.today().isoformat()
     body = replace_or_append_marked_section(body, "## Project Owned Tasks", AUTO_PROJECT_TASKS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, project_rows))
     body = replace_or_append_marked_section(body, "## Topic Rollups", AUTO_TOPIC_ROLLUPS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, rollup_rows))
@@ -831,6 +954,123 @@ def topic_rollup_rows(topic_board: dict[str, Any]) -> list[dict[str, str]]:
     return rows
 
 
+def _gflow_row_status(run_status: str) -> str:
+    normalized = str(run_status or "").strip()
+    if normalized == "planned":
+        return "todo"
+    if normalized == "running":
+        return "doing"
+    if normalized in {"paused", "awaiting_approval", "frozen"}:
+        return "blocked"
+    if normalized == "completed":
+        return "done"
+    return "todo"
+
+
+def _gflow_scope_label(payload: dict[str, Any]) -> str:
+    current_stage = str(payload.get("current_stage", "")).strip()
+    suggested_path = [str(item).strip() for item in payload.get("suggested_path", []) if str(item).strip()]
+    if current_stage and suggested_path:
+        return f"{current_stage} | {' -> '.join(suggested_path[:3])}"
+    if current_stage:
+        return current_stage
+    if suggested_path:
+        return " -> ".join(suggested_path[:3])
+    return "workflow"
+
+
+def gflow_board_rows(project_name: str, *, limit: int = 12) -> list[dict[str, str]]:
+    try:
+        from ops import gstack_automation
+    except ImportError:  # pragma: no cover
+        import gstack_automation  # type: ignore
+
+    rows: list[dict[str, str]] = []
+    for payload in gstack_automation.list_workflow_runs(project_name=project_name, limit=limit):
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            continue
+        run_summary = payload.get("run_summary") or {}
+        summary = str(run_summary.get("summary", "")).strip() or str(payload.get("main_thread_handoff", "")).strip()
+        run_status = str(payload.get("run_status", "")).strip()
+        next_action = str(run_summary.get("next_action", "")).strip() or str(payload.get("latest_next_action", "")).strip()
+        if not next_action:
+            if run_status == "completed":
+                next_action = "已完成，无需继续。"
+            elif run_status in {"awaiting_approval", "paused", "frozen"}:
+                next_action = "等待解除当前 gate 后继续。"
+            elif run_status == "planned":
+                next_action = "进入首阶段并开始推进。"
+            else:
+                next_action = "继续当前 workflow。"
+        entry_prompt = str(payload.get("entry_prompt", "")).strip()
+        if len(entry_prompt) > 72:
+            entry_prompt = entry_prompt[:69].rstrip() + "..."
+        template_label = str(payload.get("template_label", "")).strip()
+        gate = payload.get("gate") or {}
+        gate_reason = str(gate.get("reason", "")).strip()
+        delivery = summary
+        if gate_reason:
+            delivery = f"{summary} | gate: {gate_reason}" if summary else f"gate: {gate_reason}"
+        item_title = f"GFlow / {entry_prompt or '未命名 workflow'}"
+        if template_label:
+            item_title = f"GFlow / {template_label} / {entry_prompt or '未命名 workflow'}"
+        rows.append(
+            {
+                "ID": run_id,
+                "父ID": run_id,
+                "来源": "gflow",
+                "范围": _gflow_scope_label(payload),
+                "事项": item_title,
+                "状态": _gflow_row_status(run_status),
+                "交付物": delivery,
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": next_action,
+                "更新时间": str(run_summary.get("updated_at", "")).strip() or iso_now(),
+                "指向": f"gflow:{run_id}",
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            STATUS_ORDER.get(normalize_task_status(row.get("状态", "todo")), 99),
+            -(parse_iso_timestamp(row.get("更新时间", "")).timestamp() if parse_iso_timestamp(row.get("更新时间", "")) else 0),
+            row.get("ID", ""),
+        )
+    )
+    return rows
+
+
+def sync_gflow_project_layers(project_name: str, *, limit: int = 12) -> dict[str, Any]:
+    project_name = canonical_project_name(project_name)
+    board = load_project_board(project_name)
+    gflow_rows = gflow_board_rows(project_name, limit=limit)
+    save_project_board(
+        board["path"],
+        board["frontmatter"],
+        board["body"],
+        board["project_rows"],
+        board["rollup_rows"],
+        gflow_rows,
+    )
+    refresh_next_actions_rollup()
+    summary_text = ""
+    if gflow_rows:
+        top = gflow_rows[0]
+        summary_text = (
+            f"GFlow 当前运行：{top.get('事项', '')} | 状态：{top.get('状态', '')} | "
+            f"下一步：{top.get('下一步', '待补充')}"
+        )
+    return {
+        "project_name": project_name,
+        "board_path": str(board["path"]),
+        "gflow_rows": gflow_rows,
+        "summary_text": summary_text,
+    }
+
+
 def refresh_project_rollups(project_name: str, *, topic_path: Path | None = None) -> Path:
     project_name = canonical_project_name(project_name)
     project_board = load_project_board(project_name)
@@ -838,7 +1078,7 @@ def refresh_project_rollups(project_name: str, *, topic_path: Path | None = None
     body = project_board["body"]
     project_rows = project_board["project_rows"]
     rollup_rows = project_board["rollup_rows"]
-    gflow_rows = project_board.get("gflow_rows", [])
+    gflow_rows = project_board["gflow_rows"]
     new_rollups = [row for row in rollup_rows if not row.get("来源", "").startswith("topic:")]
     # Always rebuild topic rollups from every topic board of the project.
     # Incremental single-topic refresh would otherwise drop unrelated topic rows.
@@ -1037,92 +1277,109 @@ def launch_agent_loaded(label: str) -> bool:
     return result.returncode == 0
 
 
+def _timed_out_result(command: list[str], *, label: str, exc: subprocess.TimeoutExpired) -> subprocess.CompletedProcess[str]:
+    stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+    stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+    message = stderr.strip() or stdout.strip() or f"{label} timed out after {SYNC_TRIGGER_TIMEOUT_SECONDS}s"
+    print(f"[codex_memory] {message}", file=sys.stderr)
+    return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=message)
+
+
+def _run_sync_trigger(command: list[str], *, cwd: Path, label: str) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=SYNC_TRIGGER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return _timed_out_result(command, label=label, exc=exc)
+    if result.returncode != 0:
+        print(
+            f"[codex_memory] {label} failed: {result.stderr.strip() or result.stdout.strip()}",
+            file=sys.stderr,
+        )
+    return result
+
+
 def trigger_dashboard_sync_once() -> subprocess.CompletedProcess[str] | None:
+    _refresh_roots()
     sync_script = WORKSPACE_ROOT / "ops" / "codex_dashboard_sync.py"
     if not sync_script.exists():
         return None
-    result = subprocess.run(
-        ["python3", str(sync_script), "sync-once"],
-        cwd=WORKSPACE_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(
-            f"[codex_memory] dashboard sync failed: {result.stderr.strip() or result.stdout.strip()}",
-            file=sys.stderr,
-        )
-    return result
+    return _run_sync_trigger(["python3", str(sync_script), "sync-once"], cwd=WORKSPACE_ROOT, label="dashboard sync")
 
 
 def trigger_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | None:
+    _refresh_roots()
     projection_script = WORKSPACE_ROOT / "ops" / "feishu_projection.py"
     if not projection_script.exists():
         return None
-    result = subprocess.run(
+    return _run_sync_trigger(
         ["python3", str(projection_script), "run-sync-once"],
         cwd=WORKSPACE_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+        label="feishu projection sync",
     )
-    if result.returncode != 0:
-        print(
-            f"[codex_memory] feishu projection sync failed: {result.stderr.strip() or result.stdout.strip()}",
-            file=sys.stderr,
-        )
-    return result
 
 
 def trigger_growth_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | None:
+    _refresh_roots()
     projection_script = WORKSPACE_ROOT / "ops" / "growth_feishu_projection.py"
     if not projection_script.exists():
         return None
-    result = subprocess.run(
+    return _run_sync_trigger(
         ["python3", str(projection_script), "run-sync-once"],
         cwd=WORKSPACE_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+        label="growth feishu projection sync",
     )
-    if result.returncode != 0:
-        print(
-            f"[codex_memory] growth feishu projection sync failed: {result.stderr.strip() or result.stdout.strip()}",
-            file=sys.stderr,
-        )
-    return result
 
 
 def trigger_growth_operator_surface_report_once() -> subprocess.CompletedProcess[str] | None:
+    _refresh_roots()
     surface_script = WORKSPACE_ROOT / "ops" / "growth_operator_surface.py"
     if not surface_script.exists():
         return None
     output_path = WORKSPACE_ROOT / "reports" / "system" / f"codex-growth-system-operator-snapshot-{dt.date.today().isoformat()}.md"
-    result = subprocess.run(
+    return _run_sync_trigger(
         [
             "python3",
             str(surface_script),
             "report",
             "--project-name",
-            "增长与营销",
+            GROWTH_PROJECT_NAME,
             "--output",
             str(output_path),
         ],
         cwd=WORKSPACE_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+        label="growth operator surface report",
     )
-    if result.returncode != 0:
-        print(
-            f"[codex_memory] growth operator surface report failed: {result.stderr.strip() or result.stdout.strip()}",
-            file=sys.stderr,
-        )
-    return result
+
+
+def trigger_growth_daily_brief_once() -> subprocess.CompletedProcess[str] | None:
+    _refresh_roots()
+    brief_script = WORKSPACE_ROOT / "ops" / "growth_daily_brief.py"
+    if not brief_script.exists():
+        return None
+    return _run_sync_trigger(
+        [
+            "python3",
+            str(brief_script),
+            "deliver-if-needed",
+            "--project-name",
+            GROWTH_PROJECT_NAME,
+            "--chat",
+            GROWTH_CHAT_NAME,
+        ],
+        cwd=WORKSPACE_ROOT,
+        label="growth daily brief",
+    )
 
 
 def trigger_retrieval_sync_once() -> subprocess.CompletedProcess[str] | None:
+    _refresh_roots()
     retrieval_script = WORKSPACE_ROOT / "ops" / "codex_retrieval.py"
     if not retrieval_script.exists():
         return None
@@ -1132,12 +1389,10 @@ def trigger_retrieval_sync_once() -> subprocess.CompletedProcess[str] | None:
         limit=200,
         lease_seconds=900,
     )
-    result = subprocess.run(
+    result = _run_sync_trigger(
         ["python3", str(retrieval_script), "sync-index"],
         cwd=WORKSPACE_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
+        label="retrieval sync",
     )
     for item in claimed_events:
         if result.returncode == 0:
@@ -1219,6 +1474,9 @@ def record_project_writeback(
         if dashboard_result is None or dashboard_result.returncode == 0:
             trigger_feishu_projection_sync_once()
             trigger_growth_feishu_projection_sync_once()
+            if str(binding.get("project_name", "")).strip() == GROWTH_PROJECT_NAME:
+                trigger_growth_operator_surface_report_once()
+                trigger_growth_daily_brief_once()
     return event
 
 
@@ -1294,19 +1552,23 @@ def unique_actionable_followups(bindings: list[dict[str, Any]], limit: int | Non
 
 
 def load_bindings() -> dict[str, Any]:
+    _refresh_roots()
     return load_json(PROJECT_BINDINGS_JSON, {"version": 1, "updated_at": None, "bindings": []})
 
 
 def save_bindings(data: dict[str, Any]) -> None:
+    _refresh_roots()
     data["updated_at"] = iso_now()
     dump_json(PROJECT_BINDINGS_JSON, data)
 
 
 def load_router() -> dict[str, Any]:
+    _refresh_roots()
     return load_json(SESSION_ROUTER_JSON, {"version": 1, "updated_at": None, "routes": {}})
 
 
 def save_router(data: dict[str, Any]) -> None:
+    _refresh_roots()
     data["updated_at"] = iso_now()
     dump_json(SESSION_ROUTER_JSON, data)
 
@@ -1543,7 +1805,7 @@ def project_rollup_sections() -> dict[str, list[str]]:
     sections = {"doing": [], "todo": [], "blocked": [], "done": []}
     for entry in sorted(load_registry(), key=lambda item: item["project_name"].lower()):
         board = load_project_board(entry["project_name"])
-        grouped = select_project_focus_tasks(board["project_rows"], board["rollup_rows"])
+        grouped = select_project_focus_tasks(board["project_rows"], board["rollup_rows"], board.get("gflow_rows", []))
         chosen_by_status: dict[str, list[dict[str, str]]] = {"doing": [], "todo": [], "blocked": [], "done": []}
         if grouped["doing"]:
             chosen_by_status["doing"] = grouped["doing"]
@@ -1592,7 +1854,14 @@ def sync_project_layers(binding: dict[str, Any], *, task_updates: list[dict[str,
         project_board = load_project_board(binding["project_name"])
         if task_updates:
             _apply_task_updates(project_board["project_rows"], task_updates, default_updated_at=default_updated_at)
-        save_project_board(project_board["path"], project_board["frontmatter"], project_board["body"], project_board["project_rows"], project_board["rollup_rows"])
+        save_project_board(
+            project_board["path"],
+            project_board["frontmatter"],
+            project_board["body"],
+            project_board["project_rows"],
+            project_board["rollup_rows"],
+            project_board.get("gflow_rows", []),
+        )
         changed_targets.append(str(project_board["path"]))
     return changed_targets
 
@@ -1804,6 +2073,10 @@ def cmd_finalize_launch(args: argparse.Namespace) -> int:
                     "last_active_at": binding.get("last_active_at", binding["started_at"]),
                     "last_summary_path": str(project_summary_path(binding["project_name"])),
                     "last_thread_name": binding.get("thread_name", ""),
+                    "last_launch_source": binding.get("launch_source", ""),
+                    "last_source_chat_ref": binding.get("source_chat_ref", ""),
+                    "last_source_thread_name": binding.get("source_thread_name", ""),
+                    "last_source_thread_label": binding.get("source_thread_label", ""),
                     "binding_scope": binding.get("binding_scope", "project"),
                     "binding_board_path": binding.get("binding_board_path", ""),
                     "topic_name": binding.get("topic_name", ""),

@@ -176,6 +176,19 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
         args.push("--limit", String(payload.limit));
       }
     }
+    if (command === "bridge-execution-lease") {
+      args.push("--bridge", "feishu");
+      args.push("--conversation-key", String(payload.conversation_key || payload.conversationKey || ""));
+      if (payload.lease_json) {
+        args.push("--lease-json", JSON.stringify(payload.lease_json));
+      }
+    }
+    if (command === "bridge-execution-leases") {
+      args.push("--bridge", "feishu");
+      if (payload.limit) {
+        args.push("--limit", String(payload.limit));
+      }
+    }
     if (command === "approval-token") {
       if (payload.token) {
         args.push("--token", String(payload.token));
@@ -196,12 +209,17 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
     if (command === "projects" || command === "review-inbox" || command === "coordination-inbox") {
       if (payload.project_name) args.push("--project-name", String(payload.project_name));
     }
+    if (command === "material-suggest") {
+      args.push("--project-name", String(payload.project_name || payload.projectName || ""));
+      if (payload.prompt) args.push("--prompt", String(payload.prompt));
+    }
     if (command === "codex-exec") {
       args.length = 0;
       args.push("command-center", "--action", "codex-exec", "--prompt", String(payload.prompt || ""));
       if (payload.project_name) args.push("--project-name", String(payload.project_name));
       if (payload.session_id) args.push("--session-id", String(payload.session_id));
       if (payload.execution_profile) args.push("--execution-profile", String(payload.execution_profile));
+      if (payload.approval_token) args.push("--approval-token", String(payload.approval_token));
       if (payload.source) args.push("--source", String(payload.source));
       if (payload.chat_ref) args.push("--chat-ref", String(payload.chat_ref));
       if (payload.thread_name) args.push("--thread-name", String(payload.thread_name));
@@ -214,11 +232,36 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
       if (payload.prompt) args.push("--prompt", String(payload.prompt));
       if (payload.project_name) args.push("--project-name", String(payload.project_name));
       if (payload.execution_profile) args.push("--execution-profile", String(payload.execution_profile));
+      if (payload.approval_token) args.push("--approval-token", String(payload.approval_token));
       if (payload.source) args.push("--source", String(payload.source));
       if (payload.chat_ref) args.push("--chat-ref", String(payload.chat_ref));
       if (payload.thread_name) args.push("--thread-name", String(payload.thread_name));
       if (payload.thread_label) args.push("--thread-label", String(payload.thread_label));
       if (payload.source_message_id) args.push("--source-message-id", String(payload.source_message_id));
+    }
+    if (command === "feishu-op") {
+      args.length = 0;
+      args.push(
+        "feishu-op",
+        "--domain",
+        String(payload.domain || ""),
+        "--action",
+        String(payload.action || ""),
+        "--payload-json",
+        JSON.stringify(payload.payload || {}),
+      );
+    }
+    if (command === "feishu-callback-executor") {
+      args.length = 0;
+      args.push(
+        "feishu-callback-executor",
+        "--action",
+        String(payload.action || ""),
+        "--payload-json",
+        payload.payload_json !== undefined
+          ? String(payload.payload_json)
+          : JSON.stringify(payload.payload || {}),
+      );
     }
     if (command === "record-bridge-message") {
       args.length = 0;
@@ -280,6 +323,20 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
     return brokerCall("bridge-settings", { settings: settingsPayload });
   }
 
+  async function saveBridgeExecutionLease(leasePayload) {
+    return brokerCall("bridge-execution-lease", {
+      conversation_key:
+        leasePayload.conversation_key || leasePayload.conversationKey || "",
+      lease_json: leasePayload,
+    });
+  }
+
+  async function fetchBridgeExecutionLease({ conversationKey = "" } = {}) {
+    return brokerCall("bridge-execution-lease", {
+      conversation_key: conversationKey,
+    });
+  }
+
   async function ensureService() {
     if (service) return service;
     if (!fs.existsSync(moduleRef.modulePath)) {
@@ -305,6 +362,8 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
       runtimeState: {
         saveBridgeStatus,
         saveBridgeSettings,
+        saveBridgeExecutionLease,
+        fetchBridgeExecutionLease,
       },
       logger,
     });

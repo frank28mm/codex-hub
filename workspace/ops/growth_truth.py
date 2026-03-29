@@ -95,7 +95,7 @@ def default_frontmatter(object_name: str) -> dict[str, Any]:
     control = load_growth_control()
     return {
         "board_type": "growth_object",
-        "project_name": _text(control.get("project_name")) or "增长与营销",
+        "project_name": _text(control.get("project_name")) or "Growth System",
         "object_name": object_name,
         "updated_at": dt.date.today().isoformat(),
         "purpose": f"Codex Growth System 的 {object_name} 真相主表。",
@@ -148,7 +148,7 @@ def render_object_file(object_name: str, rows: list[dict[str, str]], *, frontmat
     meta.update(frontmatter or {})
     meta["object_name"] = object_name
     meta["updated_at"] = dt.date.today().isoformat()
-    title = f"# {_text(meta.get('project_name')) or '增长与营销'}｜Growth System｜{object_name}"
+    title = f"# {_text(meta.get('project_name')) or 'Growth System'}｜Growth System｜{object_name}"
     headers = object_headers(object_name)
     body = "\n".join([title, "", *codex_memory.markdown_table_lines(headers, rows)]).rstrip() + "\n"
     return f"{render_growth_frontmatter(meta)}\n\n{body}"

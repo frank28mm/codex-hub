@@ -11,6 +11,7 @@ WORKSPACE_ROOT="${WORKSPACE_HUB_ROOT:-$DEFAULT_WORKSPACE_ROOT}"
 VAULT_ROOT="${WORKSPACE_HUB_VAULT_ROOT:-$DEFAULT_VAULT_ROOT}"
 REGISTRY_MD="$VAULT_ROOT/PROJECT_REGISTRY.md"
 SESSION_ROUTER="$WORKSPACE_ROOT/runtime/session-router.json"
+PROJECT_BINDINGS_JSON="$WORKSPACE_ROOT/runtime/project-bindings.json"
 MEMORY_TOOL="$CODE_ROOT/ops/codex_memory.py"
 CONTEXT_TOOL="$CODE_ROOT/ops/codex_context.py"
 MATERIAL_ROUTER_TOOL="$CODE_ROOT/ops/material_router.py"
@@ -34,6 +35,9 @@ SOURCE_CHAT_REF=""
 SOURCE_THREAD_NAME=""
 SOURCE_THREAD_LABEL=""
 SOURCE_MESSAGE_ID=""
+ATTACHMENT_PATH=""
+ATTACHMENT_TYPE=""
+VOICE_TRANSCRIPT=""
 APPROVAL_TOKEN=""
 
 usage() {
@@ -109,6 +113,18 @@ while [[ $# -gt 0 ]]; do
       SOURCE_MESSAGE_ID="${2:-}"
       shift 2
       ;;
+    --attachment-path)
+      ATTACHMENT_PATH="${2:-}"
+      shift 2
+      ;;
+    --attachment-type)
+      ATTACHMENT_TYPE="${2:-}"
+      shift 2
+      ;;
+    --voice-transcript)
+      VOICE_TRANSCRIPT="${2:-}"
+      shift 2
+      ;;
     --approval-token)
       APPROVAL_TOKEN="${2:-}"
       shift 2
@@ -180,20 +196,14 @@ PY
 }
 
 canonicalize_project_name() {
-  python3 - "$REGISTRY_MD" "$CODE_ROOT" "$1" <<'PY'
+  python3 - "$REGISTRY_MD" "$1" <<'PY'
 import json, re, sys
-from pathlib import Path
 
-path, code_root, project = sys.argv[1], sys.argv[2], sys.argv[3]
+path, project = sys.argv[1], sys.argv[2]
 project = project.strip()
 if not project:
     print("")
     raise SystemExit(0)
-sys.path.insert(0, str(Path(code_root).resolve()))
-try:
-    from ops import workspace_hub_project
-except Exception:
-    workspace_hub_project = None
 try:
     text = open(path, "r", encoding="utf-8").read()
 except FileNotFoundError:
@@ -213,17 +223,14 @@ for item in data:
         if name and name.lower() == project_l:
             print(item.get("project_name", project))
             raise SystemExit(0)
-if workspace_hub_project is not None:
-    print(workspace_hub_project.canonicalize(project))
-else:
-    print(project)
+print(project)
 PY
 }
 
 resolve_resume_context() {
-  python3 - "$SESSION_ROUTER" "$1" <<'PY'
+  python3 - "$SESSION_ROUTER" "$PROJECT_BINDINGS_JSON" "$1" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" <<'PY'
 import json, sys, datetime as dt
-path, project = sys.argv[1], sys.argv[2]
+path, bindings_path, project, launch_source, source_chat_ref = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 try:
     data = json.load(open(path, "r", encoding="utf-8"))
 except Exception:
@@ -235,6 +242,10 @@ if not route:
     raise SystemExit(0)
 sid = route.get("last_session_id")
 last_active = route.get("last_active_at")
+route_launch_source = str(route.get("last_launch_source", "")).strip()
+route_source_chat_ref = str(route.get("last_source_chat_ref", "")).strip()
+launch_source = launch_source.strip()
+source_chat_ref = source_chat_ref.strip()
 if not sid or not last_active:
     print("")
     raise SystemExit(0)
@@ -243,14 +254,46 @@ try:
 except Exception:
     print("")
     raise SystemExit(0)
+if not route_launch_source and not route_source_chat_ref:
+    try:
+        bindings = json.load(open(bindings_path, "r", encoding="utf-8")).get("bindings", [])
+    except Exception:
+        bindings = []
+    candidates = []
+    for item in bindings:
+        if str(item.get("project_name", "")).strip() != project:
+            continue
+        if str(item.get("session_id", "")).strip() != str(sid).strip():
+            continue
+        candidates.append(item)
+    candidates.sort(
+        key=lambda item: str(item.get("last_active_at", "") or item.get("started_at", "") or ""),
+        reverse=True,
+    )
+    if candidates:
+        latest = candidates[0]
+        route_launch_source = str(latest.get("launch_source", "")).strip()
+        route_source_chat_ref = str(latest.get("source_chat_ref", "")).strip()
 now = dt.datetime.now(dt.timezone.utc)
 if (now - ts).total_seconds() <= 24 * 3600:
+    if route_launch_source or route_source_chat_ref:
+        if not launch_source:
+            print("")
+            raise SystemExit(0)
+        if route_launch_source and launch_source != route_launch_source:
+            print("")
+            raise SystemExit(0)
+        if route_source_chat_ref and source_chat_ref != route_source_chat_ref:
+            print("")
+            raise SystemExit(0)
     print(json.dumps({
         "session_id": sid,
         "binding_scope": route.get("binding_scope", "project"),
         "binding_board_path": route.get("binding_board_path", ""),
         "topic_name": route.get("topic_name", ""),
         "rollup_target": route.get("rollup_target", ""),
+        "last_launch_source": route_launch_source,
+        "last_source_chat_ref": route_source_chat_ref,
     }, ensure_ascii=False))
 else:
     print("")
@@ -279,6 +322,75 @@ load_context_suggestions() {
     return 0
   fi
   python3 "$CONTEXT_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}"
+}
+
+maybe_start_gflow_runtime() {
+  python3 - "$CODE_ROOT" "$1" "$2" "$3" "$4" <<'PY'
+import json
+import sys
+
+code_root, context_json, project_name, prompt, session_id = sys.argv[1:6]
+sys.path.insert(0, str(code_root))
+
+from ops import gstack_automation  # noqa: E402
+
+try:
+    context = json.loads(context_json or "{}")
+except Exception:
+    context = {}
+
+if not str(prompt or "").strip():
+    print(json.dumps(context, ensure_ascii=False))
+    raise SystemExit(0)
+
+gflow = context.get("gflow_recommendation") or {}
+if str(gflow.get("invocation_mode", "")).strip() != "gflow-explicit":
+    print(json.dumps(context, ensure_ascii=False))
+    raise SystemExit(0)
+if str(gflow.get("status", "")).strip() == "gflow-recommendation-error":
+    print(json.dumps(context, ensure_ascii=False))
+    raise SystemExit(0)
+
+payload = gstack_automation.start_explicit_workflow_run_if_requested(
+    prompt,
+    project_name=str(project_name or "").strip(),
+    session_id=str(session_id or "").strip(),
+)
+if not payload.get("started"):
+    print(json.dumps(context, ensure_ascii=False))
+    raise SystemExit(0)
+
+project_name = str(project_name or "").strip()
+if project_name:
+    runtime_summary = gstack_automation.latest_project_workflow_summary(project_name)
+else:
+    run_summary = payload.get("run_summary") or {}
+    runtime_summary = {
+        "run_id": str(payload.get("run_id", "")).strip(),
+        "run_status": str(payload.get("run_status", "")).strip(),
+        "current_stage": str(payload.get("current_stage", "")).strip(),
+        "template_id": str(payload.get("template_id", "")).strip(),
+        "template_label": str(payload.get("template_label", "")).strip(),
+        "latest_summary": str(payload.get("latest_summary", "")).strip() or str(run_summary.get("summary", "")).strip(),
+        "latest_next_action": str(payload.get("latest_next_action", "")).strip() or str(run_summary.get("next_action", "")).strip(),
+        "updated_at": str(payload.get("updated_at", "")).strip() or str(run_summary.get("updated_at", "")).strip(),
+        "gate": dict(payload.get("gate") or {}),
+        "suggested_path": list(payload.get("suggested_path", [])),
+    }
+
+context["gflow_runtime_summary"] = runtime_summary
+context["gflow_started_run"] = {
+    "run_id": str(payload.get("run_id", "")).strip(),
+    "run_status": str(payload.get("run_status", "")).strip(),
+    "current_stage": str(payload.get("current_stage", "")).strip(),
+    "template_id": str(payload.get("template_id", "")).strip(),
+    "template_label": str(payload.get("template_label", "")).strip(),
+}
+execution_contract = gstack_automation.build_runtime_execution_contract(payload)
+if execution_contract:
+    context["gflow_execution_contract"] = execution_contract
+print(json.dumps(context, ensure_ascii=False))
+PY
 }
 
 resolve_codex_settings() {
@@ -329,6 +441,75 @@ if protocol:
         print(f"context_timeline_path={path}")
     for path in (protocol.get("detail_paths") or [])[:2]:
         print(f"context_detail_path={path}")
+gflow = payload.get("gflow_recommendation") or {}
+if gflow:
+    gflow_status = str(gflow.get("status", "")).strip()
+    if gflow_status:
+        print(f"context_gflow_status={gflow_status}")
+    invocation_mode = str(gflow.get("invocation_mode", "")).strip()
+    if invocation_mode:
+        print(f"context_gflow_mode={invocation_mode}")
+    error = str(gflow.get("error", "")).strip()
+    if error:
+        print(f"context_gflow_error={error}")
+    entry_prompt = str(gflow.get("entry_prompt", "")).strip()
+    if entry_prompt:
+        print(f"context_gflow_entry_prompt={entry_prompt}")
+    suggested_path = [str(item).strip() for item in gflow.get("suggested_path", []) if str(item).strip()]
+    if suggested_path:
+        print(f"context_gflow_path={' -> '.join(suggested_path)}")
+    initial_stage = str(gflow.get("initial_stage", "")).strip()
+    if initial_stage:
+        print(f"context_gflow_initial_stage={initial_stage}")
+    template_id = str(gflow.get("template_id", "")).strip()
+    if template_id:
+        print(f"context_gflow_template_id={template_id}")
+    template_label = str(gflow.get("template_label", "")).strip()
+    if template_label:
+        print(f"context_gflow_template_label={template_label}")
+    project_scope_id = str(gflow.get("project_scope_id", "")).strip()
+    if project_scope_id:
+        print(f"context_gflow_project_scope_id={project_scope_id}")
+    project_scope_label = str(gflow.get("project_scope_label", "")).strip()
+    if project_scope_label:
+        print(f"context_gflow_project_scope_label={project_scope_label}")
+    handoff_preview = str(gflow.get("handoff_preview", "")).strip()
+    if handoff_preview:
+        print(f"context_gflow_handoff_preview={handoff_preview.replace(chr(10), ' | ')}")
+gflow_started = payload.get("gflow_started_run") or {}
+if gflow_started:
+    started_run_id = str(gflow_started.get("run_id", "")).strip()
+    if started_run_id:
+        print(f"context_gflow_started_run_id={started_run_id}")
+    started_status = str(gflow_started.get("run_status", "")).strip()
+    if started_status:
+        print(f"context_gflow_started_run_status={started_status}")
+gflow_runtime = payload.get("gflow_runtime_summary") or {}
+if gflow_runtime:
+    run_id = str(gflow_runtime.get("run_id", "")).strip()
+    if run_id:
+        print(f"context_gflow_run_id={run_id}")
+    run_status = str(gflow_runtime.get("run_status", "")).strip()
+    if run_status:
+        print(f"context_gflow_run_status={run_status}")
+    current_stage = str(gflow_runtime.get("current_stage", "")).strip()
+    if current_stage:
+        print(f"context_gflow_run_stage={current_stage}")
+    template_id = str(gflow_runtime.get("template_id", "")).strip()
+    if template_id:
+        print(f"context_gflow_run_template_id={template_id}")
+    template_label = str(gflow_runtime.get("template_label", "")).strip()
+    if template_label:
+        print(f"context_gflow_run_template_label={template_label}")
+    latest_summary = str(gflow_runtime.get("latest_summary", "")).strip()
+    if latest_summary:
+        print(f"context_gflow_run_summary={latest_summary.replace(chr(10), ' | ')}")
+    latest_next_action = str(gflow_runtime.get("latest_next_action", "")).strip()
+    if latest_next_action:
+        print(f"context_gflow_run_next_action={latest_next_action.replace(chr(10), ' | ')}")
+    updated_at = str(gflow_runtime.get("updated_at", "")).strip()
+    if updated_at:
+        print(f"context_gflow_run_updated_at={updated_at}")
 workflow = payload.get("workflow_recommendation") or {}
 if workflow:
     suggested_path = [str(item).strip() for item in workflow.get("suggested_path", []) if str(item).strip()]
@@ -370,7 +551,7 @@ PY
 
 build_launch_context_json() {
   python3 - \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" <<'PY'
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" <<'PY'
 import json, sys
 
 (
@@ -386,9 +567,12 @@ import json, sys
     source_chat_ref,
     source_thread_name,
     source_thread_label,
+    attachment_path,
+    attachment_type,
+    voice_transcript,
     selected_model,
     selected_reasoning_effort,
-) = sys.argv[1:15]
+) = sys.argv[1:18]
 
 print(
     json.dumps(
@@ -405,6 +589,9 @@ print(
             "source_chat_ref": source_chat_ref,
             "source_thread_name": source_thread_name,
             "source_thread_label": source_thread_label,
+            "attachment_path": attachment_path,
+            "attachment_type": attachment_type,
+            "voice_transcript": voice_transcript,
             "model": selected_model,
             "reasoning_effort": selected_reasoning_effort,
         },
@@ -416,7 +603,7 @@ PY
 
 build_launcher_context_note() {
   python3 - \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" <<'PY'
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" <<'PY'
 import json, sys
 
 (
@@ -429,13 +616,15 @@ import json, sys
     source_thread_name,
     source_thread_label,
     source_message_id,
+    attachment_path,
+    attachment_type,
+    voice_transcript,
     context_json,
     mode,
     execution_profile,
     selected_model,
     selected_reasoning_effort,
-    code_root,
-) = sys.argv[1:16]
+) = sys.argv[1:18]
 
 try:
     context = json.loads(context_json) if context_json else {}
@@ -470,6 +659,12 @@ if launch_source or project_name or source_thread_name or source_thread_label or
         lines.append(f"来源聊天引用：{source_chat_ref}。")
     if source_message_id:
         lines.append(f"来源消息 ID：{source_message_id}。")
+    if attachment_type:
+        lines.append(f"当前消息附带附件类型：{attachment_type}。")
+    if attachment_path:
+        lines.append(f"本地附件路径：{attachment_path}。")
+    if voice_transcript:
+        lines.append(f"语音转写：{voice_transcript}")
     if launch_source == "weixin" and (source_thread_label == "CoCo 私聊" or source_thread_name == "CoCo 私聊") and not (project_name and project_name != "general"):
         lines.append("这条微信私聊线程应视作 `CoCo 私聊` 的工作区级入口，默认不绑定单个项目。")
         lines.append("只有当用户当前这条消息明确提到项目名，或明确要求续接上一个项目型会话时，才进入项目上下文。")
@@ -499,6 +694,86 @@ if launch_source or project_name or source_thread_name or source_thread_label or
             lines.append("需要细读时，优先展开这些 detail 入口：")
             for path in detail_paths[:3]:
                 lines.append(f"- {path}")
+    gflow = context.get("gflow_recommendation") or {}
+    if gflow:
+        lines.append("当前已命中 `GFlow` 显式强制流程模式。")
+        gflow_status = str(gflow.get("status", "")).strip()
+        if gflow_status:
+            lines.append(f"GFlow 当前状态：`{gflow_status}`。")
+        invocation_mode = str(gflow.get("invocation_mode", "")).strip()
+        if invocation_mode:
+            lines.append(f"GFlow 入口模式：`{invocation_mode}`。")
+        gflow_error = str(gflow.get("error", "")).strip()
+        if gflow_error:
+            lines.append(f"GFlow 预解析失败：{gflow_error}")
+        entry_prompt = str(gflow.get("entry_prompt", "")).strip()
+        if entry_prompt:
+            lines.append(f"GFlow 入口提示：{entry_prompt}")
+        suggested_path = [str(item).strip() for item in gflow.get("suggested_path", []) if str(item).strip()]
+        if suggested_path:
+            lines.append(f"GFlow 初始路径：`{' -> '.join(suggested_path)}`。")
+        initial_stage = str(gflow.get("initial_stage", "")).strip()
+        if initial_stage:
+            lines.append(f"GFlow 初始阶段：`{initial_stage}`。")
+        template_id = str(gflow.get("template_id", "")).strip()
+        template_label = str(gflow.get("template_label", "")).strip()
+        if template_id or template_label:
+            lines.append(f"GFlow 模板：`{template_id or 'unknown'}` | {template_label or '待补充'}")
+        project_scope_id = str(gflow.get("project_scope_id", "")).strip()
+        project_scope_label = str(gflow.get("project_scope_label", "")).strip()
+        if project_scope_id or project_scope_label:
+            lines.append(f"GFlow 代码范围：`{project_scope_id or 'unknown'}` | {project_scope_label or '待补充'}")
+        project_scope = gflow.get("project_scope") or {}
+        project_scope_reason = str(project_scope.get("reason", "")).strip()
+        if project_scope_reason:
+            lines.append(f"GFlow 范围说明：{project_scope_reason}")
+        project_scope_files = [str(item).strip() for item in (project_scope.get("files") or []) if str(item).strip()]
+        if project_scope_files:
+            lines.append("GFlow 默认审查文件：")
+            for path in project_scope_files[:12]:
+                lines.append(f"- {path}")
+        handoff_preview = str(gflow.get("handoff_preview", "")).strip()
+        if handoff_preview and not str(context.get("gflow_execution_contract", "")).strip():
+            lines.append("GFlow handoff 摘要：")
+            for preview_line in handoff_preview.splitlines()[:5]:
+                lines.append(f"- {preview_line}")
+    gflow_started = context.get("gflow_started_run") or {}
+    if gflow_started:
+        run_id = str(gflow_started.get("run_id", "")).strip()
+        if run_id:
+            lines.append(f"本次请求已自动创建一条 GFlow 轻量记录：`{run_id}`。")
+    gflow_execution_contract = str(context.get("gflow_execution_contract", "")).strip()
+    if gflow_execution_contract:
+        lines.append("当前这次请求已锁定到这条 GFlow 显式流程链：")
+        for contract_line in gflow_execution_contract.splitlines():
+            lines.append(f"- {contract_line}")
+    gflow_runtime = context.get("gflow_runtime_summary") or {}
+    if gflow_runtime:
+        lines.append("当前项目存在活跃的 GFlow 轻量运行记录。")
+        run_id = str(gflow_runtime.get("run_id", "")).strip()
+        if run_id:
+            lines.append(f"GFlow record_id：`{run_id}`。")
+        run_status = str(gflow_runtime.get("run_status", "")).strip()
+        if run_status:
+            lines.append(f"GFlow 当前状态：`{run_status}`。")
+        current_stage = str(gflow_runtime.get("current_stage", "")).strip()
+        if current_stage:
+            lines.append(f"GFlow 当前阶段：`{current_stage}`。")
+        template_id = str(gflow_runtime.get("template_id", "")).strip()
+        template_label = str(gflow_runtime.get("template_label", "")).strip()
+        if template_id or template_label:
+            lines.append(f"GFlow 当前模板：`{template_id or 'unknown'}` | {template_label or '待补充'}")
+        latest_summary = str(gflow_runtime.get("latest_summary", "")).strip()
+        if latest_summary:
+            lines.append(f"GFlow 当前摘要：{latest_summary}")
+        latest_next_action = str(gflow_runtime.get("latest_next_action", "")).strip()
+        if latest_next_action:
+            lines.append(f"GFlow 下一步：{latest_next_action}")
+        gate = gflow_runtime.get("gate") or {}
+        gate_type = str(gate.get("type", "")).strip()
+        gate_reason = str(gate.get("reason", "")).strip()
+        if gate_type or gate_reason:
+            lines.append(f"GFlow gate：`{gate_type or 'unknown'}` | {gate_reason or '待补充'}")
     workflow = context.get("workflow_recommendation") or {}
     if workflow:
         suggested_path = [str(item).strip() for item in workflow.get("suggested_path", []) if str(item).strip()]
@@ -546,8 +821,8 @@ if launch_source or project_name or source_thread_name or source_thread_label or
             if suggested_command:
                 lines.append(f"推荐命令：`{suggested_command}`")
     lines.append("当前工作区还提供飞书对象操作能力，可直接完成消息、用户、文档、多维表格、日历、任务、视频会议等操作。")
-    lines.append(f"飞书资源注册表位于：{code_root}/control/feishu_resources.yaml。")
-    lines.append(f"飞书操作 skill 位于：{code_root}/.agents/skills/feishu-ops/SKILL.md。")
+    lines.append("飞书资源注册表通常位于当前 workspace 的 `control/feishu_resources.yaml`。")
+    lines.append("飞书相关 skills 可通过 bootstrap 安装到 `~/.agents/skills/`，或直接使用 repo 内置的 Feishu/Lark 操作层。")
     lines.append("如果用户要求操作飞书对象，优先使用 local_broker.py feishu-op 或对应 repo skill，不要只做口头解释。")
     lines.append("请把这次任务当成上述来源线程的持续上下文，先按当前项目记忆和工作区协议理解，再执行用户请求。")
 if mode == "resume":
@@ -578,12 +853,14 @@ build_codex_prompt() {
     "$SOURCE_THREAD_NAME" \
     "$SOURCE_THREAD_LABEL" \
     "$SOURCE_MESSAGE_ID" \
+    "$ATTACHMENT_PATH" \
+    "$ATTACHMENT_TYPE" \
+    "$VOICE_TRANSCRIPT" \
     "$CONTEXT_JSON" \
     "$2" \
     "$EXECUTION_PROFILE" \
     "$SELECTED_MODEL" \
-    "$SELECTED_REASONING_EFFORT" \
-    "$CODE_ROOT")"
+    "$SELECTED_REASONING_EFFORT")"
   if [[ -z "$launch_note" ]]; then
     printf '%s' "$prompt_text"
     return 0
@@ -788,7 +1065,7 @@ run_codex() {
     return 1
   fi
 
-  codex_exec_base=("${codex_prefix[@]}" "exec" "--skip-git-repo-check" "-C" "$WORKSPACE_ROOT")
+  codex_exec_base=("${codex_prefix[@]}" "exec" "-C" "$WORKSPACE_ROOT")
   if [[ -n "$selected_model" ]]; then
     codex_exec_base+=("--model" "$selected_model")
   fi
@@ -929,6 +1206,11 @@ export CODEX_MEMORY_MODE="strict-minimal"
 SELECTED_MODEL="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str(payload.get("model","")).strip())' <<<"$(resolve_codex_settings)")"
 SELECTED_REASONING_EFFORT="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str(payload.get("reasoning_effort","")).strip())' <<<"$(resolve_codex_settings)")"
 CONTEXT_JSON="$(load_context_suggestions "${PROJECT:-}" "$PROMPT")"
+if [[ "$DRY_RUN" != "1" && -n "$PROMPT" ]]; then
+  if [[ -z "$PROJECT_PAUSE_JSON" || "$(pause_active "$PROJECT_PAUSE_JSON")" != "1" ]]; then
+    CONTEXT_JSON="$(maybe_start_gflow_runtime "$CONTEXT_JSON" "${PROJECT:-}" "$PROMPT" "$SESSION_ID")"
+  fi
+fi
 
 cd "$WORKSPACE_ROOT"
 
@@ -940,23 +1222,23 @@ if [[ -n "$SESSION_ID" ]]; then
   if [[ -z "$PROJECT" ]]; then
     if [[ "$DRY_RUN" == "1" ]]; then
       printf 'mode=resume\nproject=general\nsession_id=%s\nvault=%s\n' "$SESSION_ID" "$VAULT_ROOT"
-      printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-      printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+      printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+      printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
       print_feishu_ops_summary
       print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "resume")"
       print_context_summary "$CONTEXT_JSON"
       exit 0
     fi
     echo "Routing: project=general mode=resume session=$SESSION_ID" >&2
-    printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+    printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
     print_context_summary "$CONTEXT_JSON" >&2
     run_codex "" "resume" "$SESSION_ID"
     exit $?
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
     printf 'mode=resume\nproject=%s\nsession_id=%s\nvault=%s\n' "$PROJECT" "$SESSION_ID" "$VAULT_ROOT"
-    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-    printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
     print_feishu_ops_summary
     print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "resume")"
     if [[ -n "$PROJECT_PAUSE_JSON" ]]; then
@@ -970,7 +1252,7 @@ if [[ -n "$SESSION_ID" ]]; then
     exit 0
   fi
   echo "Routing: project=$PROJECT mode=resume session=$SESSION_ID" >&2
-  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
   print_context_summary "$CONTEXT_JSON" >&2
   LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode resume --resume-session-id "$SESSION_ID" --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID")"
   run_codex "$LAUNCH_ID" "resume" "$SESSION_ID"
@@ -980,8 +1262,8 @@ fi
 if [[ -n "$PROJECT" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
     printf 'mode=new\nproject=%s\nsession_id=\nvault=%s\n' "$PROJECT" "$VAULT_ROOT"
-    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-    printf 'launch_context_json=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
     print_feishu_ops_summary
     print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "new")"
     if [[ -n "$PROJECT_PAUSE_JSON" ]]; then
@@ -995,7 +1277,7 @@ if [[ -n "$PROJECT" ]]; then
     exit 0
   fi
   echo "Routing: project=$PROJECT mode=new" >&2
-  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
   print_context_summary "$CONTEXT_JSON" >&2
   if [[ -z "$BINDING_BOARD_PATH" ]]; then
     BINDING_JSON="$(resolve_board_binding "$PROJECT" "$PROMPT")"
@@ -1015,15 +1297,15 @@ if [[ -n "$PROJECT" ]]; then
 else
   if [[ "$DRY_RUN" == "1" ]]; then
     printf 'mode=general\nproject=general\nsession_id=\nvault=%s\n' "$VAULT_ROOT"
-    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-    printf 'launch_context_json=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
     print_feishu_ops_summary
     print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "new")"
     print_context_summary "$CONTEXT_JSON"
     exit 0
   fi
   echo "Routing: project=general mode=new" >&2
-  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
   print_context_summary "$CONTEXT_JSON" >&2
 fi
 

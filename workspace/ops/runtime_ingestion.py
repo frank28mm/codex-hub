@@ -14,6 +14,9 @@ LAUNCH_CONTEXT_FIELDS: tuple[str, ...] = (
     "source_chat_ref",
     "source_thread_name",
     "source_thread_label",
+    "attachment_path",
+    "attachment_type",
+    "voice_transcript",
     "execution_profile",
     "model",
     "reasoning_effort",
@@ -37,6 +40,9 @@ START_CODEX_FORWARD_OPTIONS: tuple[tuple[str, str], ...] = (
     ("thread_name", "--thread-name"),
     ("thread_label", "--thread-label"),
     ("source_message_id", "--source-message-id"),
+    ("attachment_path", "--attachment-path"),
+    ("attachment_type", "--attachment-type"),
+    ("voice_transcript", "--voice-transcript"),
 )
 
 

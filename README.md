@@ -14,8 +14,12 @@
 
 - 统一启动与项目路由
 - `Obsidian-compatible` 记忆系统读写
+- `GFlow / workflow-aware` 入口体验
 - 长任务 `Program Harness + Wake Loop`
-- 自包含的 Feishu bridge runtime 与对象操作主链
+- 自包含的 Feishu bridge runtime、callback、bridge recovery 与 execution lease 主链
+- 受审批保护的 `OpenCLI` 执行面
+- health wake / catch-up 自愈链
+- 基于官方 `Feishu CLI / lark-cli` 的对象操作主链
 - 可选的微信私聊 bridge
 - 只读 Bitable 投影
 - 可选的 Electron 桌面宿主
@@ -211,6 +215,14 @@ Electron 不是这套系统唯一入口。
 
 也就是说，这不是一个“概念模板”，而是一份**已经跑通的可部署版本**。  
 你要像我现在这样使用，关键不是再写代码，而是按下面流程完成部署和少量授权。
+
+公开版当前已经尽量复刻旗舰版的核心使用体验：
+
+- `CoCo` 继续作为远程入口语义
+- `Codex Hub Core` 继续负责记忆、路由、approval、execution、wake 和 writeback
+- `GFlow` 推荐、workflow-aware 入口、`Program Harness + Wake Loop`、health wake/catch-up 都已经进入主线
+- `Feishu` 侧保留 callback / recovery / execution lease 这套运行时语义
+- 平台动作继续通过带风险边界的 `OpenCLI` 执行面承接
 
 
 ### 场景 6：在 Feishu 里远程推进项目，而不是只发命令

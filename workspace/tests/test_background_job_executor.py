@@ -1309,13 +1309,13 @@ def test_create_feishu_doc_target_skips_chat_share_target(sample_env, monkeypatc
 
     monkeypatch.setattr(background_job_executor.feishu_outbound_gateway, "create_doc", fake_create_doc)
     result = background_job_executor.create_feishu_doc_target(
-        "feishu:chat:增长与营销项目",
+        "feishu:chat:Growth System Updates",
         title="Demo Report",
         file_path="/tmp/demo.md",
     )
 
     assert result["document_id"] == "doc_123"
-    assert captured["target"] == "feishu:chat:增长与营销项目"
+    assert captured["target"] == "feishu:chat:Growth System Updates"
 
 
 def test_background_job_executor_payload_ok_tracks_failed_delivery(sample_env, monkeypatch) -> None:
@@ -1552,7 +1552,7 @@ def test_background_job_executor_growth_loop_directly_delivers_external_targets_
     control["workflow_specs"]["signal_scan"]["delivery_targets"] = [
         "board",
         "report",
-        "feishu:chat:增长与营销项目",
+        "feishu:chat:Growth System Updates",
     ]
     control["objects"] = {
         "Offer": {"table_path": str(offer_path)},

@@ -673,6 +673,7 @@ def sync_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     summary_text = snapshot.get("last_agent_message", "").strip()
     task_updates = extract_structured_task_updates(snapshot)
     changed_targets: list[str] = []
+    writeback_binding: dict[str, Any] | None = None
     with workspace_lock():
         bindings_data = load_bindings()
         binding = find_binding(bindings_data, snapshot, project_name, board_binding)
@@ -747,7 +748,16 @@ def sync_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                 str(PROJECT_BINDINGS_JSON),
             ]
         )
-        record_project_writeback(binding, source="session-watcher", changed_targets=changed_targets, trigger_dashboard_sync=False)
+        writeback_binding = dict(binding)
+
+    if writeback_binding is not None:
+        record_project_writeback(
+            writeback_binding,
+            source="session-watcher",
+            changed_targets=changed_targets,
+            trigger_dashboard_sync=False,
+        )
+        request_health_check_writeback_wake()
 
     trigger_retrieval_sync_once()
     trigger_dashboard_sync_once()
@@ -778,7 +788,9 @@ def maybe_run_health_check_catchup() -> dict[str, Any]:
         }
 
     try:
-        payload = health_check.run_catchup_if_stale()
+        payload = health_check.run_requested_health_wake()
+        if not payload.get("executed") and payload.get("reason") == "no_pending":
+            payload = health_check.run_catchup_if_stale()
     except Exception as exc:  # pragma: no cover - defensive guard for daemon reliability
         return {
             "executed": False,
@@ -787,10 +799,12 @@ def maybe_run_health_check_catchup() -> dict[str, Any]:
         }
 
     decision = payload.get("decision", {})
+    wake = payload.get("wake", {}) or {}
+    wake_metadata = wake.get("metadata", {}) or {}
     response = {
         "executed": bool(payload.get("executed")),
-        "reason": decision.get("reason", ""),
-        "scheduled_for": decision.get("scheduled_for", ""),
+        "reason": str(payload.get("reason") or decision.get("reason", "")),
+        "scheduled_for": str(wake_metadata.get("scheduled_for") or decision.get("scheduled_for", "")),
         "due_at": decision.get("due_at", ""),
         "overdue_seconds": int(decision.get("overdue_seconds", 0) or 0),
     }
@@ -801,9 +815,35 @@ def maybe_run_health_check_catchup() -> dict[str, Any]:
                 "ok": bool(payload.get("payload", {}).get("ok")),
                 "run_id": run_record.get("run_id", ""),
                 "issue_count": int(run_record.get("issue_count", 0) or 0),
+                "wake_reason": str(wake.get("reason", "")),
             }
         )
     return response
+
+
+def request_health_check_writeback_wake() -> dict[str, Any]:
+    try:
+        try:
+            from ops import workspace_hub_health_check as health_check
+        except ImportError:
+            import workspace_hub_health_check as health_check  # type: ignore
+    except ImportError as exc:
+        return {
+            "accepted": False,
+            "reason": "health_check_import_failed",
+            "error": str(exc),
+        }
+    try:
+        return health_check.request_health_wake(
+            reason="project_writeback",
+            trigger_source="project_writeback",
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard for daemon reliability
+        return {
+            "accepted": False,
+            "reason": "health_check_request_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def scan_once(days: int = 14, limit: int = 200) -> dict[str, Any]:
