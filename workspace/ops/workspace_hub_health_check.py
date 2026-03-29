@@ -17,7 +17,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ops import codex_memory, project_pause, runtime_state, workspace_hub_project, workspace_hub_route_check
+from ops import (
+    codex_memory,
+    project_pause,
+    runtime_state,
+    workspace_job_schema,
+    workspace_hub_project,
+    workspace_hub_route_check,
+    workspace_wake_broker,
+)
 
 
 HEALTH_AGENT_NAME = "com.codexhub.workspace-hub-health-check"
@@ -242,6 +250,75 @@ def default_health_interval_seconds() -> int:
 
 def default_catchup_grace_seconds() -> int:
     return int(os.environ.get("WORKSPACE_HUB_HEALTH_CATCHUP_GRACE_SECONDS", str(WAKE_CATCHUP_GRACE_SECONDS)))
+
+
+def request_health_wake(
+    *,
+    reason: str,
+    trigger_source: str = "",
+    scheduled_for: str = "",
+    automation_run_id: str = "",
+    scheduler_id: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "trigger_source": trigger_source or reason,
+        "scheduled_for": scheduled_for,
+        "automation_run_id": automation_run_id,
+        "scheduler_id": scheduler_id,
+    }
+    if metadata:
+        payload.update(metadata)
+    return workspace_wake_broker.request_wake(
+        HEALTH_AUTOMATION_ID,
+        reason=reason,
+        metadata=payload,
+    )
+
+
+def run_requested_health_wake() -> dict[str, Any]:
+    claimed = workspace_wake_broker.claim_wake(HEALTH_AUTOMATION_ID)
+    if not claimed.get("claimed"):
+        return {
+            "executed": False,
+            "reason": claimed.get("reason", ""),
+            "pending": claimed.get("pending", {}),
+            "running": claimed.get("running", {}),
+        }
+    wake = claimed["wake"]
+    metadata = wake.get("metadata", {}) or {}
+    try:
+        payload = run_health_check(
+            trigger_source=str(metadata.get("trigger_source") or wake.get("reason") or "wake_broker"),
+            scheduled_for=str(metadata.get("scheduled_for") or ""),
+            automation_run_id=str(metadata.get("automation_run_id") or ""),
+            scheduler_id=str(metadata.get("scheduler_id") or ""),
+        )
+    except Exception as exc:
+        workspace_wake_broker.complete_wake(
+            HEALTH_AUTOMATION_ID,
+            wake_id=str(wake.get("wake_id", "")),
+            status="failed",
+            result={"error": f"{type(exc).__name__}: {exc}"},
+        )
+        raise
+
+    workspace_wake_broker.complete_wake(
+        HEALTH_AUTOMATION_ID,
+        wake_id=str(wake.get("wake_id", "")),
+        status="succeeded" if payload.get("ok") else "failed",
+        result={
+            "ok": bool(payload.get("ok")),
+            "run_id": str(payload.get("run_record", {}).get("run_id", "")),
+            "issue_count": int(payload.get("run_record", {}).get("issue_count", 0) or 0),
+        },
+    )
+    return {
+        "executed": True,
+        "reason": str(wake.get("reason", "")),
+        "wake": wake,
+        "payload": payload,
+    }
 
 
 def compute_catchup_status(
@@ -973,6 +1050,54 @@ def append_ndjson(path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def execution_summary(*, ok: bool, issue_count: int) -> str:
+    if ok:
+        return f"`{HEALTH_AUTOMATION_ID}` execution passed with {issue_count} issues"
+    return f"`{HEALTH_AUTOMATION_ID}` execution detected {issue_count} issues"
+
+
+def build_health_execution_outcome(
+    *,
+    ok: bool,
+    issue_count: int,
+    alert_count: int,
+    rows: list[dict[str, str]],
+    trigger_source: str,
+) -> workspace_job_schema.JobExecutionOutcome:
+    return workspace_job_schema.JobExecutionOutcome(
+        status="ok" if ok else "error",
+        summary=execution_summary(ok=ok, issue_count=issue_count),
+        issue_count=issue_count,
+        alert_count=alert_count,
+        metadata={
+            "trigger_source": trigger_source,
+            "row_count": len(rows),
+            "row_ids": [row["ID"] for row in rows],
+        },
+    )
+
+
+def build_delivery_outcome(
+    *,
+    delivery_id: str,
+    status: str,
+    requested: bool = True,
+    summary: str = "",
+    error: str = "",
+    targets: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> workspace_job_schema.JobDeliveryOutcome:
+    return workspace_job_schema.JobDeliveryOutcome(
+        delivery_id=delivery_id,
+        status=status,
+        requested=requested,
+        summary=summary,
+        error=error,
+        targets=list(targets or []),
+        metadata=dict(metadata or {}),
+    )
+
+
 def update_alert_ledger(
     result: dict[str, Any],
     *,
@@ -1055,6 +1180,8 @@ def render_health_report(
     *,
     run_record: dict[str, Any],
     alert_summary: dict[str, Any],
+    execution_outcome: dict[str, Any],
+    delivery_outcomes: list[dict[str, Any]],
 ) -> str:
     checks = result["checks"]
     catchup = checks.get("catchup_status", {})
@@ -1068,7 +1195,15 @@ def render_health_report(
         f"- started_at：`{run_record['started_at']}`",
         f"- finished_at：`{run_record['finished_at']}`",
         f"- script_version：`{run_record['script_version']}`",
-        f"- 结果：`{'通过' if result['ok'] else '告警'}`",
+        f"- execution_status：`{execution_outcome['status']}`",
+        f"- delivery_status：`{run_record['delivery_status']}`",
+        f"- overall_ok：`{run_record['ok']}`",
+        "",
+        "## 执行结果",
+        "",
+        f"- summary：{execution_outcome.get('summary', '')}",
+        f"- issue_count：`{execution_outcome.get('issue_count', 0)}`",
+        f"- alert_count：`{execution_outcome.get('alert_count', 0)}`",
         "",
         "## 检查项",
         "",
@@ -1108,6 +1243,13 @@ def render_health_report(
                 f"- `{alert['alert_key']}` confirmation_passes=`{alert.get('confirmation_passes', 0)}` {alert['current_summary']}"
             )
         lines.append("")
+    lines.extend(["## Delivery", ""])
+    for item in delivery_outcomes:
+        suffix = f" | error={item['error']}" if item.get("error") else ""
+        lines.append(
+            f"- `{item['delivery_id']}` requested=`{item.get('requested', True)}` status=`{item.get('status', '')}` {item.get('summary', '')}{suffix}"
+        )
+    lines.append("")
     lines.extend(["## 板面回写", ""])
     for path in run_record["writeback_targets"]:
         lines.append(f"- {path}")
@@ -1123,26 +1265,27 @@ def write_health_logs(
     *,
     run_record: dict[str, Any],
     alert_summary: dict[str, Any],
+    execution_outcome: dict[str, Any],
+    delivery_outcomes: list[dict[str, Any]],
 ) -> dict[str, str]:
     root = health_reports_root()
     root.mkdir(parents=True, exist_ok=True)
     archive_path = Path(run_record["report_path"])
     latest_path = latest_report_path()
-    report_text = render_health_report(result, run_record=run_record, alert_summary=alert_summary)
+    report_text = render_health_report(
+        result,
+        run_record=run_record,
+        alert_summary=alert_summary,
+        execution_outcome=execution_outcome,
+        delivery_outcomes=delivery_outcomes,
+    )
     archive_path.write_text(report_text, encoding="utf-8")
     latest_path.write_text(report_text, encoding="utf-8")
     return {"archive_path": str(archive_path), "latest_path": str(latest_path)}
 
 
 def write_run_ledger(run_record: dict[str, Any]) -> None:
-    payload = {
-        **run_record,
-        "checked_at": run_record["finished_at"],
-        "issue_count": run_record["issue_count"],
-        "ok": run_record["ok"],
-        "report_path": run_record["report_path"],
-    }
-    append_ndjson(history_path(), payload)
+    append_ndjson(history_path(), run_record)
 
 
 def run_health_check(
@@ -1152,7 +1295,7 @@ def run_health_check(
     scheduled_for: str = "",
     automation_run_id: str = "",
     scheduler_id: str = "",
-) -> dict[str, Any]:
+    ) -> dict[str, Any]:
     pause_payload = active_health_pause()
     if pause_payload.get("active"):
         return {
@@ -1175,14 +1318,34 @@ def run_health_check(
         scheduler_id=scheduler_id,
     )
     collected = checks or collect_checks(run_context)
+    result = evaluate_checks(collected)
+    execution_outcome = build_health_execution_outcome(
+        ok=result["ok"],
+        issue_count=len(result["issues"]),
+        alert_count=len(result["alerts"]),
+        rows=result["rows"],
+        trigger_source=run_context["trigger_source"],
+    )
+    overall_ok = bool(result["ok"])
+    changed_targets: list[str] = []
+    writeback_error = ""
+    delivery_outcomes: list[workspace_job_schema.JobDeliveryOutcome] = []
+
     with codex_memory.workspace_lock():
-        result = evaluate_checks(collected)
-        changed_targets: list[str] = []
-        writeback_error = ""
         try:
             changed_targets = sync_health_topic_board(result, trigger_followup_syncs=False)
+            delivery_outcomes.append(
+                build_delivery_outcome(
+                    delivery_id="board-writeback",
+                    status="delivered",
+                    summary=f"wrote {len(changed_targets)} board targets",
+                    targets=changed_targets,
+                    metadata={"target_count": len(changed_targets)},
+                )
+            )
         except OSError as exc:
             writeback_error = f"{exc.__class__.__name__}: {exc}"
+            overall_ok = False
             result["ok"] = False
             result["issues"] = [*result["issues"], f"真实 Vault 写回失败：{writeback_error}"]
             result["alerts"] = [
@@ -1195,36 +1358,142 @@ def run_health_check(
                     requires_manager_attention=True,
                 ),
             ]
-        run_record = {
-            "run_id": run_context["run_id"],
-            "trigger_source": run_context["trigger_source"],
-            "scheduled_for": run_context["scheduled_for"],
-            "started_at": run_context["started_at"],
-            "finished_at": iso_now_local(),
-            "ok": result["ok"],
-            "issue_count": len(result["issues"]),
-            "report_path": str(archive_report_path()),
-            "writeback_targets": changed_targets,
-            "automation_run_id": run_context["automation_run_id"],
-            "scheduler_id": run_context["scheduler_id"],
-            "script_version": compute_script_version(),
-            "writeback_error": writeback_error,
-        }
+            delivery_outcomes.append(
+                build_delivery_outcome(
+                    delivery_id="board-writeback",
+                    status="not-delivered",
+                    summary="health board writeback failed",
+                    error=writeback_error,
+                    targets=base_related_board_paths(),
+                )
+            )
+
         alert_summary = update_alert_ledger(
             result,
-            run_id=run_record["run_id"],
+            run_id=run_context["run_id"],
             checked_at=result["checked_at"],
             changed_targets=changed_targets,
         )
-        log_paths = write_health_logs(result, run_record=run_record, alert_summary=alert_summary)
+        delivery_outcomes.append(
+            build_delivery_outcome(
+                delivery_id="alert-ledger",
+                status="delivered",
+                summary=f"updated {len(alert_summary['updates'])} alert ledger rows",
+                targets=[str(alerts_path())],
+                metadata={"update_count": len(alert_summary["updates"])},
+            )
+        )
+
+    retrieval_error = ""
+    try:
+        codex_memory.trigger_retrieval_sync_once()
+        delivery_outcomes.append(
+            build_delivery_outcome(
+                delivery_id="retrieval-sync",
+                status="delivered",
+                summary="requested retrieval sync",
+            )
+        )
+    except Exception as exc:
+        retrieval_error = f"{exc.__class__.__name__}: {exc}"
+        delivery_outcomes.append(
+            build_delivery_outcome(
+                delivery_id="retrieval-sync",
+                status="not-delivered",
+                summary="retrieval sync request failed",
+                error=retrieval_error,
+            )
+        )
+
+    rebuild_result = trigger_dashboard_rebuild()
+    if rebuild_result is None or rebuild_result.returncode == 0:
+        delivery_outcomes.append(
+            build_delivery_outcome(
+                delivery_id="dashboard-sync",
+                status="delivered",
+                summary="dashboard rebuild completed",
+                targets=dashboard_paths(),
+                metadata={"exit_code": 0 if rebuild_result is None else rebuild_result.returncode},
+            )
+        )
+    else:
+        overall_ok = False
+        delivery_outcomes.append(
+            build_delivery_outcome(
+                delivery_id="dashboard-sync",
+                status="not-delivered",
+                summary="dashboard rebuild failed",
+                error=rebuild_result.stderr.strip() or rebuild_result.stdout.strip() or f"exit_code={rebuild_result.returncode}",
+                targets=dashboard_paths(),
+                metadata={"exit_code": rebuild_result.returncode},
+            )
+        )
+
+    delivery_outcomes.append(
+        build_delivery_outcome(
+            delivery_id="feishu-notify",
+            status="not-requested",
+            requested=False,
+            summary="workspace-health does not notify Feishu by default",
+        )
+    )
+
+    finished_at = iso_now_local()
+    log_paths = {
+        "archive_path": str(archive_report_path()),
+        "latest_path": str(latest_report_path()),
+    }
+    run_record = workspace_job_schema.build_run_ledger_entry(
+        job_id=HEALTH_AUTOMATION_ID,
+        run_id=run_context["run_id"],
+        started_at=run_context["started_at"],
+        finished_at=finished_at,
+        trigger_source=run_context["trigger_source"],
+        scheduled_for=run_context["scheduled_for"],
+        automation_run_id=run_context["automation_run_id"],
+        scheduler_id=run_context["scheduler_id"],
+        script_version=compute_script_version(),
+        report_path=log_paths["archive_path"],
+        latest_report_path=log_paths["latest_path"],
+        writeback_targets=changed_targets,
+        execution_outcome=execution_outcome,
+        delivery_outcomes=delivery_outcomes,
+        overall_ok=overall_ok,
+        artifacts={
+            "run_ledger_path": str(history_path()),
+            "alert_ledger_path": str(alerts_path()),
+            "report_path": log_paths["archive_path"],
+            "latest_report_path": log_paths["latest_path"],
+        },
+        metadata={
+            "writeback_error": writeback_error,
+            "retrieval_error": retrieval_error,
+        },
+    )
+
+    with codex_memory.workspace_lock():
+        log_paths = write_health_logs(
+            result,
+            run_record=run_record,
+            alert_summary=alert_summary,
+            execution_outcome=run_record["execution_outcome"],
+            delivery_outcomes=run_record["delivery_outcomes"],
+        )
+        run_record["report_path"] = log_paths["archive_path"]
+        run_record["latest_report_path"] = log_paths["latest_path"]
+        run_record["artifacts"]["report_path"] = log_paths["archive_path"]
+        run_record["artifacts"]["latest_report_path"] = log_paths["latest_path"]
         write_run_ledger(run_record)
-    codex_memory.trigger_retrieval_sync_once()
-    trigger_dashboard_rebuild()
     return {
         **result,
+        "ok": overall_ok,
+        "execution_ok": run_record["execution_outcome"]["status"] == "ok",
+        "delivery_status": run_record["delivery_status"],
+        "delivery_outcomes": run_record["delivery_outcomes"],
         "changed_targets": changed_targets,
         "log_paths": log_paths,
         "run_record": run_record,
+        "execution_outcome": run_record["execution_outcome"],
         "alert_summary": alert_summary,
     }
 
@@ -1258,15 +1527,22 @@ def run_catchup_if_stale(
             "executed": False,
             "decision": decision,
         }
-    payload = run_health_check(
+    request = request_health_wake(
+        reason="wake_catchup",
         trigger_source="wake_catchup",
         scheduled_for=decision["scheduled_for"],
         scheduler_id=OFFICIAL_SCHEDULER_ID,
     )
+    execution = run_requested_health_wake()
     return {
-        "executed": True,
+        "executed": bool(execution.get("executed")),
         "decision": decision,
-        "payload": payload,
+        "request": request,
+        **(
+            {"payload": execution.get("payload", {}), "wake": execution.get("wake", {})}
+            if execution.get("executed")
+            else {"reason": execution.get("reason", "")}
+        ),
     }
 
 
@@ -1330,7 +1606,9 @@ def launch_agent_payload(interval: int) -> dict[str, Any]:
         "ProgramArguments": [
             python_path,
             str(code_root() / "ops" / "workspace_hub_health_check.py"),
-            "run-once",
+            "wake-now",
+            "--reason",
+            "interval",
             "--trigger-source",
             "launchd",
             "--scheduler-id",
@@ -1360,6 +1638,25 @@ def cmd_run_once(_args: argparse.Namespace) -> int:
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload["ok"] else 1
+
+
+def cmd_wake_now(args: argparse.Namespace) -> int:
+    request = request_health_wake(
+        reason=args.reason,
+        trigger_source=args.trigger_source or args.reason,
+        scheduled_for=args.scheduled_for,
+        automation_run_id=args.automation_run_id,
+        scheduler_id=args.scheduler_id,
+    )
+    execution = run_requested_health_wake()
+    payload = {
+        "requested": request,
+        **execution,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if not execution.get("executed"):
+        return 0
+    return 0 if execution.get("payload", {}).get("ok") else 1
 
 
 def cmd_catch_up_if_stale(args: argparse.Namespace) -> int:
@@ -1399,6 +1696,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
                 "official_scheduler": official_scheduler,
                 "codex_automation": codex_automation,
                 "catchup_status": compute_catchup_status(scheduler_status=official_scheduler),
+                "wake_broker": workspace_wake_broker.job_status(HEALTH_AUTOMATION_ID),
                 "pause": active_health_pause(),
             },
             ensure_ascii=False,
@@ -1456,6 +1754,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_once.add_argument("--automation-run-id", default="")
     run_once.add_argument("--scheduler-id", default="")
     run_once.set_defaults(func=cmd_run_once)
+
+    wake_now = subparsers.add_parser("wake-now")
+    wake_now.add_argument("--reason", default="manual_wake")
+    wake_now.add_argument("--trigger-source", default="")
+    wake_now.add_argument("--scheduled-for", default="")
+    wake_now.add_argument("--automation-run-id", default="")
+    wake_now.add_argument("--scheduler-id", default="")
+    wake_now.set_defaults(func=cmd_wake_now)
 
     catch_up = subparsers.add_parser("catch-up-if-stale")
     catch_up.add_argument("--interval-seconds", type=int, default=default_health_interval_seconds())

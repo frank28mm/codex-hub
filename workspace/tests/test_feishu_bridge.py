@@ -58,7 +58,11 @@ def test_receive_chat_routes_to_broker_and_records_delivery(sample_env, monkeypa
     assert result["delivery_record"]["status"] == "accepted"
     assert result["inbound_record"]["project_name"] == "SampleProj"
     assert result["request"]["payload_schema"] == "bridge-cli"
-    assert result["contract"]["allowed_write_tables"] == ["bridge_messages", "delivery_status"]
+    assert result["contract"]["allowed_write_tables"] == [
+        "bridge_messages",
+        "delivery_status",
+        "bridge_execution_leases",
+    ]
     assert result["contract"]["read_only_tables"] == ["review_items", "coordination_items"]
 
 
@@ -149,7 +153,11 @@ def test_contract_status_exposes_feishu_runtime_ownership(sample_env) -> None:
     assert contract["host_mode"] == "electron"
     assert contract["truth_source"] == "obsidian_vault"
     assert contract["bitable_mode"] == "read_only_projection"
-    assert contract["allowed_write_tables"] == ["bridge_messages", "delivery_status"]
+    assert contract["allowed_write_tables"] == [
+        "bridge_messages",
+        "delivery_status",
+        "bridge_execution_leases",
+    ]
     assert "approval_tokens" in contract["reserved_tables"]
     assert "direct_vault_writes" in contract["forbidden_capabilities"]
 

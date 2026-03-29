@@ -1,0 +1,8 @@
+version: 1
+site_authorizations:
+  xiaohongshu:
+    preauthorized_commands: []
+    note: Public template. Keep high-risk Xiaohongshu commands behind approval unless your deployment owner explicitly opts in.
+  xianyu:
+    preauthorized_commands: []
+    note: Public template. Keep Xianyu write commands behind approval unless your deployment owner explicitly opts in.

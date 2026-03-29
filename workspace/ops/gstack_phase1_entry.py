@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
 
 
 ENTRY_ORDER = ["office-hours", "plan-ceo-review", "plan-eng-review"]
-EXECUTION_ORDER = ["investigate", "review", "qa", "browse"]
+EXECUTION_ORDER = ["investigate", "review", "browse", "qa"]
 DELIVERY_ORDER = ["document-release", "retro", "ship"]
 POSTURE_ORDER = ["careful", "freeze", "unfreeze"]
 SECOND_OPINION_ORDER = ["claude-review", "claude-challenge", "claude-consult"]
@@ -133,6 +133,10 @@ EXECUTION_RULES: dict[str, dict[str, Any]] = {
         "reason": "当前更像对现有改动、方案或 diff 的风险审查。",
         "keywords": [
             "帮我审一下",
+            "帮我审核",
+            "审核一下",
+            "审核",
+            "评审",
             "review",
             "看有没有问题",
             "这次改动",
@@ -250,6 +254,12 @@ DELIVERY_RULES: dict[str, dict[str, Any]] = {
             "准备交付",
             "ship it",
             "ready to ship",
+            "准备 ship",
+            "能不能 ship",
+            "可以 ship",
+            "是否 ship",
+            "ship 前",
+            "ship 吗",
             "handoff",
             "submit",
         ],
@@ -843,6 +853,25 @@ def build_chain_plan(skills: list[str]) -> list[str]:
     return plan
 
 
+def insert_after(path: list[str], anchor: str, value: str) -> list[str]:
+    if value in path or anchor not in path:
+        return list(path)
+    updated = list(path)
+    updated.insert(updated.index(anchor) + 1, value)
+    return updated
+
+
+def expand_canonical_path(path: list[str]) -> list[str]:
+    expanded = list(path)
+    if "browse" in expanded and "ship" in expanded and "qa" not in expanded:
+        expanded = insert_after(expanded, "browse", "qa")
+    return expanded
+
+
+def format_chain(path: list[str]) -> str:
+    return " -> ".join(path)
+
+
 def matches_second_opinion_skill(skill: str, text: str) -> bool:
     rule = SECOND_OPINION_RULES[skill]
     if contains_any(text, rule["keywords"]):
@@ -1343,6 +1372,7 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
     suggested_path.extend(
         skill for skill in SECOND_OPINION_ORDER if skill in matched_second_opinion
     )
+    suggested_path = expand_canonical_path(suggested_path)
 
     if (
         sum(
@@ -1359,7 +1389,7 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
     ):
         message = (
             "这条请求同时命中了多个工作流层。"
-            "我建议按识别到的层级顺序先厘清问题，再进入对应的执行或交付环节。"
+            f"我先按 `{format_chain(suggested_path)}` 这条链推进，先厘清问题，再进入对应的执行或交付环节。"
         )
         stage = "multi-stage"
         plan = build_chain_plan(suggested_path)
@@ -1369,14 +1399,14 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             primary = suggested_path[0]
             rule = EXECUTION_RULES[primary]
             message = (
-                f"这条请求更适合先走 `{primary}`。"
-                f"{rule['reason']}如果你同意，我先按这条执行路径给出一版初始判断。"
+                f"这条请求我先按 `{primary}` 接管。"
+                f"{rule['reason']}我先给出一版初始判断，并按这条链继续推进。"
             )
             plan = list(rule["initial_action_plan"])
         else:
             message = (
                 "这条请求同时命中了执行层的多个环节。"
-                "我建议按识别到的执行顺序先排查/审查，再进入验证。"
+                f"我先按 `{format_chain(suggested_path)}` 这条链推进，先排查或审查，再进入浏览器取证与验证。"
             )
             plan = build_chain_plan(suggested_path)
     elif matched_delivery and not matched_entry and not matched_execution and not matched_posture:
@@ -1385,14 +1415,14 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             primary = suggested_path[0]
             rule = DELIVERY_RULES[primary]
             message = (
-                f"这条请求更适合先走 `{primary}`。"
-                f"{rule['reason']}如果你同意，我先按这条执行路径给出一版初始判断。"
+                f"这条请求我先按 `{primary}` 接管。"
+                f"{rule['reason']}我先给出一版初始判断，并按这条链继续推进。"
             )
             plan = list(rule["initial_action_plan"])
         else:
             message = (
                 "这条请求同时命中了交付层的多个环节。"
-                "我建议先同步文档或结论，再进入复盘收口。"
+                f"我先按 `{format_chain(suggested_path)}` 这条链推进，先同步交付结论，再进入复盘收口。"
             )
             plan = build_chain_plan(suggested_path)
     elif matched_posture and not matched_entry and not matched_execution and not matched_delivery:
@@ -1401,14 +1431,14 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             primary = suggested_path[0]
             rule = POSTURE_RULES[primary]
             message = (
-                f"这条请求更适合先走 `{primary}`。"
-                f"{rule['reason']}如果你同意，我先按这条执行路径给出一版初始判断。"
+                f"这条请求我先按 `{primary}` 接管。"
+                f"{rule['reason']}我先给出一版初始判断，并按这条链继续推进。"
             )
             plan = list(rule["initial_action_plan"])
         else:
             message = (
                 "这条请求同时命中了姿态层的多个判断。"
-                "我建议先明确风险边界，再决定是保持谨慎、冻结还是解除冻结。"
+                f"我先按 `{format_chain(suggested_path)}` 这条链推进，先明确风险边界，再决定是保持谨慎、冻结还是解除冻结。"
             )
             plan = build_chain_plan(suggested_path)
     elif (
@@ -1423,30 +1453,29 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             primary = suggested_path[0]
             rule = SECOND_OPINION_RULES[primary]
             message = (
-                f"这条请求更适合先走 `{primary}`。"
-                f"{rule['reason']}如果你同意，我先按这条执行路径给出一版初始判断。"
+                f"这条请求我先按 `{primary}` 接管。"
+                f"{rule['reason']}我先给出一版初始判断，并按这条链继续推进。"
             )
             plan = list(rule["initial_action_plan"])
         else:
             message = (
                 "这条请求同时命中了第二意见层的多个模式。"
-                "我建议先明确你要的是复审、挑战还是顾问式咨询，再安排第二意见。"
+                f"我先按 `{format_chain(suggested_path)}` 这条链推进，但会先明确你要的是复审、挑战还是顾问式咨询，再安排第二意见。"
             )
             plan = build_chain_plan(suggested_path)
     elif len(suggested_path) == 1:
         primary = suggested_path[0]
         rule = ENTRY_RULES[primary]
         message = (
-            f"这条请求更适合先走 `{primary}`。"
-            f"{rule['reason']}如果你同意，我先按这条路径给出一版初始判断。"
+            f"这条请求我先按 `{primary}` 接管。"
+            f"{rule['reason']}我先给出一版初始判断，并按这条链继续推进。"
         )
         plan = list(rule["initial_action_plan"])
         stage = "entry"
     else:
         message = (
             "这条请求同时命中了入口层的多个判断维度。"
-            "我建议按 `office-hours -> plan-ceo-review -> plan-eng-review` 这条链先把问题重构清楚，"
-            "再给产品和技术两层判断。"
+            f"我先按 `{format_chain(suggested_path)}` 这条链推进，先把问题重构清楚，再给产品和技术两层判断。"
         )
         plan = build_chain_plan(suggested_path)
         stage = "entry"

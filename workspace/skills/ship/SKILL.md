@@ -50,8 +50,10 @@ Turn a nearly-finished change into a clear release-readiness judgment and the sm
 
 Return in this order:
 
-1. Status
+1. Current stage
 2. Release scope
 3. Readiness judgment
 4. Remaining gates or caveats
-5. Recommended next step
+5. Why this can ship now, should return to `qa` / `review`, or should stop
+6. Next input needed
+7. Recommended next step

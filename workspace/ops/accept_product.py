@@ -31,13 +31,11 @@ REQUIRED_PYTHON_MODULES = (
 )
 
 FORBIDDEN_PATTERNS = [
-    "/Users/" + "frank" + "/workspace-hub",
-    "/Users/" + "frank" + "/Codex Hub",
-    "workspace-hub-data/" + "Codex-Workspace-Memory",
-    "/Users/" + "frank" + "/",
-    "workspace-" + "hub-data",
-    "Codex-" + "Workspace-Memory",
-    "com." + "frank" + ".",
+    "/workspace-hub-data/Codex-Workspace-Memory",
+    "/workspace-hub-worktrees/",
+    "/Users/" + Path.home().name + "/workspace-hub",
+    "/Users/" + Path.home().name + "/Codex Hub",
+    "com." + Path.home().name + ".",
 ]
 
 

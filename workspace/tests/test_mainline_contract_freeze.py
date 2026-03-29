@@ -314,7 +314,7 @@ def test_local_broker_freezes_status_panel_and_command_contract(sample_env, monk
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -445,7 +445,7 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -530,6 +530,7 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
     bridge_connection_payload = read_payload(capsys)
     assert bridge_connection_payload["ok"] is True
     assert bridge_connection_payload["status"] == "connected"
+
 
     assert (
         local_broker.cmd_bridge_connection(
@@ -887,6 +888,61 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
         assert command[reasoning_index + 1].startswith('model_reasoning_effort=')
 
 
+def test_bridge_status_prefers_latest_message_activity(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    runtime_state.upsert_bridge_connection(
+        "feishu",
+        status="connected",
+        host_mode="electron",
+        transport="lark_cli_event_plus_cli_im",
+        last_event_at="2026-03-28T16:02:05Z",
+        metadata={
+            "heartbeat_at": "2026-03-28T16:46:35Z",
+            "stale_after_seconds": 90,
+            "event_idle_after_seconds": 300,
+            "last_message_preview": "older preview",
+            "last_sender_ref": "ou_old",
+            "last_delivery_at": "2026-03-28T16:02:10Z",
+            "last_delivery_phase": "report",
+        },
+    )
+    runtime_state.upsert_bridge_message(
+        bridge="feishu",
+        direction="inbound",
+        message_id="om_latest_inbound",
+        status="received",
+        payload={
+            "chat_id": "oc_test",
+            "text": "@_user_1 收件测试",
+            "open_id": "ou_latest",
+        },
+        project_name="Codex Hub",
+        session_id="sess-latest",
+    )
+    runtime_state.upsert_bridge_message(
+        bridge="feishu",
+        direction="outbound",
+        message_id="om_latest_outbound",
+        status="sent",
+        payload={
+            "chat_id": "oc_test",
+            "text": "Frank，已收到。",
+            "phase": "reply",
+        },
+        project_name="Codex Hub",
+        session_id="sess-latest",
+    )
+
+    payload = local_broker._bridge_status_snapshot("feishu")
+
+    assert payload["last_event_at"] != "2026-03-28T16:02:05Z"
+    assert payload["metadata"]["last_message_preview"] == "@_user_1 收件测试"
+    assert payload["metadata"]["last_sender_ref"] == "ou_latest"
+    assert payload["metadata"]["last_delivery_at"] != "2026-03-28T16:02:10Z"
+    assert payload["metadata"]["last_delivery_phase"] == "reply"
+
+
 def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, capsys) -> None:
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
     runtime_state.init_db()
@@ -899,7 +955,7 @@ def test_feishu_profiles_route_through_start_codex(sample_env, monkeypatch, caps
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -977,7 +1033,7 @@ def test_weixin_profile_routes_through_start_codex(sample_env, monkeypatch, caps
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1025,12 +1081,148 @@ def test_weixin_profile_routes_through_start_codex(sample_env, monkeypatch, caps
     ]
 
 
+def test_remote_command_timeout_seconds_keeps_remote_entrypoints_unbounded(monkeypatch) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    monkeypatch.setenv("WORKSPACE_HUB_REMOTE_EXEC_TIMEOUT_SECONDS", "45")
+
+    assert local_broker._remote_command_timeout_seconds(source="feishu") is None
+    assert local_broker._remote_command_timeout_seconds(execution_profile="feishu-approved") is None
+    assert local_broker._remote_command_timeout_seconds(source="weixin") is None
+    assert local_broker._remote_command_timeout_seconds(source="electron") is None
+    assert local_broker._remote_command_timeout_seconds(execution_profile="electron-full-access") is None
+    assert local_broker._remote_command_timeout_seconds(source="cli", execution_profile="") is None
+
+
+def test_command_center_does_not_pass_timeout_for_feishu_exec(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    captured: dict[str, object] = {}
+
+    def fake_run(command, cwd=None, timeout_seconds=None):
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["timeout_seconds"] = timeout_seconds
+        return {
+            "command": command,
+            "returncode": 0,
+            "stdout": "ok\n",
+            "stderr": "",
+        }
+
+    monkeypatch.setenv("WORKSPACE_HUB_REMOTE_EXEC_TIMEOUT_SECONDS", "77")
+    monkeypatch.setattr(local_broker, "_run", fake_run)
+
+    exec_args = argparse.Namespace(
+        action="codex-exec",
+        prompt="继续 Codex Hub 的 Feishu 入口",
+        session_id="",
+        project_name="Codex Hub",
+        execution_profile="feishu",
+        source="feishu",
+        chat_ref="oc_test",
+        thread_name="Codex Hub",
+        thread_label="Codex Hub",
+        source_message_id="om_test",
+        approval_token="",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
+    )
+
+    assert local_broker.cmd_command_center(exec_args) == 0
+    payload = read_payload(capsys)
+    assert payload["ok"] is True
+    assert captured["timeout_seconds"] is None
+
+
+def test_run_timeout_decodes_bytes_output(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+
+    result = local_broker._run(
+        [
+            "python3",
+            "-c",
+            "import sys,time; print('ready', flush=True); print('warn', file=sys.stderr, flush=True); time.sleep(2)",
+        ],
+        timeout_seconds=0.1,
+    )
+
+    assert result["returncode"] == 124
+    assert result["timed_out"] is True
+    assert result["error_type"] == "command_timeout"
+    assert isinstance(result["stdout"], str)
+    assert isinstance(result["stderr"], str)
+    assert "ready" in result["stdout"]
+    assert "warn" in result["stderr"]
+
+
+def test_command_center_timeout_returns_structured_error_without_serialization_failure(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+
+    def fake_run(command, cwd=None, timeout_seconds=None):
+        return {
+            "command": command,
+            "returncode": 124,
+            "stdout": b"partial stdout",
+            "stderr": b"partial stderr",
+            "timed_out": True,
+            "timeout_seconds": timeout_seconds,
+            "error": "codex command timed out after 77 seconds",
+            "error_type": "command_timeout",
+        }
+
+    monkeypatch.setattr(local_broker, "_run", fake_run)
+
+    exec_args = argparse.Namespace(
+        action="codex-exec",
+        prompt="继续 Codex Hub 的 Feishu 入口",
+        session_id="",
+        project_name="Codex Hub",
+        execution_profile="weixin",
+        source="weixin",
+        chat_ref="weixin:default:test-user",
+        thread_name="CoCo 私聊",
+        thread_label="CoCo 私聊",
+        source_message_id="wx_test",
+        approval_token="",
+        no_auto_resume=False,
+        model="",
+        reasoning_effort="",
+    )
+
+    assert local_broker.cmd_command_center(exec_args) == 0
+    payload = read_payload(capsys)
+    assert payload["ok"] is False
+    assert payload["result_status"] == "timeout"
+    assert payload["timed_out"] is True
+    assert payload["timeout_seconds"] is None
+    assert payload["error_type"] == "command_timeout"
+    assert payload["error"] == "codex command timed out after 77 seconds"
+    assert payload["stdout"] == "partial stdout"
+    assert payload["stderr"] == "partial stderr"
+
+
+def test_runtime_state_json_text_decodes_bytes(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, _local_broker, _watcher = reload_modules()
+
+    payload = json.loads(
+        runtime_state.json_text(
+            {
+                "message": b"\xe4\xbd\xa0\xe5\xa5\xbd",
+                "nested": [b"abc", {"stderr": b"warn"}],
+            }
+        )
+    )
+
+    assert payload["message"] == "你好"
+    assert payload["nested"] == ["abc", {"stderr": "warn"}]
+
+
 def test_feishu_exec_can_disable_project_auto_resume(sample_env, monkeypatch, capsys) -> None:
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1067,7 +1259,7 @@ def test_start_codex_payload_exposes_launch_context_and_finalize(sample_env, mon
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1126,7 +1318,7 @@ def test_start_codex_payload_freezes_model_and_reasoning_contract(sample_env, mo
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1192,7 +1384,7 @@ def test_electron_profile_routes_through_start_codex(sample_env, monkeypatch, ca
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1227,7 +1419,7 @@ def test_electron_full_access_profile_routes_through_start_codex(sample_env, mon
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1279,7 +1471,7 @@ def test_local_system_approved_profile_routes_through_start_codex(sample_env, mo
     monkeypatch.setattr(
         local_broker,
         "_run",
-        lambda command, cwd=None: {
+        lambda command, cwd=None, timeout_seconds=None: {
             "command": command,
             "returncode": 0,
             "stdout": "ok\n",
@@ -1503,10 +1695,12 @@ def test_record_project_writeback_enqueues_runtime_queue_events(sample_env) -> N
     retrieval_events = runtime_state.fetch_runtime_events(queue_name="retrieval_sync", limit=20)
     dashboard_events = runtime_state.fetch_runtime_events(queue_name="dashboard_sync", limit=20)
     projection_events = runtime_state.fetch_runtime_events(queue_name="feishu_projection_sync", limit=20)
+    growth_projection_events = runtime_state.fetch_runtime_events(queue_name="growth_feishu_projection_sync", limit=20)
 
     assert any(item["payload"].get("event_id") == event["event_id"] for item in retrieval_events)
     assert any(item["payload"].get("event_id") == event["event_id"] for item in dashboard_events)
     assert any(item["payload"].get("event_id") == event["event_id"] for item in projection_events)
+    assert any(item["payload"].get("event_id") == event["event_id"] for item in growth_projection_events)
 
 
 def test_dashboard_sync_consumes_runtime_queue_events(sample_env) -> None:
@@ -1569,11 +1763,17 @@ def test_start_codex_and_local_broker_follow_runtime_ingestion_contract(sample_e
         thread_name="当前线程",
         thread_label="桌面对话",
         source_message_id="om_ctx",
+        attachment_path="/tmp/input.png",
+        attachment_type="image",
+        voice_transcript="这是一段语音转写",
     )
 
     assert "--reasoning-effort" in command
     for _field_name, option in runtime_ingestion.start_codex_forward_options():
         assert option in command
+    assert command[command.index("--attachment-path") + 1] == "/tmp/input.png"
+    assert command[command.index("--attachment-type") + 1] == "image"
+    assert command[command.index("--voice-transcript") + 1] == "这是一段语音转写"
 
     start_codex_text = (Path(__file__).resolve().parents[1] / "ops" / "start-codex").read_text(encoding="utf-8")
     for key in runtime_ingestion.LAUNCH_CONTEXT_SCHEMA_KEYS:
@@ -1643,6 +1843,73 @@ def test_bridge_continuity_status_flags_shared_sessions_and_response_delay(sampl
     assert "response_delayed" in issue_types
     shared_session_issue = next(item for item in payload["issues"] if item["issue_type"] == "shared_session_across_chats")
     assert shared_session_issue["chat_refs"] == ["chat_live", "chat_shadow"]
+
+
+def test_bridge_execution_lease_contract_drives_progress_stall(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    monkeypatch.setattr(runtime_state, "iso_now", lambda: "request-recent")
+
+    runtime_state.upsert_bridge_message(
+        bridge="feishu",
+        direction="inbound",
+        message_id="msg-lease-in",
+        status="received",
+        session_id="sess-lease-1",
+        payload={
+            "chat_id": "chat_lease",
+            "chat_type": "p2p",
+            "open_id": "ou_lease",
+            "text": "继续处理这个问题",
+        },
+    )
+    runtime_state.upsert_bridge_chat_binding(
+        bridge="feishu",
+        chat_ref="chat_lease",
+        binding_scope="project",
+        project_name="SampleProj",
+        topic_name="",
+        session_id="sess-lease-1",
+    )
+
+    assert (
+        local_broker.cmd_bridge_execution_lease(
+            argparse.Namespace(
+                bridge="feishu",
+                conversation_key="chat_lease",
+                lease_json=json.dumps(
+                    {
+                        "state": "running",
+                        "session_id": "sess-lease-1",
+                        "project_name": "SampleProj",
+                        "started_at": "lease-start",
+                        "last_progress_at": "lease-old",
+                        "stale_after_seconds": 120,
+                        "metadata": {"source_message_id": "msg-lease-in"},
+                    }
+                ),
+            )
+        )
+        == 0
+    )
+    lease_payload = read_payload(capsys)
+    assert lease_payload["ok"] is True
+    assert lease_payload["lease"]["conversation_key"] == "chat_lease"
+    assert lease_payload["lease"]["state"] == "running"
+
+    monkeypatch.setattr(
+        runtime_state,
+        "age_seconds",
+        lambda value: 400 if value == "lease-old" else (20 if value == "request-recent" else None),
+    )
+    assert local_broker.cmd_bridge_conversations(argparse.Namespace(bridge="feishu", limit=20)) == 0
+    payload = read_payload(capsys)
+    rows_by_chat = {row["chat_ref"]: row for row in payload["rows"]}
+    row = rows_by_chat["chat_lease"]
+    assert row["execution_state"] == "running"
+    assert row["lease_last_progress_at"] == "lease-old"
+    assert row["lease_stale_after_seconds"] == 120
+    assert row["attention_reason"] == "progress_stalled"
 
 
 def test_watcher_routes_worktrees_and_only_updates_tasks_when_explicit(sample_env, monkeypatch) -> None:
@@ -1720,6 +1987,7 @@ def test_watcher_routes_worktrees_and_only_updates_tasks_when_explicit(sample_en
     monkeypatch.setattr(watcher, "load_worktree_route_registry", lambda: registry)
     monkeypatch.setattr(watcher, "trigger_retrieval_sync_once", lambda: None)
     monkeypatch.setattr(watcher, "trigger_dashboard_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "request_health_check_writeback_wake", lambda: {"accepted": True})
 
     feishu_result = watcher.sync_snapshot(
         {
@@ -1803,6 +2071,7 @@ def test_watcher_uses_snapshot_launch_binding_when_prompt_is_generic(sample_env,
 
     monkeypatch.setattr(watcher, "trigger_retrieval_sync_once", lambda: None)
     monkeypatch.setattr(watcher, "trigger_dashboard_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "request_health_check_writeback_wake", lambda: {"accepted": True})
 
     result = watcher.sync_snapshot(
         {
@@ -1851,6 +2120,90 @@ def test_watcher_uses_snapshot_launch_binding_when_prompt_is_generic(sample_env,
     project_board = codex_memory.load_project_board("SampleProj")
     rollup_ids = {row["ID"] for row in project_board["rollup_rows"]}
     assert "WH-FS-02" in rollup_ids
+
+
+def test_sync_snapshot_requests_health_wake_after_project_writeback(sample_env, monkeypatch) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, _local_broker, watcher = reload_modules()
+
+    monkeypatch.setattr(watcher, "trigger_retrieval_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "trigger_dashboard_sync_once", lambda: None)
+    requested = {"called": False}
+
+    def fake_request_health_check_writeback_wake():
+        requested["called"] = True
+        return {"accepted": True}
+
+    monkeypatch.setattr(watcher, "request_health_check_writeback_wake", fake_request_health_check_writeback_wake)
+
+    result = watcher.sync_snapshot(
+        {
+            "id": "sess-health-wake",
+            "started_at": "2026-03-12T05:00:00Z",
+            "last_active_at": "2026-03-12T05:05:00Z",
+            "cwd": str(sample_env["workspace_root"]),
+            "user_message": "继续处理 SampleProj",
+            "last_agent_message": "已完成本轮整理。",
+            "completed": True,
+            "path": str(sample_env["workspace_root"] / "sess-health-wake.jsonl"),
+            "mtime": 4.0,
+            "project_name": "SampleProj",
+            "binding_scope": "project",
+            "binding_board_path": str(codex_memory.project_board_path("SampleProj")),
+            "topic_name": "",
+            "rollup_target": str(codex_memory.project_board_path("SampleProj")),
+        }
+    )
+
+    assert result is not None
+    assert result["action"] == "synced"
+    assert requested["called"] is True
+
+
+def test_sync_snapshot_requests_health_wake_outside_workspace_lock(sample_env, monkeypatch) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, _local_broker, watcher = reload_modules()
+
+    monkeypatch.setattr(watcher, "trigger_retrieval_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "trigger_dashboard_sync_once", lambda: None)
+
+    lock_depth = {"value": 0}
+
+    class DummyLock:
+        def __enter__(self):
+            lock_depth["value"] += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            lock_depth["value"] -= 1
+            return False
+
+    def fake_request_health_check_writeback_wake():
+        assert lock_depth["value"] == 0
+        return {"accepted": True}
+
+    monkeypatch.setattr(watcher, "workspace_lock", lambda: DummyLock())
+    monkeypatch.setattr(watcher, "request_health_check_writeback_wake", fake_request_health_check_writeback_wake)
+
+    result = watcher.sync_snapshot(
+        {
+            "id": "sess-health-wake-outside-lock",
+            "started_at": "2026-03-12T05:10:00Z",
+            "last_active_at": "2026-03-12T05:15:00Z",
+            "cwd": str(sample_env["workspace_root"]),
+            "user_message": "继续处理 SampleProj",
+            "last_agent_message": "已完成本轮整理。",
+            "completed": True,
+            "path": str(sample_env["workspace_root"] / "sess-health-wake-outside-lock.jsonl"),
+            "mtime": 5.0,
+            "project_name": "SampleProj",
+            "binding_scope": "project",
+            "binding_board_path": str(codex_memory.project_board_path("SampleProj")),
+            "topic_name": "",
+            "rollup_target": str(codex_memory.project_board_path("SampleProj")),
+        }
+    )
+
+    assert result is not None
+    assert result["action"] == "synced"
 
 
 def test_dashboard_rebuild_refreshes_project_rollups(sample_env) -> None:
@@ -2072,6 +2425,7 @@ def test_scan_once_retries_previously_ignored_fixed_worktree_session(sample_env,
     monkeypatch.setattr(watcher, "load_worktree_route_registry", lambda: registry)
     monkeypatch.setattr(watcher, "trigger_retrieval_sync_once", lambda: None)
     monkeypatch.setattr(watcher, "trigger_dashboard_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "request_health_check_writeback_wake", lambda: {"accepted": True})
     monkeypatch.setattr(watcher, "maybe_run_health_check_catchup", lambda: {"executed": False, "reason": "test"})
 
     result = watcher.scan_once(days=1, limit=10)

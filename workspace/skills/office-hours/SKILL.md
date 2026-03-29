@@ -46,8 +46,11 @@ Turn a vague or overloaded request into a clear problem statement, a manageable 
 
 Return in this order:
 
-1. Status
+1. Current stage
 2. What I understood
 3. Reframed problem
-4. Open questions or constraints
-5. Recommended next step
+4. Stage conclusion
+5. Open questions or constraints
+6. Why this should move to the next stage or stay here
+7. Next input needed
+8. Recommended next step

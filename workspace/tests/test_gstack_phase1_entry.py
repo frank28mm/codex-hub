@@ -10,6 +10,7 @@ def test_office_hours_prompt_gets_entry_recommendation() -> None:
     assert payload["status"] == "workflow-recommended"
     assert payload["recognized_stage"] == "entry"
     assert payload["suggested_path"] == ["office-hours"]
+    assert "我先按 `office-hours` 接管" in payload["assistant_message"]
     assert "初始判断" in payload["assistant_message"]
 
 
@@ -82,6 +83,16 @@ def test_cross_stage_prompt_gets_entry_then_execution_chain() -> None:
     ]
 
 
+def test_review_then_browse_then_qa_prompt_gets_canonical_execution_chain() -> None:
+    payload = gstack_phase1_entry.detect_workflow_path(
+        "帮我 review 这个改动，再看页面流转，再做 QA。"
+    )
+
+    assert payload["recognized_stage"] == "execution"
+    assert payload["suggested_path"] == ["review", "browse", "qa"]
+    assert "我先按 `review -> browse -> qa` 这条链推进" in payload["assistant_message"]
+
+
 def test_browse_prompt_gets_execution_recommendation() -> None:
     payload = gstack_phase1_entry.detect_workflow_path(
         "帮我用真实浏览器看一下这个页面流程和按钮交互。"
@@ -108,6 +119,14 @@ def test_ship_prompt_gets_delivery_recommendation() -> None:
     payload = gstack_phase1_entry.detect_workflow_path("这个版本准备发版了，帮我判断是不是能发。")
     assert payload["recognized_stage"] == "delivery"
     assert payload["suggested_path"] == ["ship"]
+
+
+def test_page_ready_to_ship_prompt_gets_browse_qa_ship_chain() -> None:
+    payload = gstack_phase1_entry.detect_workflow_path("这个页面修好没，能不能准备 ship。")
+
+    assert payload["recognized_stage"] == "multi-stage"
+    assert payload["suggested_path"] == ["browse", "qa", "ship"]
+    assert "我先按 `browse -> qa -> ship` 这条链推进" in payload["assistant_message"]
 
 
 def test_careful_prompt_gets_posture_recommendation() -> None:

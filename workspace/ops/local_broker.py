@@ -4,19 +4,29 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
+import signal
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 try:
-    from ops import codex_memory, codex_models, feishu_agent, material_router, project_pause, runtime_ingestion, runtime_state, workspace_hub_project
+    from ops import background_job_executor, codex_memory, codex_models, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project
 except ImportError:  # pragma: no cover
+    import background_job_executor  # type: ignore
     import codex_memory  # type: ignore
     import codex_models  # type: ignore
     import feishu_agent  # type: ignore
+    import feishu_callback_executor  # type: ignore
     import material_router  # type: ignore
+    import opencli_agent  # type: ignore
+    import opencli_policy  # type: ignore
     import project_pause  # type: ignore
     import runtime_ingestion  # type: ignore
     import runtime_state  # type: ignore
@@ -31,7 +41,9 @@ def _canonical_workspace_root() -> Path:
     current = workspace_root()
     parent = current.parent
     if parent.name == "workspace-hub-worktrees":
-        return workspace_hub_project.DEFAULT_WORKSPACE_ROOT
+        sibling = workspace_hub_project.DEFAULT_WORKSPACE_ROOT
+        if sibling.exists():
+            return sibling
     return current
 
 
@@ -209,13 +221,125 @@ def _validate_execution_profile_access(
     return None
 
 
+OPENCLI_APPROVAL_SCOPE = "opencli_high_risk_command"
+
+
+def _opencli_approval_error(
+    *,
+    site: str,
+    command: str,
+    approval_token: str,
+    error: str,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    return _response(
+        "opencli_op",
+        ok=False,
+        result_status="blocked",
+        site=site,
+        command=command,
+        approval_token=approval_token,
+        expected_scope=OPENCLI_APPROVAL_SCOPE,
+        error=error,
+        error_type=error,
+        policy=policy,
+    )
+
+
+def _validate_opencli_access(*, site: str, command: str, approval_token: str = "") -> tuple[dict[str, Any], dict[str, Any] | None]:
+    policy = opencli_policy.command_policy(site, command)
+    if policy.get("mode") != "approval_required":
+        return policy, None
+    token = str(approval_token or "").strip()
+    if not token:
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token="",
+            error="approval_token_required",
+            policy=policy,
+        )
+    item = runtime_state.fetch_approval_token(token)
+    if not item.get("scope"):
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token=token,
+            error="approval_token_not_found",
+            policy=policy,
+        )
+    if str(item.get("status") or "").strip() != "approved":
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token=token,
+            error="approval_token_not_approved",
+            policy=policy,
+        )
+    expires_at = runtime_state.parse_iso_timestamp(str(item.get("expires_at") or "").strip())
+    if expires_at is not None and expires_at <= dt.datetime.now(dt.timezone.utc):
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token=token,
+            error="approval_token_expired",
+            policy=policy,
+        )
+    if str(item.get("scope") or "").strip() != OPENCLI_APPROVAL_SCOPE:
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token=token,
+            error="approval_scope_mismatch",
+            policy=policy,
+        )
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    approved_site = str(metadata.get("approved_site") or "").strip().lower()
+    approved_command = str(metadata.get("approved_command") or "").strip().lower()
+    if approved_site and approved_site != str(site or "").strip().lower():
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token=token,
+            error="approval_site_mismatch",
+            policy=policy,
+        )
+    if approved_command and approved_command != str(command or "").strip().lower():
+        return policy, _opencli_approval_error(
+            site=site,
+            command=command,
+            approval_token=token,
+            error="approval_command_mismatch",
+            policy=policy,
+        )
+    return policy, None
+
+
 def _print(payload: dict[str, Any]) -> int:
-    print(json.dumps(payload, ensure_ascii=False))
+    print(json.dumps(_json_safe(payload), ensure_ascii=False))
     return 0
 
 
 def _response(broker_action: str, *, ok: bool, **payload: Any) -> dict[str, Any]:
     return {"ok": ok, "broker_action": broker_action, **payload}
+
+
+def _stream_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _pause_block_response(action: str, *, project_name: str) -> dict[str, Any] | None:
@@ -237,31 +361,97 @@ def _pause_block_response(action: str, *, project_name: str) -> dict[str, Any] |
     )
 
 
-def _run(command: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
-    completed = subprocess.run(
+def _remote_command_timeout_seconds(*, execution_profile: str = "", source: str = "") -> int | None:
+    normalized_source = str(source or "").strip()
+    normalized_profile = str(execution_profile or "").strip()
+    if normalized_source in {"feishu", "weixin", "electron"} or normalized_profile in {
+        "feishu",
+        "feishu-approved",
+        "feishu-local-system-approved",
+        "feishu-object-op",
+        "feishu-local-extend",
+        "weixin",
+        "electron",
+        "electron-full-access",
+    }:
+        return None
+    if normalized_source not in {"feishu", "weixin", "electron"} and normalized_profile not in {
+        "feishu",
+        "feishu-approved",
+        "feishu-local-system-approved",
+        "weixin",
+        "electron-full-access",
+    }:
+        return None
+    raw = str(os.environ.get("WORKSPACE_HUB_REMOTE_EXEC_TIMEOUT_SECONDS", "180")).strip()
+    try:
+        seconds = int(raw)
+    except ValueError:
+        seconds = 180
+    return seconds if seconds > 0 else None
+
+
+def _terminate_process_tree(process: subprocess.Popen[str], *, grace_seconds: int = 3) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        return
+
+
+def _run(command: list[str], *, cwd: Path | None = None, timeout_seconds: int | None = None) -> dict[str, Any]:
+    process = subprocess.Popen(
         command,
         cwd=str(cwd or workspace_root()),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
+        start_new_session=True,
     )
-    return {
-        "command": command,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-    }
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return {
+            "command": command,
+            "returncode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        return {
+            "command": command,
+            "returncode": 124,
+            "stdout": _stream_text(exc.stdout),
+            "stderr": _stream_text(exc.stderr),
+            "timed_out": True,
+            "timeout_seconds": timeout_seconds,
+            "error": f"codex command timed out after {timeout_seconds} seconds",
+            "error_type": "command_timeout",
+        }
 
 
 def _command_result(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     ok = payload.get("returncode", 1) == 0
     launch_context = _extract_prefixed_json(payload.get("stderr", ""), "WORKSPACE_HUB_LAUNCH_CONTEXT=")
     finalize_payload = _extract_prefixed_json(payload.get("stderr", ""), "WORKSPACE_HUB_FINALIZE_LAUNCH=")
+    timed_out = bool(payload.get("timed_out"))
     return _response(
         action,
         ok=ok,
         action=action,
-        result_status="success" if ok else "error",
+        result_status="success" if ok else ("timeout" if timed_out else "error"),
         launch_context=launch_context,
         finalize_launch=finalize_payload,
         **payload,
@@ -470,6 +660,9 @@ def _start_codex_command(
     thread_name: str = "",
     thread_label: str = "",
     source_message_id: str = "",
+    attachment_path: str = "",
+    attachment_type: str = "",
+    voice_transcript: str = "",
     approval_token: str = "",
 ) -> list[str]:
     command = [_start_codex_path()]
@@ -493,6 +686,9 @@ def _start_codex_command(
         "thread_name": thread_name,
         "thread_label": thread_label,
         "source_message_id": source_message_id,
+        "attachment_path": attachment_path,
+        "attachment_type": attachment_type,
+        "voice_transcript": voice_transcript,
     }
     for key, option in runtime_ingestion.start_codex_forward_options():
         value = str(forward_values.get(key, "") or "").strip()
@@ -637,9 +833,44 @@ def _bridge_conversation_summary(bridge: str = "feishu") -> dict[str, int]:
 
 def _bridge_status_snapshot(bridge: str = "feishu") -> dict[str, Any]:
     connection = runtime_state.fetch_bridge_connection(bridge)
-    metadata = connection.get("metadata", {}) or {}
+    metadata = dict(connection.get("metadata", {}) or {})
+    activity = runtime_state.fetch_bridge_message_activity(bridge)
+
+    def _parse_timestamp(value: str) -> dt.datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone(dt.timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+    def _prefer_latest(current: str, candidate: str) -> str:
+        current_dt = _parse_timestamp(current)
+        candidate_dt = _parse_timestamp(candidate)
+        if current_dt is None:
+            return str(candidate or "").strip()
+        if candidate_dt is None:
+            return str(current or "").strip()
+        return str(candidate if candidate_dt >= current_dt else current).strip()
+
     heartbeat_at = str(metadata.get("heartbeat_at") or "").strip()
-    last_event_at = str(connection.get("last_event_at", "")).strip()
+    inbound_activity = activity.get("inbound", {}) or {}
+    outbound_activity = activity.get("outbound", {}) or {}
+    last_event_at = _prefer_latest(
+        str(connection.get("last_event_at", "")).strip(),
+        str(inbound_activity.get("activity_at") or "").strip(),
+    )
+    if last_event_at == str(inbound_activity.get("activity_at") or "").strip():
+        metadata["last_message_preview"] = str(inbound_activity.get("text") or metadata.get("last_message_preview") or "").strip()
+        metadata["last_sender_ref"] = str(inbound_activity.get("sender_ref") or metadata.get("last_sender_ref") or "").strip()
+    metadata["last_delivery_at"] = _prefer_latest(
+        str(metadata.get("last_delivery_at") or "").strip(),
+        str(outbound_activity.get("activity_at") or "").strip(),
+    )
+    if metadata["last_delivery_at"] == str(outbound_activity.get("activity_at") or "").strip():
+        metadata["last_delivery_phase"] = str(outbound_activity.get("phase") or metadata.get("last_delivery_phase") or "").strip()
     stale_after_seconds = int(metadata.get("stale_after_seconds") or 90)
     event_idle_after_seconds = int(metadata.get("event_idle_after_seconds") or 0)
     stale = False
@@ -674,7 +905,7 @@ def _bridge_status_snapshot(bridge: str = "feishu") -> dict[str, Any]:
         "host_mode": connection.get("host_mode", ""),
         "transport": connection.get("transport", ""),
         "last_error": connection.get("last_error", ""),
-        "last_event_at": connection.get("last_event_at", ""),
+        "last_event_at": last_event_at,
         "updated_at": connection.get("updated_at", ""),
         "heartbeat_at": heartbeat_at,
         "stale": stale,
@@ -844,6 +1075,92 @@ def cmd_bridge_bindings(args: argparse.Namespace) -> int:
     return _print(_response("bridge_bindings", ok=True, bridge=args.bridge, rows=rows))
 
 
+def cmd_bridge_execution_lease(args: argparse.Namespace) -> int:
+    bridge = args.bridge
+    conversation_key = str(args.conversation_key or "").strip()
+    if not conversation_key:
+        return _print(
+            _response(
+                "bridge_execution_lease",
+                ok=False,
+                bridge=bridge,
+                error="conversation_key is required",
+            )
+        )
+    if args.lease_json:
+        try:
+            payload = json.loads(args.lease_json)
+        except json.JSONDecodeError as exc:
+            return _print(
+                _response(
+                    "bridge_execution_lease",
+                    ok=False,
+                    bridge=bridge,
+                    conversation_key=conversation_key,
+                    error=f"invalid lease json: {exc}",
+                )
+            )
+        state = str(payload.get("state", "")).strip()
+        if not state:
+            return _print(
+                _response(
+                    "bridge_execution_lease",
+                    ok=False,
+                    bridge=bridge,
+                    conversation_key=conversation_key,
+                    error="state is required",
+                )
+            )
+        lease = runtime_state.upsert_bridge_execution_lease(
+            bridge=bridge,
+            conversation_key=conversation_key,
+            state=state,
+            session_id=str(payload.get("session_id", "")).strip(),
+            project_name=codex_memory.canonical_project_name(str(payload.get("project_name", "")).strip()),
+            topic_name=str(payload.get("topic_name", "")).strip(),
+            started_at=str(payload.get("started_at", "")).strip(),
+            last_progress_at=str(payload.get("last_progress_at", "")).strip(),
+            completed_at=str(payload.get("completed_at", "")).strip(),
+            stale_after_seconds=int(payload.get("stale_after_seconds") or 0),
+            last_delivery_phase=str(payload.get("last_delivery_phase", "")).strip(),
+            last_error=str(payload.get("last_error", "")).strip(),
+            metadata=payload.get("metadata") or {},
+        )
+        return _print(
+            _response(
+                "bridge_execution_lease",
+                ok=True,
+                updated=True,
+                bridge=bridge,
+                conversation_key=conversation_key,
+                lease=lease,
+            )
+        )
+    lease = runtime_state.fetch_bridge_execution_lease(bridge=bridge, conversation_key=conversation_key)
+    return _print(
+        _response(
+            "bridge_execution_lease",
+            ok=True,
+            updated=False,
+            bridge=bridge,
+            conversation_key=conversation_key,
+            lease=lease,
+        )
+    )
+
+
+def cmd_bridge_execution_leases(args: argparse.Namespace) -> int:
+    rows = runtime_state.fetch_bridge_execution_leases(bridge=args.bridge, limit=args.limit)
+    return _print(
+        _response(
+            "bridge_execution_leases",
+            ok=True,
+            bridge=args.bridge,
+            rows=rows,
+        )
+    )
+
+
 def cmd_approval_token(args: argparse.Namespace) -> int:
     token = str(args.token or "").strip()
     if not token:
@@ -914,6 +1231,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "bridge_message_detail": True,
             "bridge_chat_binding": True,
             "bridge_bindings": True,
+            "bridge_execution_lease": True,
+            "bridge_execution_leases": True,
             "approval_token": True,
             "approval_tokens": True,
             "user_profile": True,
@@ -921,6 +1240,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "material_suggest": True,
             "codex_models": True,
             "feishu_op": True,
+            "opencli_op": True,
         },
         commands=[
             "init-db",
@@ -940,6 +1260,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "bridge-message-detail",
             "bridge-chat-binding",
             "bridge-bindings",
+            "bridge-execution-lease",
+            "bridge-execution-leases",
             "approval-token",
             "approval-tokens",
             "user-profile",
@@ -947,6 +1269,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "material-suggest",
             "codex-models",
             "feishu-op",
+            "feishu-callback-executor",
+            "opencli-op",
+            "background-job",
             "panel",
             "command-center",
             "record-bridge-message",
@@ -981,6 +1306,9 @@ def cmd_codex_exec(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            attachment_path=getattr(args, "attachment_path", ""),
+            attachment_type=getattr(args, "attachment_type", ""),
+            voice_transcript=getattr(args, "voice_transcript", ""),
             approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
@@ -992,7 +1320,16 @@ def cmd_codex_exec(args: argparse.Namespace) -> int:
             source=getattr(args, "source", ""),
         )
     )
-    payload = _command_result("codex_exec", _run(command))
+    payload = _command_result(
+        "codex_exec",
+        _run(
+            command,
+            timeout_seconds=_remote_command_timeout_seconds(
+                execution_profile=execution_profile,
+                source=getattr(args, "source", ""),
+            ),
+        ),
+    )
     return _print(payload)
 
 
@@ -1023,6 +1360,9 @@ def cmd_codex_resume(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            attachment_path=getattr(args, "attachment_path", ""),
+            attachment_type=getattr(args, "attachment_type", ""),
+            voice_transcript=getattr(args, "voice_transcript", ""),
             approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
@@ -1035,7 +1375,17 @@ def cmd_codex_resume(args: argparse.Namespace) -> int:
             source=getattr(args, "source", ""),
         )
     )
-    payload = _command_result("codex_resume", _run(command, cwd=workspace_root()))
+    payload = _command_result(
+        "codex_resume",
+        _run(
+            command,
+            cwd=workspace_root(),
+            timeout_seconds=_remote_command_timeout_seconds(
+                execution_profile=execution_profile,
+                source=getattr(args, "source", ""),
+            ),
+        ),
+    )
     return _print(payload)
 
 
@@ -1128,6 +1478,133 @@ def cmd_feishu_op(args: argparse.Namespace) -> int:
             result=result,
             summary=summary,
             operation_event=event,
+        )
+    )
+
+
+def cmd_opencli_op(args: argparse.Namespace) -> int:
+    try:
+        payload = json.loads(args.payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        return _print(_response("opencli_op", ok=False, error=f"invalid payload json: {exc}"))
+    if not isinstance(payload, dict):
+        return _print(_response("opencli_op", ok=False, error="payload_json must decode to an object"))
+    policy, blocked = _validate_opencli_access(
+        site=args.site,
+        command=args.command,
+        approval_token=getattr(args, "approval_token", ""),
+    )
+    if blocked:
+        return _print(blocked)
+    normalized_site = str(args.site or "").strip().lower()
+    normalized_command = str(args.command or "").strip().lower()
+    if normalized_site == "xiaohongshu" and normalized_command in {"publish", "comment-send", "dm-send"}:
+        payload["human_gate_approved"] = True
+        payload["human_gate_source"] = "local_broker_approval"
+    try:
+        result = opencli_agent.perform_operation(args.site, args.command, payload)
+    except opencli_agent.OpenCLIAgentError as exc:
+        return _print(
+            _response(
+                "opencli_op",
+                ok=False,
+                site=args.site,
+                command=args.command,
+                result_status="error",
+                error=str(exc),
+                error_code=exc.code,
+                details=exc.details,
+                policy=policy,
+            )
+        )
+    return _print(
+        _response(
+            "opencli_op",
+            ok=bool(result.get("ok")),
+            site=args.site,
+            command=args.command,
+            result_status="success" if result.get("ok") else "error",
+            result=result,
+            policy=policy,
+        )
+    )
+
+
+def cmd_background_job(args: argparse.Namespace) -> int:
+    try:
+        payload = background_job_executor.execute_projected_job(
+            background_job_executor.board_job_projector.project_background_job(args.project_name, args.task_id),
+            trigger_source=args.trigger_source or "broker_background_job",
+            approval_token=args.approval_token,
+            dry_run=bool(args.dry_run),
+        )
+    except Exception as exc:
+        return _print(
+            _response(
+                "background_job",
+                ok=False,
+                result_status="error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                project_name=args.project_name,
+                task_id=args.task_id,
+            )
+        )
+    return _print(
+        _response(
+            "background_job",
+            ok=bool(payload.get("ok")),
+            result_status="success" if payload.get("ok") else "error",
+            project_name=args.project_name,
+            task_id=args.task_id,
+            result=payload,
+        )
+    )
+
+
+def cmd_feishu_callback_executor(args: argparse.Namespace) -> int:
+    try:
+        payload = json.loads(args.payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        return _print(
+            _response("feishu_callback_executor", ok=False, error=f"invalid payload json: {exc}")
+        )
+    if not isinstance(payload, dict):
+        return _print(
+            _response("feishu_callback_executor", ok=False, error="payload_json must decode to an object")
+        )
+    try:
+        result = feishu_callback_executor.execute_callback_action(args.action, payload)
+    except feishu_callback_executor.FeishuCallbackExecutorError as exc:
+        return _print(
+            _response(
+                "feishu_callback_executor",
+                ok=False,
+                action=args.action,
+                result_status="error",
+                error=str(exc),
+                error_code=exc.code,
+                details=exc.details,
+            )
+        )
+    except Exception as exc:
+        return _print(
+            _response(
+                "feishu_callback_executor",
+                ok=False,
+                action=args.action,
+                result_status="error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        )
+    return _print(
+        _response(
+            "feishu_callback_executor",
+            ok=bool(result.get("ok")),
+            action=args.action,
+            result_status="success" if result.get("ok") else "error",
+            result=result,
         )
     )
 
@@ -1260,6 +1737,10 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             blocked["action"] = action
             return _print(blocked)
     execution_profile = getattr(args, "execution_profile", "")
+    timeout_seconds = _remote_command_timeout_seconds(
+        execution_profile=execution_profile,
+        source=getattr(args, "source", ""),
+    )
     if action in {"codex-exec", "codex-resume"}:
         validation_error = _validate_execution_profile_access(
             "command_center",
@@ -1287,6 +1768,9 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            attachment_path=getattr(args, "attachment_path", ""),
+            attachment_type=getattr(args, "attachment_type", ""),
+            voice_transcript=getattr(args, "voice_transcript", ""),
             approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
@@ -1300,7 +1784,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
         )
         payload = _command_result(
             "codex_exec",
-            _run(command),
+            _run(command, timeout_seconds=timeout_seconds),
         )
     elif action == "codex-resume":
         command = (
@@ -1317,6 +1801,9 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             thread_name=getattr(args, "thread_name", ""),
             thread_label=getattr(args, "thread_label", ""),
             source_message_id=getattr(args, "source_message_id", ""),
+            attachment_path=getattr(args, "attachment_path", ""),
+            attachment_type=getattr(args, "attachment_type", ""),
+            voice_transcript=getattr(args, "voice_transcript", ""),
             approval_token=getattr(args, "approval_token", ""),
         )
         if _should_use_start_codex(execution_profile)
@@ -1331,7 +1818,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
         )
         payload = _command_result(
             "codex_resume",
-            _run(command, cwd=workspace_root()),
+            _run(command, cwd=workspace_root(), timeout_seconds=timeout_seconds),
         )
     else:
         return _print(_response("command_center", ok=False, action=action, error=f"unknown action `{action}`"))
@@ -1346,6 +1833,10 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             returncode=payload.get("returncode", 1),
             stdout=payload.get("stdout", ""),
             stderr=payload.get("stderr", ""),
+            timed_out=bool(payload.get("timed_out")),
+            timeout_seconds=payload.get("timeout_seconds"),
+            error=payload.get("error", ""),
+            error_type=payload.get("error_type", ""),
             launch_context=payload.get("launch_context"),
             finalize_launch=payload.get("finalize_launch"),
         )
@@ -1391,6 +1882,9 @@ def build_parser() -> argparse.ArgumentParser:
     codex_exec.add_argument("--thread-name", default="")
     codex_exec.add_argument("--thread-label", default="")
     codex_exec.add_argument("--source-message-id", default="")
+    codex_exec.add_argument("--attachment-path", default="")
+    codex_exec.add_argument("--attachment-type", default="")
+    codex_exec.add_argument("--voice-transcript", default="")
     codex_exec.add_argument("--approval-token", default="")
     codex_exec.add_argument("--no-auto-resume", action="store_true")
     codex_exec.set_defaults(func=cmd_codex_exec)
@@ -1407,6 +1901,9 @@ def build_parser() -> argparse.ArgumentParser:
     codex_resume.add_argument("--thread-name", default="")
     codex_resume.add_argument("--thread-label", default="")
     codex_resume.add_argument("--source-message-id", default="")
+    codex_resume.add_argument("--attachment-path", default="")
+    codex_resume.add_argument("--attachment-type", default="")
+    codex_resume.add_argument("--voice-transcript", default="")
     codex_resume.add_argument("--approval-token", default="")
     codex_resume.add_argument("--no-auto-resume", action="store_true")
     codex_resume.set_defaults(func=cmd_codex_resume)
@@ -1436,6 +1933,26 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_op.add_argument("--action", required=True)
     feishu_op.add_argument("--payload-json", default="{}")
     feishu_op.set_defaults(func=cmd_feishu_op)
+
+    opencli_op = subparsers.add_parser("opencli-op")
+    opencli_op.add_argument("--site", required=True)
+    opencli_op.add_argument("--command", required=True)
+    opencli_op.add_argument("--payload-json", default="{}")
+    opencli_op.add_argument("--approval-token", default="")
+    opencli_op.set_defaults(func=cmd_opencli_op)
+
+    background_job = subparsers.add_parser("background-job")
+    background_job.add_argument("--project-name", required=True)
+    background_job.add_argument("--task-id", required=True)
+    background_job.add_argument("--approval-token", default="")
+    background_job.add_argument("--trigger-source", default="")
+    background_job.add_argument("--dry-run", action="store_true")
+    background_job.set_defaults(func=cmd_background_job)
+
+    feishu_callback_executor_parser = subparsers.add_parser("feishu-callback-executor")
+    feishu_callback_executor_parser.add_argument("--action", required=True)
+    feishu_callback_executor_parser.add_argument("--payload-json", default="{}")
+    feishu_callback_executor_parser.set_defaults(func=cmd_feishu_callback_executor)
 
     review_inbox = subparsers.add_parser("review-inbox")
     review_inbox.add_argument("--project-name", default="")
@@ -1490,6 +2007,17 @@ def build_parser() -> argparse.ArgumentParser:
     bridge_bindings.add_argument("--limit", type=int, default=100)
     bridge_bindings.set_defaults(func=cmd_bridge_bindings)
 
+    bridge_execution_lease = subparsers.add_parser("bridge-execution-lease")
+    bridge_execution_lease.add_argument("--bridge", default="feishu")
+    bridge_execution_lease.add_argument("--conversation-key", required=True)
+    bridge_execution_lease.add_argument("--lease-json", default="")
+    bridge_execution_lease.set_defaults(func=cmd_bridge_execution_lease)
+
+    bridge_execution_leases = subparsers.add_parser("bridge-execution-leases")
+    bridge_execution_leases.add_argument("--bridge", default="feishu")
+    bridge_execution_leases.add_argument("--limit", type=int, default=100)
+    bridge_execution_leases.set_defaults(func=cmd_bridge_execution_leases)
+
     approval_token = subparsers.add_parser("approval-token")
     approval_token.add_argument("--token", required=True)
     approval_token.add_argument("--token-json", default="")
@@ -1523,6 +2051,9 @@ def build_parser() -> argparse.ArgumentParser:
     command_center.add_argument("--thread-name", default="")
     command_center.add_argument("--thread-label", default="")
     command_center.add_argument("--source-message-id", default="")
+    command_center.add_argument("--attachment-path", default="")
+    command_center.add_argument("--attachment-type", default="")
+    command_center.add_argument("--voice-transcript", default="")
     command_center.add_argument("--approval-token", default="")
     command_center.add_argument("--no-auto-resume", action="store_true")
     command_center.set_defaults(func=cmd_command_center)

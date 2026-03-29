@@ -44,8 +44,18 @@ const MAX_BACKGROUND_FOLLOWUPS = 3;
 const RECOVERY_SWEEP_MIN_AGE_SECONDS = 20;
 const RECOVERY_SWEEP_MAX_AGE_SECONDS = 6 * 60 * 60;
 const RECOVERY_SWEEP_LIMIT = 20;
+const RECOVERY_RECONNECT_MIN_OUTAGE_SECONDS = 60;
+const RECOVERY_RECONNECT_NOTICE_COOLDOWN_SECONDS = 30 * 60;
+const RECOVERY_RECENT_CHAT_MAX_AGE_SECONDS = 24 * 60 * 60;
+const RECOVERY_RECENT_CHAT_LIMIT = 8;
+const EMIT_RECOVERY_NOTICES = true;
 const APPROVAL_TOKEN_TTL_SECONDS = 1800;
+const ROUTE_EXECUTION_TIMEOUT_MS = 0;
+const EXECUTION_LEASE_HEARTBEAT_MS = 30_000;
+const EXECUTION_LEASE_STALE_AFTER_SECONDS = 5 * 60;
 const HIGH_RISK_PATTERNS = [
+  /\bgit\s+add\b/i,
+  /\bgit\s+commit\b/i,
   /\bgit\s+push\b/i,
   /\bgh\s+pr\b/i,
   /\bssh\b/i,
@@ -54,8 +64,11 @@ const HIGH_RISK_PATTERNS = [
   /\bdeploy\b/i,
   /\bpublish\b/i,
   /推(?:到|送到|上)?\s*github/iu,
+  /提交(?:代码|改动)(?:到)?(?:\s*github)?/iu,
   /提交(?:到)?\s*github/iu,
   /发(?:到|上)?\s*github/iu,
+  /(?:请|帮我|把|按).*(?:提交面).*(?:收口|收成|提掉)?/iu,
+  /(?:请|帮我|把|按).*(?:做成|收成|拆成).*(?:一笔|两笔|三笔|\d+\s*笔).*(?:commit|提交)/iu,
   /发布生产/u,
   /线上部署/u,
   /合并\s*pr/iu,
@@ -251,15 +264,10 @@ function buildProjectAliasCandidates(entries) {
   return candidates;
 }
 
-function getProjectRegistryEntries() {
-  return loadProjectRegistryEntries();
-}
-
-function getProjectAliasCandidates() {
-  return buildProjectAliasCandidates(
-    getProjectRegistryEntries(),
-  );
-}
+const PROJECT_REGISTRY_ENTRIES = loadProjectRegistryEntries();
+const PROJECT_ALIAS_CANDIDATES = buildProjectAliasCandidates(
+  PROJECT_REGISTRY_ENTRIES,
+);
 
 const BINDING_DECLARATION_PATTERNS = [
   /只聊\s*(.+)/i,
@@ -298,12 +306,11 @@ function tidyBindingTarget(value) {
 }
 
 function matchProjectAlias(target) {
-  const aliasCandidates = getProjectAliasCandidates();
-  if (!target || !aliasCandidates.length) {
+  if (!target || !PROJECT_ALIAS_CANDIDATES.length) {
     return null;
   }
   const lowerTarget = target.toLowerCase();
-  for (const candidate of aliasCandidates) {
+  for (const candidate of PROJECT_ALIAS_CANDIDATES) {
     if (lowerTarget.includes(candidate.normalized)) {
       return candidate;
     }
@@ -517,17 +524,89 @@ function tryLoadFeishuSdk() {
   }
 }
 
+function parseIsoTimestamp(value) {
+  const parsed = Date.parse(String(value || "").trim());
+  return Number.isNaN(parsed) ? Number.NaN : parsed;
+}
+
+const TEXTUAL_MESSAGE_TYPES = new Set(["text", "post"]);
+const TEXT_CONTAINER_KEYS = [
+  "content",
+  "children",
+  "elements",
+  "body",
+  "title",
+  "header",
+  "paragraphs",
+  "lines",
+  "items",
+  "zh_cn",
+  "en_us",
+  "ja_jp",
+  "ko_kr",
+];
+
+function collectTextParts(value, parts = [], seen = new Set()) {
+  if (value == null) {
+    return parts;
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text) {
+      parts.push(text);
+    }
+    return parts;
+  }
+  if (typeof value !== "object") {
+    return parts;
+  }
+  if (seen.has(value)) {
+    return parts;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectTextParts(item, parts, seen));
+    return parts;
+  }
+  if (typeof value.text === "string") {
+    const text = value.text.trim();
+    if (text) {
+      parts.push(text);
+    }
+  }
+  TEXT_CONTAINER_KEYS.forEach((key) => {
+    if (!(key in value)) {
+      return;
+    }
+    collectTextParts(value[key], parts, seen);
+  });
+  return parts;
+}
+
+function extractMessageText(messageType, content) {
+  const normalizedType = String(messageType || "text").trim().toLowerCase();
+  if (!TEXTUAL_MESSAGE_TYPES.has(normalizedType)) {
+    return "";
+  }
+  const parts = collectTextParts(content);
+  if (!parts.length) {
+    return "";
+  }
+  return [...new Set(parts)].join("\n").trim();
+}
+
 function normalizeMessageEvent(event) {
   const message = event?.message || {};
   const sender = event?.sender || {};
   const mentions = Array.isArray(message?.mentions) ? message.mentions : [];
   const content = safeParseContent(message?.content);
-  const text = extractText(content);
+  const messageType = String(message?.message_type || "text").trim() || "text";
+  const text = extractMessageText(messageType, content);
   const messageCreatedAt = normalizeEventTimestamp(message?.create_time || message?.create_at || event?.create_time);
   return {
     event_type: event?.event_type || "im.message.receive_v1",
     message_id: String(message?.message_id || "").trim(),
-    message_type: String(message?.message_type || "text").trim() || "text",
+    message_type: messageType,
     chat_id: String(message?.chat_id || "").trim(),
     chat_type: String(message?.chat_type || "").trim(),
     open_id: String(sender?.sender_id?.open_id || sender?.open_id || "").trim(),
@@ -617,10 +696,7 @@ function safeParseContent(content) {
 }
 
 function extractText(content) {
-  if (!content) return "";
-  if (typeof content === "string") return content.trim();
-  if (typeof content.text === "string") return content.text.trim();
-  return "";
+  return extractMessageText("post", content);
 }
 
 function trimReplyText(text, limit = 1500) {
@@ -661,7 +737,7 @@ function demoteMarkdownHeadings(text) {
 function stripLocalMarkdownLinks(text) {
   return String(text || "").replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_full, label, target) => {
     const href = String(target || "").trim();
-    if (href.startsWith("/Users/")) {
+    if (href.startsWith("/Users/") || href.startsWith("/workspace/")) {
       return `\`${String(label || "").trim() || href}\``;
     }
     return `[${label}](${href})`;
@@ -707,11 +783,18 @@ function splitReplyText(text, limit = 3200) {
 }
 
 function summarizeErrorText(text) {
-  const normalized = String(text || "")
+  const candidates = String(text || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .find((line) => !line.startsWith("OpenAI Codex") && !line.startsWith("--------") && !line.startsWith("tokens used"));
+    .filter((line) => !line.startsWith("OpenAI Codex"))
+    .filter((line) => !line.startsWith("--------"))
+    .filter((line) => !line.startsWith("tokens used"))
+    .filter((line) => !line.startsWith("Traceback (most recent call last):"))
+    .filter((line) => !line.startsWith("During handling of the above exception"))
+    .filter((line) => !/^File\s+\".+\", line \d+/.test(line))
+    .filter((line) => !/^[\^~]+$/.test(line));
+  const normalized = candidates[candidates.length - 1] || "";
   return trimReplyText(normalized || "执行失败，但没有拿到可读的错误信息。", 500);
 }
 
@@ -735,7 +818,7 @@ function buildBindingFailureReply(payload) {
     if (declaredTarget) {
       lines.push(`我没有在这句话里识别出正式项目名：\`${declaredTarget}\``);
     }
-    lines.push("首次绑定时，请先用正式项目名或项目别名重新声明，例如：这个群只聊 SampleProj。");
+    lines.push("首次绑定时，请先用正式项目名或项目别名重新声明，例如：这个群只聊 Sample Project。");
     return lines.join("\n");
   }
   const lines = ["这个群的绑定没有成功。", summarizeBrokerFailure(payload, "绑定失败")];
@@ -745,13 +828,11 @@ function buildBindingFailureReply(payload) {
   if (availableTopics.length) {
     lines.push(`当前可用专题：${availableTopics.join(" / ")}`);
   }
-  lines.push("请先用正式项目名或项目别名重新声明，例如：这个群只聊 SampleProj。");
+  lines.push("请先用正式项目名或项目别名重新声明，例如：这个群只聊 Sample Project。");
   return lines.join("\n");
 }
 
 function renderReplyText(brokerPayload, fallbackText) {
-  const stdout = String(brokerPayload?.stdout || "").trim();
-  if (stdout) return stdout;
   if (brokerPayload?.reason === "project_paused" || brokerPayload?.error_type === "project_paused") {
     return summarizeBrokerFailure(brokerPayload, "当前项目已暂停执行");
   }
@@ -763,6 +844,15 @@ function renderReplyText(brokerPayload, fallbackText) {
   ) {
     return summarizeBrokerFailure(brokerPayload);
   }
+  const finalize = brokerPayload?.finalize_launch;
+  if (finalize && typeof finalize === "object") {
+    const replyText = String(finalize.reply_text || "").trim();
+    if (replyText) return replyText;
+    const summaryExcerpt = String(finalize.summary_excerpt || "").trim();
+    if (summaryExcerpt) return summaryExcerpt;
+  }
+  const stdout = String(brokerPayload?.stdout || "").trim();
+  if (stdout) return stdout;
   if (fallbackText) {
     return `我已收到：${trimReplyText(fallbackText, 300)}`;
   }
@@ -841,21 +931,7 @@ function shouldAttachMaterialHints(normalized, routeContext, brokerPayload) {
 }
 
 function buildDelayedReplyNotice(normalized, currentStatus) {
-  const createdAtText = String(normalized?.message_created_at || "").trim();
-  if (!createdAtText) return "";
-  const createdAt = Date.parse(createdAtText);
-  if (Number.isNaN(createdAt)) return "";
-  const now = Date.now();
-  const ageSeconds = Math.floor((now - createdAt) / 1000);
-  if (ageSeconds < DELAYED_REPLY_NOTICE_SECONDS) {
-    return "";
-  }
-  const connectedAt = Date.parse(String(currentStatus?.connected_at || "").trim());
-  const reconnectedAfterMessage = Number.isFinite(connectedAt) && createdAt < connectedAt;
-  const reason = reconnectedAfterMessage
-    ? "之前因为我离线或刚完成重连，没能及时回复。"
-    : "之前因为本地桥接恢复较慢，没能及时回复。";
-  return `说明：你这条消息是延迟补回的，${reason}我现在已经在线，下面给你补上处理结果。`;
+  return "";
 }
 
 function buildBackgroundFollowupText(attempt = 0) {
@@ -938,7 +1014,23 @@ function buildReplyDocTitle(phase = "", text = "") {
   return meta.title;
 }
 
-async function createReplyDocIfNeeded(brokerClient, logger, { phase = "", text = "" } = {}) {
+function buildReplyDocTarget({ chatId = "", openId = "" } = {}) {
+  const chatRef = String(chatId || "").trim();
+  if (chatRef) {
+    return `feishu:chat:${chatRef}`;
+  }
+  const senderRef = String(openId || "").trim();
+  if (senderRef) {
+    return `feishu:user:${senderRef}`;
+  }
+  return "feishu:coco-private";
+}
+
+async function createReplyDocIfNeeded(
+  brokerClient,
+  logger,
+  { phase = "", text = "", chatId = "", openId = "" } = {},
+) {
   if (!brokerClient || typeof brokerClient.call !== "function") {
     return null;
   }
@@ -947,15 +1039,15 @@ async function createReplyDocIfNeeded(brokerClient, logger, { phase = "", text =
   }
   try {
     const title = buildReplyDocTitle(phase, text);
-    const payload = await brokerClient.call("feishu-op", {
-      domain: "doc",
-      action: "create",
-      payload: {
+    const payload = await brokerClient.call("feishu-callback-executor", {
+      action: "doc-create",
+      payload_json: JSON.stringify({
+        target: buildReplyDocTarget({ chatId, openId }),
         title,
         content: text,
-      },
+      }),
     });
-    const result = payload?.result || payload;
+    const result = payload?.result?.document || payload?.result || payload;
     const documentId = String(result?.document_id || "").trim();
     const url = String(result?.url || "").trim();
     if (!documentId || !url) {
@@ -1031,6 +1123,45 @@ function shouldRecoverConversation(row) {
     return false;
   }
   if (ageSeconds > RECOVERY_SWEEP_MAX_AGE_SECONDS) {
+    return false;
+  }
+  return true;
+}
+
+function buildReconnectRecoveryReply(row, offlineSeconds) {
+  const scope =
+    row?.project_name && row?.topic_name
+      ? `项目 \`${row.project_name}\` / 话题 \`${row.topic_name}\``
+      : row?.project_name
+        ? `项目 \`${row.project_name}\``
+        : "当前工作线程";
+  const offlineMinutes = Math.max(1, Math.round(Number(offlineSeconds || 0) / 60));
+  return [
+    "说明：我刚恢复在线。",
+    `我刚才有大约 ${offlineMinutes} 分钟没有稳定处理 Feishu 消息。`,
+    `如果你在这个窗口里给我发过消息但没看到回复，请把当前仍需要我处理的最新指令再发一遍；这条线程目前仍归在${scope}。`,
+  ].join("\n");
+}
+
+function shouldNotifyReconnectConversation(row) {
+  if (!row || !row.chat_ref) {
+    return false;
+  }
+  if (!(row.pending_request || row.awaiting_report || row.ack_pending || row.needs_attention)) {
+    return false;
+  }
+  const reason = String(row.attention_reason || "").trim();
+  if (reason && !["response_delayed", "progress_stalled", "approval_pending", "binding_required"].includes(reason)) {
+    return false;
+  }
+  const ageSeconds = Number(row.last_message_age_seconds || row.last_user_request_age_seconds || 0);
+  if (!Number.isFinite(ageSeconds) || ageSeconds < 0) {
+    return false;
+  }
+  if (ageSeconds > RECOVERY_RECENT_CHAT_MAX_AGE_SECONDS) {
+    return false;
+  }
+  if (Number(row.participant_count || 0) <= 0) {
     return false;
   }
   return true;
@@ -1202,6 +1333,10 @@ function approvedExecutionProfileForItem(item) {
   return approvedExecutionProfileForScope(item?.scope || "");
 }
 
+function isBackgroundJobApprovalItem(item) {
+  return String(item?.scope || "").trim() === "background_job_external_delivery";
+}
+
 function createApprovalToken() {
   return `coco-${crypto.randomUUID().split("-")[0]}`;
 }
@@ -1235,6 +1370,14 @@ function approvalMismatchReason(item, normalized) {
     return "actor";
   }
   return "";
+}
+
+function createRouteExecutionTimeoutError(command, timeoutMs) {
+  const error = new Error(`${command} timed out after ${timeoutMs}ms`);
+  error.name = "RouteExecutionTimeoutError";
+  error.command = command;
+  error.timeoutMs = timeoutMs;
+  return error;
 }
 
 function shouldRunInBackground(normalized) {
@@ -1279,6 +1422,8 @@ function createFeishuLongConnectionService({
   runtimeState,
   sdkLoader = tryLoadFeishuSdk,
   logger = console,
+  routeExecutionTimeoutMs = ROUTE_EXECUTION_TIMEOUT_MS,
+  emitRecoveryNotices = EMIT_RECOVERY_NOTICES,
 } = {}) {
   if (!brokerClient || typeof brokerClient.call !== "function") {
     throw new Error("brokerClient.call is required");
@@ -1286,6 +1431,8 @@ function createFeishuLongConnectionService({
   const runtime = runtimeState || {
     saveBridgeStatus: async () => ({}),
     saveBridgeSettings: async () => ({}),
+    saveBridgeExecutionLease: async () => ({}),
+    fetchBridgeExecutionLease: async () => ({ lease: null }),
   };
   let settings = { ...DEFAULT_SETTINGS };
   let sdk = null;
@@ -1298,6 +1445,7 @@ function createFeishuLongConnectionService({
   const processedMessageIds = new Map();
   const pendingFollowups = new Map();
   const conversationQueueTails = new Map();
+  const activeExecutionLeases = new Map();
   const activeStreamCards = new Map();
   let cachedUserProfile = null;
   let cachedUserProfileAt = 0;
@@ -1324,6 +1472,7 @@ function createFeishuLongConnectionService({
     last_binding_topic: "",
     last_execution_state: "",
     pending_ack_at: "",
+    last_recovery_notice_at: "",
   };
 
   async function persistStatus(nextStatus) {
@@ -1332,7 +1481,10 @@ function createFeishuLongConnectionService({
     return status;
   }
 
-  async function markExecutionStarted({ ackPending = false } = {}) {
+  async function markExecutionStarted(
+    normalized = null,
+    { ackPending = false, routeContext = null, sessionId = "" } = {},
+  ) {
     const nextStatus = {
       last_execution_state: "running",
       heartbeat_at: new Date().toISOString(),
@@ -1340,6 +1492,22 @@ function createFeishuLongConnectionService({
       pending_ack_at: ackPending ? status.pending_ack_at || new Date().toISOString() : "",
     };
     await persistStatus(nextStatus);
+    const conversationKey = getConversationKey(normalized);
+    if (conversationKey) {
+      await syncExecutionLease(conversationKey, {
+        state: "running",
+        sessionId,
+        projectName: String(routeContext?.project_name || "").trim(),
+        topicName: String(routeContext?.topic_name || "").trim(),
+        startedAt: new Date().toISOString(),
+        staleAfterSeconds: EXECUTION_LEASE_STALE_AFTER_SECONDS,
+        lastDeliveryPhase: ackPending ? "ack" : "",
+        metadata: {
+          source_message_id: String(normalized?.message_id || "").trim(),
+          chat_type: String(normalized?.chat_type || "").trim(),
+        },
+      });
+    }
     return nextStatus;
   }
 
@@ -1353,6 +1521,323 @@ function createFeishuLongConnectionService({
         return tracked;
       },
     };
+  }
+
+  function conversationKeyFromReplyTarget({ chatId = "", openId = "", sourceMessageId = "" } = {}) {
+    return String(chatId || openId || sourceMessageId || "").trim();
+  }
+
+  function leaseStateForReplyPhase(phase) {
+    if (["ack", "approval_confirmed", "progress"].includes(phase)) {
+      return "running";
+    }
+    if (phase === "approval_prompt") {
+      return "approval_pending";
+    }
+    if (phase === "error") {
+      return "failed";
+    }
+    if (["final", "reply", "report"].includes(phase)) {
+      return "reported";
+    }
+    return "";
+  }
+
+  async function fetchExecutionLease(conversationKey) {
+    const normalizedKey = String(conversationKey || "").trim();
+    if (!normalizedKey) {
+      return null;
+    }
+    const activeLease = activeExecutionLeases.get(normalizedKey);
+    if (activeLease?.state === "running") {
+      return {
+        bridge: BRIDGE_NAME,
+        conversation_key: normalizedKey,
+        session_id: String(activeLease.sessionId || "").trim(),
+        project_name: String(activeLease.projectName || "").trim(),
+        topic_name: String(activeLease.topicName || "").trim(),
+        state: "running",
+        started_at: String(activeLease.startedAt || "").trim(),
+        last_progress_at: String(activeLease.lastProgressAt || "").trim(),
+        stale_after_seconds: Number(activeLease.staleAfterSeconds || EXECUTION_LEASE_STALE_AFTER_SECONDS),
+        last_delivery_phase: String(activeLease.lastDeliveryPhase || "").trim(),
+        last_error: String(activeLease.lastError || "").trim(),
+        metadata: activeLease.metadata || {},
+      };
+    }
+    if (typeof runtime.fetchBridgeExecutionLease !== "function") {
+      return null;
+    }
+    const payload = await runtime.fetchBridgeExecutionLease({ conversationKey: normalizedKey });
+    if (payload && typeof payload === "object" && Object.prototype.hasOwnProperty.call(payload, "lease")) {
+      return payload.lease || null;
+    }
+    return payload || null;
+  }
+
+  async function resolveResumeSession(binding, routeContext, conversationKey) {
+    if (!bindingMatchesRouteContext(binding, routeContext, conversationKey)) {
+      return { sessionId: "", lease: null, shouldResetBinding: false, shouldMarkLeaseFailed: false, reason: "" };
+    }
+    const bindingSessionId = String(binding?.session_id || "").trim();
+    if (!bindingSessionId) {
+      return { sessionId: "", lease: null, shouldResetBinding: false, shouldMarkLeaseFailed: false, reason: "" };
+    }
+    const lease = await fetchExecutionLease(conversationKey);
+    const leaseState = String(lease?.state || "").trim();
+    const leaseSessionId = String(lease?.session_id || "").trim();
+    if (!lease) {
+      return {
+        sessionId: "",
+        lease: null,
+        shouldResetBinding: true,
+        shouldMarkLeaseFailed: false,
+        reason: "lease_missing",
+      };
+    }
+    if (!leaseState || leaseState !== "running") {
+      return {
+        sessionId: "",
+        lease,
+        shouldResetBinding: true,
+        shouldMarkLeaseFailed: false,
+        reason: leaseState ? `lease_not_running:${leaseState}` : "lease_not_running",
+      };
+    }
+    if (leaseSessionId && leaseSessionId !== bindingSessionId) {
+      return {
+        sessionId: "",
+        lease,
+        shouldResetBinding: true,
+        shouldMarkLeaseFailed: true,
+        reason: "lease_session_mismatch",
+      };
+    }
+    const lastProgressAtMs = parseIsoTimestamp(lease?.last_progress_at || lease?.started_at);
+    const staleAfterSeconds = Math.max(
+      0,
+      Number(lease?.stale_after_seconds || EXECUTION_LEASE_STALE_AFTER_SECONDS),
+    );
+    if (!Number.isFinite(lastProgressAtMs)) {
+      return {
+        sessionId: "",
+        lease,
+        shouldResetBinding: true,
+        shouldMarkLeaseFailed: true,
+        reason: "lease_missing_progress",
+      };
+    }
+    const progressAgeSeconds = Math.max(0, Math.round((Date.now() - lastProgressAtMs) / 1000));
+    if (staleAfterSeconds > 0 && progressAgeSeconds >= staleAfterSeconds) {
+      return {
+        sessionId: "",
+        lease,
+        shouldResetBinding: true,
+        shouldMarkLeaseFailed: true,
+        reason: "lease_progress_stalled",
+      };
+    }
+    return {
+      sessionId: bindingSessionId,
+      lease,
+      shouldResetBinding: false,
+      shouldMarkLeaseFailed: false,
+      reason: "",
+    };
+  }
+
+  function clearExecutionLeaseHeartbeat(conversationKey) {
+    const normalizedKey = String(conversationKey || "").trim();
+    if (!normalizedKey) {
+      return;
+    }
+    const current = activeExecutionLeases.get(normalizedKey);
+    if (current?.timer) {
+      clearInterval(current.timer);
+    }
+    activeExecutionLeases.delete(normalizedKey);
+  }
+
+  async function persistExecutionLease(payload) {
+    const conversationKey = String(payload?.conversation_key || payload?.conversationKey || "").trim();
+    if (!conversationKey || typeof runtime.saveBridgeExecutionLease !== "function") {
+      return null;
+    }
+    const nextPayload = {
+      bridge: BRIDGE_NAME,
+      conversation_key: conversationKey,
+      session_id: String(payload?.session_id || "").trim(),
+      project_name: String(payload?.project_name || "").trim(),
+      topic_name: String(payload?.topic_name || "").trim(),
+      state: String(payload?.state || "").trim() || "running",
+      started_at: String(payload?.started_at || "").trim(),
+      last_progress_at: String(payload?.last_progress_at || "").trim(),
+      completed_at: String(payload?.completed_at || "").trim(),
+      stale_after_seconds: Number(payload?.stale_after_seconds || EXECUTION_LEASE_STALE_AFTER_SECONDS),
+      last_delivery_phase: String(payload?.last_delivery_phase || "").trim(),
+      last_error: String(payload?.last_error || "").trim(),
+      metadata: payload?.metadata || {},
+    };
+    const result = await runtime.saveBridgeExecutionLease(nextPayload);
+    return result?.lease || result || nextPayload;
+  }
+
+  async function syncExecutionLease(conversationKey, patch = {}) {
+    const normalizedKey = String(conversationKey || "").trim();
+    if (!normalizedKey) {
+      return null;
+    }
+    const current = activeExecutionLeases.get(normalizedKey) || {};
+    const fallbackProgressAt = String(
+      patch.lastProgressAt ||
+        current.lastProgressAt ||
+        patch.startedAt ||
+        current.startedAt ||
+        new Date().toISOString(),
+    ).trim();
+    const lease = await persistExecutionLease({
+      conversation_key: normalizedKey,
+      session_id: patch.sessionId ?? current.sessionId ?? "",
+      project_name: patch.projectName ?? current.projectName ?? "",
+      topic_name: patch.topicName ?? current.topicName ?? "",
+      state: patch.state ?? current.state ?? "running",
+      started_at: patch.startedAt ?? current.startedAt ?? "",
+      last_progress_at: fallbackProgressAt,
+      completed_at: patch.completedAt ?? "",
+      stale_after_seconds: patch.staleAfterSeconds ?? current.staleAfterSeconds ?? EXECUTION_LEASE_STALE_AFTER_SECONDS,
+      last_delivery_phase: patch.lastDeliveryPhase ?? current.lastDeliveryPhase ?? "",
+      last_error: patch.lastError ?? current.lastError ?? "",
+      metadata: {
+        ...(current.metadata || {}),
+        ...(patch.metadata || {}),
+      },
+    });
+    const nextEntry = {
+      ...current,
+      conversationKey: normalizedKey,
+      sessionId: String(lease?.session_id || patch.sessionId || current.sessionId || "").trim(),
+      projectName: String(lease?.project_name || patch.projectName || current.projectName || "").trim(),
+      topicName: String(lease?.topic_name || patch.topicName || current.topicName || "").trim(),
+      state: String(lease?.state || patch.state || current.state || "").trim(),
+      startedAt: String(lease?.started_at || patch.startedAt || current.startedAt || "").trim(),
+      lastProgressAt: String(lease?.last_progress_at || fallbackProgressAt).trim(),
+      staleAfterSeconds: Number(
+        lease?.stale_after_seconds || patch.staleAfterSeconds || current.staleAfterSeconds || EXECUTION_LEASE_STALE_AFTER_SECONDS,
+      ),
+      lastDeliveryPhase: String(lease?.last_delivery_phase || patch.lastDeliveryPhase || current.lastDeliveryPhase || "").trim(),
+      lastError: String(lease?.last_error || patch.lastError || current.lastError || "").trim(),
+      metadata: {
+        ...(current.metadata || {}),
+        ...(patch.metadata || {}),
+      },
+      timer: current.timer || null,
+    };
+    if (nextEntry.state === "running") {
+      if (!nextEntry.timer) {
+        const timer = setInterval(() => {
+          const liveEntry = activeExecutionLeases.get(normalizedKey);
+          if (!liveEntry || liveEntry.state !== "running") {
+            clearExecutionLeaseHeartbeat(normalizedKey);
+            return;
+          }
+          void syncExecutionLease(normalizedKey, {
+            state: "running",
+            sessionId: liveEntry.sessionId,
+            projectName: liveEntry.projectName,
+            topicName: liveEntry.topicName,
+            startedAt: liveEntry.startedAt,
+            lastProgressAt: liveEntry.lastProgressAt,
+            staleAfterSeconds: liveEntry.staleAfterSeconds,
+            lastDeliveryPhase: liveEntry.lastDeliveryPhase,
+            lastError: liveEntry.lastError,
+            metadata: liveEntry.metadata || {},
+          });
+        }, EXECUTION_LEASE_HEARTBEAT_MS);
+        if (typeof timer.unref === "function") {
+          timer.unref();
+        }
+        nextEntry.timer = timer;
+      }
+      activeExecutionLeases.set(normalizedKey, nextEntry);
+    } else {
+      clearExecutionLeaseHeartbeat(normalizedKey);
+      activeExecutionLeases.set(normalizedKey, {
+        ...nextEntry,
+        timer: null,
+      });
+      if (["reported", "failed", "approval_pending", "completed"].includes(nextEntry.state)) {
+        activeExecutionLeases.delete(normalizedKey);
+      }
+    }
+    return lease;
+  }
+
+  async function touchExecutionLeaseForReply({
+    chatId = "",
+    openId = "",
+    sourceMessageId = "",
+    phase = "",
+    lastError = "",
+  } = {}) {
+    const leaseState = leaseStateForReplyPhase(phase);
+    if (!leaseState) {
+      return null;
+    }
+    const conversationKey = conversationKeyFromReplyTarget({
+      chatId,
+      openId,
+      sourceMessageId,
+    });
+    if (!conversationKey) {
+      return null;
+    }
+    let binding = await getPersistedBinding(conversationKey);
+    const routeContext = resolveMessageRouteContext(
+      {
+        chat_id: chatId,
+        open_id: openId,
+        message_id: sourceMessageId,
+      },
+      binding,
+    );
+    return syncExecutionLease(conversationKey, {
+      state: leaseState,
+      sessionId: String(binding?.session_id || "").trim(),
+      projectName: String(routeContext?.project_name || binding?.project_name || "").trim(),
+      topicName: String(routeContext?.topic_name || binding?.topic_name || "").trim(),
+      lastDeliveryPhase: phase,
+      lastError,
+      completedAt:
+        leaseState === "failed" || leaseState === "reported" ? new Date().toISOString() : "",
+      metadata: {
+        source_message_id: sourceMessageId,
+      },
+    });
+  }
+
+  async function shouldDeliverReplyForSource({
+    chatId = "",
+    openId = "",
+    sourceMessageId = "",
+  } = {}) {
+    const normalizedSourceMessageId = String(sourceMessageId || "").trim();
+    if (!normalizedSourceMessageId) {
+      return true;
+    }
+    const conversationKey = conversationKeyFromReplyTarget({
+      chatId,
+      openId,
+      sourceMessageId,
+    });
+    if (!conversationKey) {
+      return true;
+    }
+    const lease = await fetchExecutionLease(conversationKey);
+    const currentSourceMessageId = String(lease?.metadata?.source_message_id || "").trim();
+    if (currentSourceMessageId && currentSourceMessageId !== normalizedSourceMessageId) {
+      return false;
+    }
+    return true;
   }
 
   async function withConversationQueue(normalized, runner) {
@@ -1637,12 +2122,73 @@ function createFeishuLongConnectionService({
     return formatAddressedReply(preferredName, text);
   }
 
+  async function buildRouteFailureReplyPreview(routeFailure) {
+    const sessionReset = Boolean(routeFailure?.session_reset);
+    const timeoutMs = Number(routeFailure?.timeout_ms || routeExecutionTimeoutMs);
+    if (routeFailure?.reason === "session_timed_out") {
+      return addressReply(
+        [
+          "当前线程上一轮执行长时间未返回，我已经停止继续等待。",
+          sessionReset
+            ? "这条聊天与旧会话的绑定已解除；你直接重试刚才的问题时，我会按新的会话继续。"
+            : "请直接重试刚才的问题；如果再次超时，我会继续走恢复路径。",
+          `本轮超时阈值：${Math.round(timeoutMs / 1000)} 秒。`,
+        ].join("\n"),
+      );
+    }
+    return addressReply(`未能执行：${routeFailure?.reason || "未知原因"}`);
+  }
+
+  async function callBrokerRouteCommand(command, payload) {
+    if (!(routeExecutionTimeoutMs > 0)) {
+      return brokerClient.call(command, payload);
+    }
+    let timer = null;
+    try {
+      return await Promise.race([
+        brokerClient.call(command, payload),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(createRouteExecutionTimeoutError(command, routeExecutionTimeoutMs));
+          }, routeExecutionTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  async function loadPersistedPreviousStatus() {
+    try {
+      const payload = await brokerClient.call("bridge-status", { bridge: BRIDGE_NAME });
+      const metadata = payload?.metadata || {};
+      return {
+        connection_status: String(payload?.connection_status || "").trim(),
+        last_event_at: String(payload?.last_event_at || "").trim(),
+        connected_at: String(metadata?.connected_at || payload?.connected_at || "").trim(),
+        last_recovery_notice_at: String(
+          metadata?.last_recovery_notice_at || payload?.last_recovery_notice_at || "",
+        ).trim(),
+        recent_message_count: Number(metadata?.recent_message_count || payload?.recent_message_count || 0),
+        recent_reply_count: Number(metadata?.recent_reply_count || payload?.recent_reply_count || 0),
+        last_message_preview: String(metadata?.last_message_preview || payload?.last_message_preview || "").trim(),
+        last_sender_ref: String(metadata?.last_sender_ref || payload?.last_sender_ref || "").trim(),
+      };
+    } catch (_error) {
+      return null;
+    }
+  }
+
   async function connect() {
     if (!settings.app_id || !settings.app_secret) {
       await persistStatus({ connection_status: "blocked", last_error: "missing_app_credentials" });
       return { ok: false, reason: "missing_app_credentials", status };
     }
-    const previousStatus = { ...status };
+    const persistedPreviousStatus =
+      status.last_event_at || status.connected_at ? null : await loadPersistedPreviousStatus();
+    const previousStatus = { ...status, ...(persistedPreviousStatus || {}) };
     sdk = sdkLoader();
     if (!sdk || !sdk.Client || !sdk.WSClient || !sdk.EventDispatcher) {
       await persistStatus({ connection_status: "blocked", last_error: "sdk_unavailable" });
@@ -1685,7 +2231,10 @@ function createFeishuLongConnectionService({
           await persistStatus({
             connection_status: "error",
             last_error: String(error?.message || error || "feishu_event_handler_failed"),
+            last_execution_state: "failed",
+            heartbeat_at: new Date().toISOString(),
           });
+          await sendHandlerFailureReply(event, error);
         }
     });
     gateway.registerCardActionHandler(async (event) => {
@@ -1711,15 +2260,17 @@ function createFeishuLongConnectionService({
     cardStreamController = client
       ? createCardStreamController(client, { throttleMs: 200, footer: { status: true, elapsed: true } })
       : null;
+    const connectedAt = new Date().toISOString();
     await persistStatus({
       connection_status: "connected",
+      transport: typeof gateway.getTransport === "function" ? gateway.getTransport() : "sdk_websocket_plus_rest",
       last_error: "",
       host_mode: "electron",
-      connected_at: new Date().toISOString(),
-      heartbeat_at: new Date().toISOString(),
+      connected_at: connectedAt,
+      heartbeat_at: connectedAt,
       stale_after_seconds: STALE_AFTER_SECONDS,
       event_idle_after_seconds: EVENT_IDLE_AFTER_SECONDS_IDLE,
-      last_event_at: previousStatus.last_event_at || "",
+      last_event_at: connectedAt,
       recent_message_count: Number(previousStatus.recent_message_count || 0),
       recent_reply_count: Number(previousStatus.recent_reply_count || 0),
       last_message_preview: previousStatus.last_message_preview || "",
@@ -1727,12 +2278,15 @@ function createFeishuLongConnectionService({
       settings_summary: summarizeSettings(settings),
     });
     startHeartbeat();
-    void recoverPendingConversations();
+    void recoverAfterReconnect(previousStatus);
     return { ok: true, status };
   }
 
   async function disconnect() {
     clearHeartbeat();
+    for (const conversationKey of activeExecutionLeases.keys()) {
+      clearExecutionLeaseHeartbeat(conversationKey);
+    }
     if (gateway) {
       await gateway.stop();
     }
@@ -1952,6 +2506,29 @@ function createFeishuLongConnectionService({
         approved_at: new Date().toISOString(),
       },
     });
+    if (isBackgroundJobApprovalItem(item)) {
+      const taskId = String(metadata.task_id || "").trim();
+      if (!taskId) {
+        return {
+          ok: true,
+          normalized,
+          direct: true,
+          replyPhase: "approval_missing_request",
+          replyPreview: await addressReply(`已记录授权 \`${approvalToken}\`，但没有找到对应后台任务，请重新发起这条后台投递。`),
+        };
+      }
+      return {
+        ok: true,
+        normalized: {
+          ...normalized,
+          source_approval_token: approvalToken,
+        },
+        approvalItem: item,
+        approvalToken,
+        executeBackgroundJob: true,
+        replyPhase: "approval_confirmed",
+      };
+    }
     const requestedText = String(metadata.requested_text || "").trim();
     if (!requestedText) {
       return {
@@ -1974,6 +2551,25 @@ function createFeishuLongConnectionService({
       executeApproved: true,
       replyPhase: "approval_confirmed",
     };
+  }
+
+  async function runApprovedBackgroundJob(approvalAction) {
+    const approvalItem = approvalAction?.approvalItem || {};
+    const metadata = approvalItem && typeof approvalItem.metadata === "object" ? approvalItem.metadata : {};
+    const projectName = String(approvalItem.project_name || "").trim();
+    const taskId = String(metadata.task_id || "").trim();
+    if (!projectName || !taskId) {
+      throw new Error("background_job_approval_missing_task_context");
+    }
+    return brokerClient.call("feishu-callback-executor", {
+      action: "approval-routed-action",
+      payload_json: JSON.stringify({
+        route: "background-job",
+        project_name: projectName,
+        task_id: taskId,
+        approval_token: approvalAction.approvalToken,
+      }),
+    });
   }
 
   async function tryBindChat(normalized, existingBinding = null) {
@@ -2035,14 +2631,23 @@ function createFeishuLongConnectionService({
     return getPersistedBinding(conversationKey);
   }
 
-  function bindingMatchesRouteContext(binding, routeContext) {
+  function bindingMatchesRouteContext(binding, routeContext, conversationKey) {
     const bindingSessionId = String(binding?.session_id || "").trim();
     const bindingProject = String(binding?.project_name || "").trim();
     const bindingTopic = String(binding?.topic_name || "").trim();
+    const bindingLane = String(binding?.metadata?.session_lane || "").trim();
     const routeProject = String(routeContext?.project_name || "").trim();
     const routeTopic = String(routeContext?.topic_name || "").trim();
     if (!bindingSessionId) {
       return false;
+    }
+    if (conversationKey) {
+      if (!bindingLane) {
+        return false;
+      }
+      if (bindingLane !== conversationKey) {
+        return false;
+      }
     }
     if (!routeProject && !routeTopic) {
       return true;
@@ -2062,7 +2667,7 @@ function createFeishuLongConnectionService({
       return { ok: false, reason: gate.reason, normalized };
     }
     const conversationKey = getConversationKey(normalized);
-    const binding = await getPersistedBinding(conversationKey);
+    let binding = await getPersistedBinding(conversationKey);
     const routeContext = resolveMessageRouteContext(normalized, binding);
     const threadIdentity = resolveSourceThreadIdentity(
       normalized,
@@ -2070,11 +2675,40 @@ function createFeishuLongConnectionService({
       binding,
       conversationKey,
     );
-    const activeSessionId = bindingMatchesRouteContext(binding, routeContext)
-      ? String(binding?.session_id || "").trim()
-      : "";
+    const resumeSession = await resolveResumeSession(binding, routeContext, conversationKey);
+    const activeSessionId = String(resumeSession.sessionId || "").trim();
     const projectName = routeContext.project_name;
     const topicName = routeContext.topic_name;
+    if (!activeSessionId && resumeSession.shouldResetBinding && conversationKey && binding?.session_id) {
+      const staleSessionId = String(resumeSession.lease?.session_id || binding?.session_id || "").trim();
+      binding = await persistBinding(
+        conversationKey,
+        {
+          session_id: "",
+          metadata: {
+            session_lane: conversationKey,
+            stale_session_id: staleSessionId,
+            stale_session_cleared_at: new Date().toISOString(),
+            last_route_error: resumeSession.reason || "stale_resume_binding_cleared",
+          },
+        },
+        binding,
+      );
+      if (resumeSession.shouldMarkLeaseFailed) {
+        await syncExecutionLease(conversationKey, {
+          state: "failed",
+          sessionId: staleSessionId,
+          projectName,
+          topicName,
+          lastError: resumeSession.reason || "stale_resume_binding_cleared",
+          lastDeliveryPhase: "error",
+          completedAt: new Date().toISOString(),
+          metadata: {
+            ...(resumeSession.lease?.metadata || {}),
+          },
+        });
+      }
+    }
     const executionProfile = resolveExecutionProfileForMessage(normalized, options);
     const selectedModel = String(options.model || "").trim();
     const selectedReasoningEffort = String(
@@ -2098,26 +2732,74 @@ function createFeishuLongConnectionService({
     if (topicName) {
       commonPayload.topic_name = topicName;
     }
-    const brokerPayload = activeSessionId
-      ? await brokerClient.call("codex-resume", {
-          ...commonPayload,
-          session_id: activeSessionId,
-          source: "feishu",
-          chat_ref: conversationKey,
-          thread_name: threadIdentity.threadName,
-          thread_label: threadIdentity.threadLabel,
-          source_message_id: normalized.message_id,
-        })
-      : await brokerClient.call("codex-exec", {
-          ...commonPayload,
-          session_id: normalized.message_id,
-          no_auto_resume: Boolean(conversationKey),
-          source: "feishu",
-          chat_ref: conversationKey,
-          thread_name: threadIdentity.threadName,
-          thread_label: threadIdentity.threadLabel,
-          source_message_id: normalized.message_id,
+    let brokerPayload;
+    try {
+      brokerPayload = activeSessionId
+        ? await callBrokerRouteCommand("codex-resume", {
+            ...commonPayload,
+            session_id: activeSessionId,
+            source: "feishu",
+            chat_ref: conversationKey,
+            thread_name: threadIdentity.threadName,
+            thread_label: threadIdentity.threadLabel,
+            source_message_id: normalized.message_id,
+          })
+        : await callBrokerRouteCommand("codex-exec", {
+            ...commonPayload,
+            session_id: normalized.message_id,
+            no_auto_resume: Boolean(conversationKey),
+            source: "feishu",
+            chat_ref: conversationKey,
+            thread_name: threadIdentity.threadName,
+            thread_label: threadIdentity.threadLabel,
+            source_message_id: normalized.message_id,
+          });
+    } catch (error) {
+      if (String(error?.name || "") !== "RouteExecutionTimeoutError") {
+        await syncExecutionLease(conversationKey, {
+          state: "failed",
+          sessionId: activeSessionId,
+          projectName,
+          topicName,
+          lastError: String(error?.message || error || "codex_route_failed"),
+          lastDeliveryPhase: "error",
         });
+        throw error;
+      }
+      if (conversationKey && activeSessionId) {
+        await persistBinding(
+          conversationKey,
+          {
+            session_id: "",
+            metadata: {
+              session_lane: conversationKey,
+              stale_session_id: activeSessionId,
+              stale_session_cleared_at: new Date().toISOString(),
+              last_route_error: "session_timed_out",
+            },
+          },
+          binding,
+        );
+      }
+      await persistStatus({
+        last_error: `feishu_route_timeout:${String(error?.command || "codex-route")}`,
+        last_execution_state: "failed",
+      });
+      await syncExecutionLease(conversationKey, {
+        state: "failed",
+        sessionId: activeSessionId,
+        projectName,
+        topicName,
+        lastError: "session_timed_out",
+        lastDeliveryPhase: "error",
+      });
+      return {
+        ok: false,
+        reason: "session_timed_out",
+        session_reset: Boolean(conversationKey && activeSessionId),
+        timeout_ms: Number(error?.timeoutMs || routeExecutionTimeoutMs),
+      };
+    }
     const discoveredSessionId = extractSessionId(brokerPayload?.stderr || "") || extractSessionId(brokerPayload?.stdout || "");
     const nextSessionId = discoveredSessionId || activeSessionId;
     if (conversationKey && nextSessionId) {
@@ -2141,11 +2823,27 @@ function createFeishuLongConnectionService({
             last_message_id: normalized.message_id || "",
             last_sender_ref: normalized.open_id || normalized.user_id || "",
             last_route_source: routeContext.route_source || "",
+            session_lane: conversationKey,
+            session_chat_type: normalized.chat_type || "",
+            session_thread_name: threadIdentity.threadName,
+            session_thread_label: threadIdentity.threadLabel,
           },
         },
         binding,
       );
     }
+    await syncExecutionLease(conversationKey, {
+      state: "running",
+      sessionId: nextSessionId,
+      projectName: routeContext.project_name || "",
+      topicName: routeContext.topic_name || "",
+      lastDeliveryPhase: "",
+      metadata: {
+        source_message_id: normalized.message_id || "",
+        thread_name: threadIdentity.threadName,
+        thread_label: threadIdentity.threadLabel,
+      },
+    });
     await persistStatus({ last_error: "" });
     return {
       ok: true,
@@ -2316,9 +3014,9 @@ function createFeishuLongConnectionService({
     return addressReply(
       [
         "如果你希望这个群默认聚焦某个项目，可以告诉我：",
-        "- 这个群只聊 SampleProj",
+        "- 这个群只聊 Sample Project",
         "- 这个群只聊 Codex Hub 前端",
-        "- 这个群只聊 示例交付 展馆线",
+        "- 这个群只聊 Example Workspace Phase A",
         "不声明也可以，我会优先根据你当前消息里提到的项目来路由上下文。",
       ].join("\n"),
     );
@@ -2339,7 +3037,9 @@ function createFeishuLongConnectionService({
           chat_type: normalized.chat_type,
           open_id: normalized.open_id,
           user_id: normalized.user_id,
+          message_type: normalized.message_type,
           text: normalized.text,
+          raw_content: normalized.raw_content,
         },
       });
       const record = payload?.record || payload || {};
@@ -2408,7 +3108,10 @@ function createFeishuLongConnectionService({
     }
   }
 
-  async function recoverPendingConversations() {
+  async function recoverPendingConversations(notifiedChats = new Set()) {
+    if (!emitRecoveryNotices) {
+      return notifiedChats;
+    }
     try {
       const payload = await brokerClient.call("bridge-conversations", {
         bridge: BRIDGE_NAME,
@@ -2416,19 +3119,101 @@ function createFeishuLongConnectionService({
       });
       const rows = Array.isArray(payload?.rows) ? payload.rows : [];
       for (const row of rows) {
-        if (!shouldRecoverConversation(row)) {
+        const chatRef = String(row?.chat_ref || "").trim();
+        if (!chatRef || notifiedChats.has(chatRef) || !shouldRecoverConversation(row)) {
           continue;
         }
         await sendReply({
-          chatId: String(row.chat_ref || "").trim(),
+          chatId: chatRef,
           openId: "",
           text: await addressReply(buildRecoverySweepReply(row)),
           sourceMessageId: "",
           phase: "report",
         });
+        notifiedChats.add(chatRef);
       }
     } catch (error) {
       logger.warn?.("feishu recovery sweep skipped", error);
+    }
+    return notifiedChats;
+  }
+
+  async function recoverRecentConversations(previousStatus, notifiedChats = new Set()) {
+    if (!emitRecoveryNotices) {
+      return notifiedChats;
+    }
+    try {
+      const lastSignal = Date.parse(previousStatus?.last_event_at || previousStatus?.connected_at || "") || 0;
+      if (!lastSignal) {
+        return notifiedChats;
+      }
+      const outageSeconds = Math.round((Date.now() - lastSignal) / 1000);
+      if (outageSeconds < RECOVERY_RECONNECT_MIN_OUTAGE_SECONDS) {
+        return notifiedChats;
+      }
+      const lastRecoveryNoticeAt = Date.parse(previousStatus?.last_recovery_notice_at || "") || 0;
+      if (lastRecoveryNoticeAt && Date.now() - lastRecoveryNoticeAt < RECOVERY_RECONNECT_NOTICE_COOLDOWN_SECONDS * 1000) {
+        return notifiedChats;
+      }
+      const payload = await brokerClient.call("bridge-conversations", {
+        bridge: BRIDGE_NAME,
+        limit: Math.max(RECOVERY_SWEEP_LIMIT, RECOVERY_RECENT_CHAT_LIMIT),
+      });
+      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+      let sentCount = 0;
+      for (const row of rows) {
+        const chatRef = String(row?.chat_ref || "").trim();
+        if (!chatRef || notifiedChats.has(chatRef) || !shouldNotifyReconnectConversation(row)) {
+          continue;
+        }
+        await sendReply({
+          chatId: chatRef,
+          openId: "",
+          text: await addressReply(buildReconnectRecoveryReply(row, outageSeconds)),
+          sourceMessageId: "",
+          phase: "report",
+        });
+        notifiedChats.add(chatRef);
+        sentCount += 1;
+        if (sentCount >= RECOVERY_RECENT_CHAT_LIMIT) {
+          break;
+        }
+      }
+      if (sentCount > 0) {
+        await persistStatus({ last_recovery_notice_at: new Date().toISOString() });
+      }
+    } catch (error) {
+      logger.warn?.("feishu reconnect recovery skipped", error);
+    }
+    return notifiedChats;
+  }
+
+  async function recoverAfterReconnect(previousStatus) {
+    const notifiedChats = await recoverPendingConversations(new Set());
+    if (String(previousStatus?.connection_status || "").trim() !== "connected") {
+      await recoverRecentConversations(previousStatus, notifiedChats);
+    }
+  }
+
+  async function sendHandlerFailureReply(event, error) {
+    try {
+      const normalized = normalizeMessageEvent(event);
+      if (!normalized.chat_id && !normalized.open_id) {
+        return;
+      }
+      await sendReply({
+        chatId: normalized.chat_id,
+        openId: normalized.open_id,
+        text: await addressReply([
+          "我刚才在处理这条消息时遇到内部故障，已经开始恢复。",
+          `故障摘要：${summarizeErrorText(String(error?.message || error || "internal_error"))}`,
+          "请把当前仍需处理的最新指令再发一遍，我会继续执行。",
+        ].join("\n")),
+        sourceMessageId: normalized.message_id,
+        phase: "error",
+      });
+    } catch (_error) {
+      // ignore fallback reply failures
     }
   }
 
@@ -2516,6 +3301,15 @@ function createFeishuLongConnectionService({
       await persistStatus({ last_error: "missing_reply_target" });
       return { ok: false, reason: "missing_reply_target" };
     }
+    if (!(await shouldDeliverReplyForSource({ chatId, openId, sourceMessageId }))) {
+      logger?.warn?.("feishu stale reply suppressed", {
+        chatId,
+        openId,
+        sourceMessageId,
+        phase,
+      });
+      return { ok: false, reason: "stale_reply_suppressed" };
+    }
     const shapedText = shapeFeishuReplyText(text, phase);
     if (!shapedText) {
       return { ok: false, reason: "empty_message" };
@@ -2523,6 +3317,8 @@ function createFeishuLongConnectionService({
     const docRef = await createReplyDocIfNeeded(brokerClient, logger, {
       phase,
       text: shapedText,
+      chatId,
+      openId,
     });
     if (
       sourceMessageId &&
@@ -2562,6 +3358,13 @@ function createFeishuLongConnectionService({
           phase,
         });
       }
+      await touchExecutionLeaseForReply({
+        chatId,
+        openId,
+        sourceMessageId,
+        phase,
+        lastError: phase === "error" ? mergedText : "",
+      });
       const nextStatus = {
         recent_reply_count: Number(status.recent_reply_count || 0) + 1,
         last_error: "",
@@ -2604,6 +3407,13 @@ function createFeishuLongConnectionService({
         openId,
         sourceMessageId,
         phase,
+      });
+      await touchExecutionLeaseForReply({
+        chatId,
+        openId,
+        sourceMessageId,
+        phase,
+        lastError: phase === "error" ? shapedText : "",
       });
       const nextStatus = {
         recent_reply_count: Number(status.recent_reply_count || 0) + 1,
@@ -2657,6 +3467,13 @@ function createFeishuLongConnectionService({
         phase,
       });
     }
+    await touchExecutionLeaseForReply({
+      chatId,
+      openId,
+      sourceMessageId,
+      phase,
+      lastError: phase === "error" ? shapedText : "",
+    });
     const nextStatus = {
       recent_reply_count: Number(status.recent_reply_count || 0) + parts.length,
       last_error: "",
@@ -2782,6 +3599,50 @@ function createFeishuLongConnectionService({
           content: "授权处理失败，请稍后重试。",
         },
       };
+    }
+    if (approvalAction.executeBackgroundJob) {
+      const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+      await sendReply({
+        chatId: normalized.chat_id,
+        openId: normalized.open_id,
+        text: await buildApprovalConfirmedReply(currentBinding, {
+          project_name: String(approvalAction?.approvalItem?.project_name || "").trim(),
+          topic_name: String(approvalAction?.approvalItem?.metadata?.topic_name || "").trim(),
+        }),
+        sourceMessageId: normalized.message_id,
+        phase: "approval_confirmed",
+      });
+      const backgroundTask = (async () => {
+        try {
+          const delivered = await runApprovedBackgroundJob(approvalAction);
+          if (!delivered?.ok) {
+            await sendReply({
+              chatId: normalized.chat_id,
+              openId: normalized.open_id,
+              text: await addressReply(`执行失败：${delivered?.error || delivered?.result_status || "background_job_failed"}`),
+              sourceMessageId: normalized.message_id,
+              phase: "error",
+            });
+          }
+        } catch (error) {
+          await persistStatus({
+            last_error: String(error?.message || error || "feishu_background_job_approval_handler_failed"),
+          });
+          await sendReply({
+            chatId: normalized.chat_id,
+            openId: normalized.open_id,
+            text: await addressReply(`执行失败：${summarizeErrorText(String(error?.message || error || ""))}`),
+            sourceMessageId: normalized.message_id,
+            phase: "error",
+          });
+        }
+      })();
+      executionControl?.extend(backgroundTask);
+      return buildApprovalCardResolutionPayload(
+        await fetchApprovalTokenRecord(approvalAction.approvalToken),
+        currentBinding,
+        "approved",
+      );
     }
     if (approvalAction.executeApproved) {
       const currentBinding = await getPersistedBinding(getConversationKey(normalized));
@@ -2993,26 +3854,90 @@ function createFeishuLongConnectionService({
     const deliveryNotice = buildDelayedReplyNotice(normalized, status);
     const approvalAction = await resolveApprovalCommand(normalized);
     if (approvalAction?.ok) {
-      if (approvalAction.executeApproved) {
+      if (approvalAction.executeBackgroundJob) {
         const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+        const currentRouteContext = resolveMessageRouteContext(
+          approvalAction.normalized,
+          currentBinding,
+        );
         await sendReply({
           chatId: normalized.chat_id,
           openId: normalized.open_id,
           text: withDeliveryNotice(
             await buildApprovalConfirmedReply(
               currentBinding,
-              resolveMessageRouteContext(approvalAction.normalized, currentBinding),
+              currentRouteContext,
             ),
             deliveryNotice,
           ),
           sourceMessageId: normalized.message_id,
           phase: "approval_confirmed",
         });
-        await markExecutionStarted({ ackPending: false });
+        await markExecutionStarted(approvalAction.normalized, {
+          ackPending: false,
+          routeContext: currentRouteContext,
+          sessionId: String(currentBinding?.session_id || "").trim(),
+        });
+        const delivered = await runApprovedBackgroundJob(approvalAction);
+        if (!delivered?.ok) {
+          return {
+            ok: true,
+            normalized: approvalAction.normalized,
+            direct: true,
+            replyPhase: "error",
+            replyPreview: withDeliveryNotice(
+              await addressReply(`执行失败：${delivered?.error || delivered?.result_status || "background_job_failed"}`),
+              deliveryNotice,
+            ),
+          };
+        }
+        return {
+          ok: true,
+          normalized: approvalAction.normalized,
+          direct: true,
+          replyPhase: "approval_confirmed",
+          replyPreview: "",
+        };
+      }
+      if (approvalAction.executeApproved) {
+        const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+        const currentRouteContext = resolveMessageRouteContext(
+          approvalAction.normalized,
+          currentBinding,
+        );
+        await sendReply({
+          chatId: normalized.chat_id,
+          openId: normalized.open_id,
+          text: withDeliveryNotice(
+            await buildApprovalConfirmedReply(
+              currentBinding,
+              currentRouteContext,
+            ),
+            deliveryNotice,
+          ),
+          sourceMessageId: normalized.message_id,
+          phase: "approval_confirmed",
+        });
+        await markExecutionStarted(approvalAction.normalized, {
+          ackPending: false,
+          routeContext: currentRouteContext,
+          sessionId: String(currentBinding?.session_id || "").trim(),
+        });
         const routed = await routeMessage(approvalAction.normalized, {
           executionProfile: approvedExecutionProfileForItem(approvalAction.approvalItem),
         });
-        if (!routed.ok) return routed;
+        if (!routed.ok) {
+          return {
+            ok: true,
+            normalized: approvalAction.normalized,
+            direct: true,
+            replyPhase: routed.replyPhase || "error",
+            replyPreview: withDeliveryNotice(
+              routed.replyPreview || (await buildRouteFailureReplyPreview(routed)),
+              deliveryNotice,
+            ),
+          };
+        }
         return {
           ok: true,
           normalized: approvalAction.normalized,
@@ -3109,7 +4034,18 @@ function createFeishuLongConnectionService({
         };
       }
     const routed = await routeMessage(normalized);
-    if (!routed.ok) return routed;
+    if (!routed.ok) {
+      return {
+        ok: true,
+        normalized,
+        direct: true,
+        replyPhase: routed.replyPhase || "error",
+        replyPreview: withDeliveryNotice(
+          routed.replyPreview || (await buildRouteFailureReplyPreview(routed)),
+          deliveryNotice,
+        ),
+      };
+    }
     return {
       ok: true,
       normalized,
@@ -3140,6 +4076,42 @@ function createFeishuLongConnectionService({
       const deliveryNotice = buildDelayedReplyNotice(normalized, status);
       const approvalAction = await resolveApprovalCommand(normalized);
       if (approvalAction?.ok) {
+      if (approvalAction.executeBackgroundJob) {
+        const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+        await sendReply({
+          chatId: normalized.chat_id,
+          openId: normalized.open_id,
+          text: withDeliveryNotice(
+            await buildApprovalConfirmedReply(
+              currentBinding,
+              resolveMessageRouteContext(approvalAction.normalized, currentBinding),
+            ),
+            deliveryNotice,
+          ),
+          sourceMessageId: normalized.message_id,
+          phase: "approval_confirmed",
+        });
+        const delivered = await runApprovedBackgroundJob(approvalAction);
+        if (!delivered?.ok) {
+          return {
+            ok: true,
+            normalized: approvalAction.normalized,
+            direct: true,
+            replyPhase: "error",
+            replyPreview: withDeliveryNotice(
+              await addressReply(`执行失败：${delivered?.error || delivered?.result_status || "background_job_failed"}`),
+              deliveryNotice,
+            ),
+          };
+        }
+        return {
+          ok: true,
+          normalized: approvalAction.normalized,
+          direct: true,
+          replyPhase: "approval_confirmed",
+          replyPreview: "",
+        };
+      }
       if (approvalAction.executeApproved) {
         const currentBinding = await getPersistedBinding(getConversationKey(normalized));
         await sendReply({
@@ -3158,7 +4130,18 @@ function createFeishuLongConnectionService({
           const routed = await routeMessage(approvalAction.normalized, {
             executionProfile: approvedExecutionProfileForItem(approvalAction.approvalItem),
           });
-          if (!routed.ok) return routed;
+          if (!routed.ok) {
+            return {
+              ok: true,
+              normalized: approvalAction.normalized,
+              direct: true,
+              replyPhase: routed.replyPhase || "error",
+              replyPreview: withDeliveryNotice(
+                routed.replyPreview || (await buildRouteFailureReplyPreview(routed)),
+                deliveryNotice,
+              ),
+            };
+          }
           return {
             ok: true,
             normalized: approvalAction.normalized,
@@ -3254,9 +4237,23 @@ function createFeishuLongConnectionService({
         },
       };
     }
-    await markExecutionStarted({ ackPending: false });
+    const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+    const currentRouteContext = resolveMessageRouteContext(normalized, currentBinding);
+    await markExecutionStarted(normalized, {
+      ackPending: false,
+      routeContext: currentRouteContext,
+      sessionId: String(currentBinding?.session_id || "").trim(),
+    });
       const routed = await routeMessage(normalized);
-      if (!routed.ok) return routed;
+      if (!routed.ok) {
+        return {
+          ok: true,
+          normalized,
+          direct: true,
+          replyPhase: routed.replyPhase || "error",
+          replyPreview: routed.replyPreview || (await buildRouteFailureReplyPreview(routed)),
+        };
+      }
       return {
         ok: true,
         normalized,
@@ -3273,22 +4270,88 @@ function createFeishuLongConnectionService({
     }
     const approvalAction = await resolveApprovalCommand(normalized);
     if (approvalAction?.ok) {
-      if (approvalAction.executeApproved) {
+      if (approvalAction.executeBackgroundJob) {
         const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+        const currentRouteContext = resolveMessageRouteContext(
+          approvalAction.normalized,
+          currentBinding,
+        );
         await sendReply({
           chatId: normalized.chat_id,
           openId: normalized.open_id,
           text: withDeliveryNotice(
             await buildApprovalConfirmedReply(
               currentBinding,
-              resolveMessageRouteContext(approvalAction.normalized, currentBinding),
+              currentRouteContext,
             ),
             deliveryNotice,
           ),
           sourceMessageId: normalized.message_id,
           phase: "approval_confirmed",
         });
-      await markExecutionStarted({ ackPending: false });
+        await markExecutionStarted(approvalAction.normalized, {
+          ackPending: false,
+          routeContext: currentRouteContext,
+          sessionId: String(currentBinding?.session_id || "").trim(),
+        });
+        const backgroundTask = (async () => {
+          try {
+            const delivered = await runApprovedBackgroundJob(approvalAction);
+            if (!delivered?.ok) {
+              await sendReply({
+                chatId: normalized.chat_id,
+                openId: normalized.open_id,
+                text: await addressReply(`执行失败：${delivered?.error || delivered?.result_status || "background_job_failed"}`),
+                sourceMessageId: normalized.message_id,
+                phase: "error",
+              });
+            }
+          } catch (error) {
+            await persistStatus({
+              last_error: String(error?.message || error || "feishu_background_job_approval_handler_failed"),
+            });
+            await sendReply({
+              chatId: normalized.chat_id,
+              openId: normalized.open_id,
+              text: await addressReply(`执行失败：${summarizeErrorText(String(error?.message || error || ""))}`),
+              sourceMessageId: normalized.message_id,
+              phase: "error",
+            });
+          }
+        })();
+        executionControl?.extend(backgroundTask);
+        return {
+          ok: true,
+          normalized: approvalAction.normalized,
+          direct: true,
+          replyPhase: "approval_confirmed",
+          replyPreview: "",
+        };
+      }
+      if (approvalAction.executeApproved) {
+        const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+        const currentRouteContext = resolveMessageRouteContext(
+          approvalAction.normalized,
+          currentBinding,
+        );
+        await sendReply({
+          chatId: normalized.chat_id,
+          openId: normalized.open_id,
+          text: withDeliveryNotice(
+            await buildApprovalConfirmedReply(
+              currentBinding,
+              currentRouteContext,
+            ),
+            deliveryNotice,
+          ),
+          sourceMessageId: normalized.message_id,
+          phase: "approval_confirmed",
+        });
+      await markExecutionStarted(approvalAction.normalized, {
+        ackPending: false,
+        routeContext: currentRouteContext,
+        sessionId: String(currentBinding?.session_id || "").trim(),
+      });
         const backgroundTask = (async () => {
           try {
             const routed = await routeMessage(approvalAction.normalized, {
@@ -3298,7 +4361,7 @@ function createFeishuLongConnectionService({
               await sendReply({
                 chatId: normalized.chat_id,
                 openId: normalized.open_id,
-                text: await addressReply(`未能执行：${routed.reason || "未知原因"}`),
+                text: routed.replyPreview || (await buildRouteFailureReplyPreview(routed)),
                 sourceMessageId: normalized.message_id,
                 phase: "error",
               });
@@ -3373,13 +4436,19 @@ function createFeishuLongConnectionService({
     }
     const backgroundTask = (async () => {
       try {
-        await markExecutionStarted({ ackPending: false });
+        const currentBinding = await getPersistedBinding(getConversationKey(normalized));
+        const currentRouteContext = resolveMessageRouteContext(normalized, currentBinding);
+        await markExecutionStarted(normalized, {
+          ackPending: false,
+          routeContext: currentRouteContext,
+          sessionId: String(currentBinding?.session_id || "").trim(),
+        });
         const routed = await routeMessage(normalized);
         if (!routed.ok) {
           await sendReply({
             chatId: normalized.chat_id,
             openId: normalized.open_id,
-            text: await addressReply(`未能执行：${routed.reason || "未知原因"}`),
+            text: routed.replyPreview || (await buildRouteFailureReplyPreview(routed)),
             sourceMessageId: normalized.message_id,
             phase: "error",
           });
@@ -3455,6 +4524,7 @@ module.exports = {
   sanitizeSettings,
   shouldMirrorReplyToDoc,
   shouldUseInteractiveReply,
+  summarizeErrorText,
   summarizeSettings,
   shouldAcceptMessage,
   shouldRunInBackground,

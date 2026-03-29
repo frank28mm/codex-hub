@@ -2,16 +2,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 try:
-    from ops import codex_retrieval, gstack_phase1_entry, workspace_hub_project
+    from ops import codex_retrieval, gstack_automation, gstack_phase1_entry, runtime_state, workspace_hub_project
 except ImportError:  # pragma: no cover
     import codex_retrieval  # type: ignore
+    import gstack_automation  # type: ignore
     import gstack_phase1_entry  # type: ignore
+    import runtime_state  # type: ignore
     import workspace_hub_project  # type: ignore
 
 
@@ -262,6 +270,99 @@ def build_workflow_recommendation(prompt: str) -> dict[str, Any]:
     return suggestion
 
 
+def build_gflow_recommendation(prompt: str) -> dict[str, Any]:
+    text = prompt.strip()
+    if not text:
+        return {}
+    try:
+        payload = gstack_automation.build_workflow_preview(text)
+    except Exception as exc:
+        try:
+            trigger = gstack_automation.detect_gflow_trigger(text)
+        except Exception:
+            trigger = {}
+        if not trigger.get("matched"):
+            return {}
+        runtime_state.enqueue_runtime_event(
+            queue_name="gflow_run_log",
+            event_type="gflow_recommendation_failed",
+            payload={
+                "prompt": text,
+                "entry_prompt": str(trigger.get("entry_prompt", "")).strip(),
+            },
+            result={
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            dedupe_key=(
+                "gflow-recommendation-failed:"
+                + hashlib.sha1(text.encode("utf-8")).hexdigest()
+            ),
+            status="completed",
+        )
+        return {
+            "status": "gflow-recommendation-error",
+            "invocation_mode": str(trigger.get("invocation_mode", "")).strip(),
+            "trigger_token": str(trigger.get("trigger_token", "")).strip(),
+            "entry_prompt": str(trigger.get("entry_prompt", "")).strip(),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    workflow_plan = dict(payload.get("workflow_plan", {}))
+    main_thread_handoff = str(payload.get("main_thread_handoff", "")).strip()
+    return {
+        "status": str(payload.get("status", "")).strip(),
+        "invocation_mode": str(payload.get("invocation_mode", "")).strip(),
+        "trigger_token": str(payload.get("trigger_token", "")).strip(),
+        "entry_prompt": str(payload.get("entry_prompt", "")).strip(),
+        "path_source": str(payload.get("path_source", "")).strip(),
+        "template_id": str(payload.get("template_id", "")).strip(),
+        "template_label": str(payload.get("template_label", "")).strip(),
+        "project_scope_id": str(payload.get("project_scope_id", "")).strip(),
+        "project_scope_label": str(payload.get("project_scope_label", "")).strip(),
+        "recognized_stage": str(
+            (payload.get("workflow_detection") or {}).get("recognized_stage", "")
+        ).strip(),
+        "suggested_path": list(payload.get("suggested_path", [])),
+        "initial_stage": str(payload.get("initial_stage", "")).strip(),
+        "initial_action_plan": list(workflow_plan.get("initial_action_plan", [])),
+        "project_scope": dict(workflow_plan.get("project_scope") or {}),
+        "workflow_plan": workflow_plan,
+        "main_thread_handoff": main_thread_handoff,
+        "handoff_preview": "\n".join(main_thread_handoff.splitlines()[:5]).strip(),
+    }
+
+
+def build_gflow_runtime_summary(project_name: str) -> dict[str, Any]:
+    normalized_project = canonical_project_name(project_name)
+    if not normalized_project:
+        return {}
+    try:
+        summary = gstack_automation.latest_project_workflow_summary(normalized_project)
+    except Exception:
+        return {}
+    run_id = str(summary.get("run_id", "")).strip()
+    if not run_id:
+        return summary
+    try:
+        from ops import codex_memory
+    except ImportError:  # pragma: no cover
+        try:
+            import codex_memory  # type: ignore
+        except ImportError:
+            return summary
+    try:
+        board = codex_memory.load_project_board(normalized_project)
+    except Exception:
+        return summary
+    gflow_rows = board.get("gflow_rows", [])
+    if any(str(row.get("ID", "")).strip() == run_id for row in gflow_rows if isinstance(row, dict)):
+        return summary
+    try:
+        codex_memory.sync_gflow_project_layers(normalized_project)
+    except Exception:
+        return summary
+    return summary
+
+
 def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
     project_name = canonical_project_name(project_name) if project_name else ""
     payload: dict[str, Any] = {
@@ -275,6 +376,8 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
         "retrieval_protocol": {},
         "reasoning_tags": [],
         "workflow_recommendation": {},
+        "gflow_recommendation": {},
+        "gflow_runtime_summary": {},
     }
     recommendations: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -342,6 +445,10 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
                     "当前项目协同事项",
                 )
                 payload["reasoning_tags"].append("coordination-open")
+        runtime_summary = build_gflow_runtime_summary(project_name)
+        if runtime_summary:
+            payload["gflow_runtime_summary"] = runtime_summary
+            payload["reasoning_tags"].append("gflow-runtime-active")
     else:
         payload["reasoning_tags"].append("general-mode")
 
@@ -376,7 +483,16 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
         payload["reasoning_tags"].append("retrieval-hit")
     if prompt.strip():
         payload["reasoning_tags"].append("prompt-aware")
-        workflow_recommendation = build_workflow_recommendation(prompt)
+        gflow_recommendation = build_gflow_recommendation(prompt)
+        workflow_prompt = (
+            str(gflow_recommendation.get("entry_prompt", "")).strip()
+            if gflow_recommendation
+            else prompt
+        )
+        if gflow_recommendation:
+            payload["gflow_recommendation"] = gflow_recommendation
+            payload["reasoning_tags"].append("gflow-explicit")
+        workflow_recommendation = build_workflow_recommendation(workflow_prompt)
         if workflow_recommendation:
             payload["workflow_recommendation"] = workflow_recommendation
             payload["reasoning_tags"].append("workflow-recommended")

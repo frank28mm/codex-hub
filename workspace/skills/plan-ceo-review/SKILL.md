@@ -49,8 +49,11 @@ Produce a clear product-level judgment about value, timing, prioritization, and 
 
 Return in this order:
 
-1. Status
+1. Current stage
 2. What I understood
 3. Product judgment
 4. Why this is or is not worth doing now
-5. Recommended next step
+5. Stage conclusion
+6. Why this should move to the next stage or stop here
+7. Next input needed
+8. Recommended next step

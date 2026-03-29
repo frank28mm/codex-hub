@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import subprocess
 
 from ops import codex_memory
 
@@ -45,3 +47,69 @@ def test_finalize_launch_exposes_full_reply_text_while_keeps_short_excerpt(sampl
     assert finalize_payload["reply_text"] == long_reply
     assert finalize_payload["summary_excerpt"] == long_reply[:400]
     assert len(finalize_payload["summary_excerpt"]) == 400
+
+
+def test_workspace_lock_is_reentrant(sample_env) -> None:
+    module = importlib.reload(codex_memory)
+    entered: list[str] = []
+
+    with module.workspace_lock():
+        entered.append("outer")
+        with module.workspace_lock():
+            entered.append("inner")
+
+    assert entered == ["outer", "inner"]
+
+
+def test_invalid_sync_timeout_env_falls_back_to_default(sample_env, monkeypatch) -> None:
+    monkeypatch.setenv("WORKSPACE_HUB_SYNC_TRIGGER_TIMEOUT_SECONDS", "oops")
+
+    module = importlib.reload(codex_memory)
+
+    assert module.SYNC_TRIGGER_TIMEOUT_SECONDS == 15
+
+
+def test_trigger_dashboard_sync_once_returns_timeout_result(sample_env, monkeypatch) -> None:
+    module = importlib.reload(codex_memory)
+    sync_script = sample_env["workspace_root"] / "ops" / "codex_dashboard_sync.py"
+    sync_script.parent.mkdir(parents=True, exist_ok=True)
+    sync_script.write_text("print('stub')\n", encoding="utf-8")
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = module.trigger_dashboard_sync_once()
+
+    assert result is not None
+    assert result.returncode == 124
+    assert "timed out" in (result.stderr or "")
+
+
+def test_trigger_retrieval_sync_once_requeues_claimed_events_after_timeout(sample_env, monkeypatch) -> None:
+    module = importlib.reload(codex_memory)
+    from ops import runtime_state
+    retrieval_script = sample_env["workspace_root"] / "ops" / "codex_retrieval.py"
+    retrieval_script.parent.mkdir(parents=True, exist_ok=True)
+    retrieval_script.write_text("print('stub')\n", encoding="utf-8")
+
+    runtime_state.enqueue_runtime_event(
+        queue_name="retrieval_sync",
+        event_type="project_writeback",
+        event_key="retrieval-timeout-test",
+        payload={"project_name": "SampleProj"},
+    )
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    result = module.trigger_retrieval_sync_once()
+    event = runtime_state.fetch_runtime_event("retrieval-timeout-test")
+
+    assert result is not None
+    assert result.returncode == 124
+    assert event["status"] == "pending"
+    assert "timed out" in str(event.get("last_error", ""))

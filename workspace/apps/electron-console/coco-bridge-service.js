@@ -7,7 +7,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { createBridgeHost } = require("./bridge-host");
 
-const AGENT_NAME = "com.codexhub.coco-feishu-bridge";
+const AGENT_NAME = process.env.WORKSPACE_HUB_FEISHU_AGENT_NAME || "com.codexhub.coco-feishu-bridge";
 const APP_ROOT = __dirname;
 const CONSOLE_WORKSPACE_ROOT = path.resolve(APP_ROOT, "..", "..");
 const SHARED_WORKSPACE_ROOT = resolveSharedWorkspaceRoot();
@@ -20,6 +20,8 @@ const LAUNCH_AGENT_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `$
 const SERVICE_STATE_PATH = path.join(SHARED_RUNTIME_ROOT, "coco-service-state.json");
 const HEARTBEAT_CHECK_INTERVAL_MS = 12_000;
 const ACK_STALLED_AFTER_SECONDS = 75;
+const RESPONSE_DELAYED_AFTER_SECONDS = 120;
+const IDLE_RECONNECT_COOLDOWN_SECONDS = 900;
 
 function resolveSharedWorkspaceRoot() {
   const envOverride = process.env.WORKSPACE_HUB_SHARED_ROOT || process.env.WORKSPACE_HUB_ROOT;
@@ -98,6 +100,61 @@ function ensureDir(targetPath) {
   fs.mkdirSync(targetPath, { recursive: true });
 }
 
+function buildWatchedSourcePaths() {
+  const candidates = [
+    path.join(APP_ROOT, "coco-bridge-service.js"),
+    path.join(APP_ROOT, "bridge-host.js"),
+    path.join(FEISHU_BRIDGE_ROOT, "index.js"),
+    path.join(FEISHU_BRIDGE_ROOT, "service.js"),
+    path.join(FEISHU_BRIDGE_ROOT, "feishu_long_connection_service.js"),
+  ];
+  return candidates.filter((filePath, index) => candidates.indexOf(filePath) === index && fs.existsSync(filePath));
+}
+
+function captureSourceFingerprint(paths) {
+  return (Array.isArray(paths) ? paths : [])
+    .filter(Boolean)
+    .map((filePath) => {
+      try {
+        const stats = fs.statSync(filePath);
+        return {
+          path: filePath,
+          mtime_ms: Number(stats.mtimeMs || 0),
+          size: Number(stats.size || 0),
+        };
+      } catch (_error) {
+        return {
+          path: filePath,
+          mtime_ms: 0,
+          size: 0,
+          missing: true,
+        };
+      }
+    });
+}
+
+function diffSourceFingerprint(previousFingerprint, nextFingerprint) {
+  const previousByPath = new Map((previousFingerprint || []).map((entry) => [entry.path, entry]));
+  const changed = [];
+  for (const nextEntry of nextFingerprint || []) {
+    const previousEntry = previousByPath.get(nextEntry.path);
+    if (
+      !previousEntry ||
+      previousEntry.mtime_ms !== nextEntry.mtime_ms ||
+      previousEntry.size !== nextEntry.size ||
+      Boolean(previousEntry.missing) !== Boolean(nextEntry.missing)
+    ) {
+      changed.push(nextEntry.path);
+    }
+  }
+  for (const previousEntry of previousFingerprint || []) {
+    if (!(nextFingerprint || []).find((entry) => entry.path === previousEntry.path)) {
+      changed.push(previousEntry.path);
+    }
+  }
+  return Array.from(new Set(changed));
+}
+
 function readServiceState() {
   try {
     if (!fs.existsSync(SERVICE_STATE_PATH)) {
@@ -148,6 +205,61 @@ function deriveAckStalledState(data = {}) {
     ack_pending: true,
     ack_pending_age_seconds: ageSeconds,
     ack_stalled: ageSeconds >= ACK_STALLED_AFTER_SECONDS,
+  };
+}
+
+function deriveResponseDelayedState(threadSummary = {}) {
+  const delayedThreads = Number(threadSummary.response_delayed_threads || 0);
+  const delayedAt = parseTimestamp(threadSummary.last_response_delayed_thread_at);
+  if (delayedThreads <= 0 || !Number.isFinite(delayedAt)) {
+    return {
+      response_delayed: false,
+      response_delayed_age_seconds: 0,
+      response_delayed_thread_label: "",
+    };
+  }
+  const ageSeconds = Math.max(0, Math.round((Date.now() - delayedAt) / 1000));
+  return {
+    response_delayed: ageSeconds >= RESPONSE_DELAYED_AFTER_SECONDS,
+    response_delayed_age_seconds: ageSeconds,
+    response_delayed_thread_label: String(threadSummary.last_response_delayed_thread_label || "").trim(),
+  };
+}
+
+function shouldAutoReconnectBridge(state = {}) {
+  return !(
+    String(state.connection_status || "") === "connected" &&
+    !Boolean(state.stale) &&
+    !Boolean(state.event_stalled) &&
+    !Boolean(state.ack_stalled)
+  );
+}
+
+function shouldDeferIdleReconnect(state = {}, serviceState = {}, nowMs = Date.now()) {
+  const hasLiveWork =
+    Number(state.running_threads || 0) > 0 ||
+    Number(state.approval_pending_threads || 0) > 0 ||
+    Number(state.attention_threads || 0) > 0;
+  if (hasLiveWork || Boolean(state.ack_stalled) || (!Boolean(state.stale) && !Boolean(state.event_stalled))) {
+    return false;
+  }
+  const lastAttemptAt = parseTimestamp(serviceState.last_reconnect_attempt_at);
+  if (!Number.isFinite(lastAttemptAt)) {
+    return false;
+  }
+  const idleWindowSeconds = Math.max(
+    IDLE_RECONNECT_COOLDOWN_SECONDS,
+    Number(state.event_idle_after_seconds || 0),
+  );
+  return Math.max(0, nowMs - lastAttemptAt) / 1000 < idleWindowSeconds;
+}
+
+function mergeBridgeStatusWithThreadSummary(data = {}, threadSummary = {}) {
+  return {
+    ...data,
+    ...threadSummary,
+    ...deriveAckStalledState(data),
+    ...deriveResponseDelayedState(threadSummary),
   };
 }
 
@@ -227,6 +339,7 @@ function buildHealthSummary(state = {}) {
   const connection = String(state.last_bridge_connection_status || "");
   const healthProbe = String(state.last_health_probe_status || "");
   const threadSummary = summarizeThreadSnapshot(state);
+  const responseState = deriveResponseDelayedState(state);
   if (!healthProbe) {
     return {
       health_summary_status: "unknown",
@@ -243,6 +356,14 @@ function buildHealthSummary(state = {}) {
       health_next_action: "优先检查最近送达阶段、运行中线程和 stdout/stderr 日志，确认是哪条线程已经 ack 但没有继续产出结果。",
     };
   }
+  if (responseState.response_delayed) {
+    return {
+      health_summary_status: "warning",
+      health_summary_label: "线程响应延迟",
+      health_summary_detail: `${threadSummary} · ${responseState.response_delayed_thread_label || "最近 attention 线程"} 已等待 ${responseState.response_delayed_age_seconds} 秒`,
+      health_next_action: "优先检查这条延迟线程本身，不自动重连 Feishu bridge；必要时请用户重发最新指令。",
+    };
+  }
   if (healthProbe !== "healthy") {
     const reason = String(state.last_unhealthy_reason || connection || "unknown");
     const labelByReason = {
@@ -250,6 +371,7 @@ function buildHealthSummary(state = {}) {
       stale: "桥接心跳过期",
       disconnected: "桥接未连接",
       ack_stalled: "确认等待超时",
+      response_delayed: "线程响应延迟",
     };
     return {
       health_summary_status: "warning",
@@ -321,6 +443,22 @@ function summarizeThreadRows(rows) {
     const executionState = String(row.execution_state || "").trim();
     return executionState === "running" || Boolean(row.awaiting_report) || Boolean(row.ack_pending);
   });
+  const responseDelayedRows = liveRows.filter((row) => {
+    if (!Boolean(row.needs_attention)) {
+      return false;
+    }
+    const attentionReason = String(row.attention_reason || "").trim();
+    if (attentionReason) {
+      return attentionReason === "response_delayed";
+    }
+    const executionState = String(row.execution_state || "").trim();
+    return (
+      executionState === "running" ||
+      Boolean(row.pending_request) ||
+      Boolean(row.awaiting_report) ||
+      Boolean(row.ack_pending)
+    );
+  });
   const unboundRows = liveRows.filter(
     (row) => !String(row.project_name || "").trim() && !(String(row.chat_type || "").trim() === "p2p"),
   );
@@ -329,6 +467,9 @@ function summarizeThreadRows(rows) {
   );
   const latestRow = recentRows[0] || null;
   const latestAttentionRow = [...attentionRows].sort(
+    (left, right) => parseTimestamp(right.last_message_at || right.updated_at) - parseTimestamp(left.last_message_at || left.updated_at),
+  )[0] || null;
+  const latestResponseDelayedRow = [...responseDelayedRows].sort(
     (left, right) => parseTimestamp(right.last_message_at || right.updated_at) - parseTimestamp(left.last_message_at || left.updated_at),
   )[0] || null;
   return {
@@ -341,11 +482,18 @@ function summarizeThreadRows(rows) {
     approval_pending_threads: approvalPendingRows.length,
     attention_threads: attentionRows.length,
     running_threads: runningRows.length,
+    response_delayed_threads: responseDelayedRows.length,
     last_thread_message_at: String(latestRow?.last_message_at || latestRow?.updated_at || ""),
     last_thread_label: String(latestRow?.thread_label || latestRow?.binding_label || latestRow?.chat_ref || ""),
     last_attention_thread_at: String(latestAttentionRow?.last_message_at || latestAttentionRow?.updated_at || ""),
     last_attention_thread_label: String(
       latestAttentionRow?.thread_label || latestAttentionRow?.binding_label || latestAttentionRow?.chat_ref || "",
+    ),
+    last_response_delayed_thread_at: String(
+      latestResponseDelayedRow?.last_message_at || latestResponseDelayedRow?.updated_at || "",
+    ),
+    last_response_delayed_thread_label: String(
+      latestResponseDelayedRow?.thread_label || latestResponseDelayedRow?.binding_label || latestResponseDelayedRow?.chat_ref || "",
     ),
   };
 }
@@ -574,10 +722,14 @@ async function runDaemon() {
     hostMode: "launchagent",
   });
   let reconnecting = false;
+  let shuttingDown = false;
+  const watchedSourcePaths = buildWatchedSourcePaths();
+  let sourceFingerprint = captureSourceFingerprint(watchedSourcePaths);
   let consecutiveUnhealthyChecks = 0;
 
   function summarizeBridgeHealth(data, threadSummary = {}) {
     const ackState = deriveAckStalledState(data);
+    const responseState = deriveResponseDelayedState(threadSummary);
     const previousState = readServiceState();
     const metadata = data && typeof data.metadata === "object" ? data.metadata : {};
     return {
@@ -595,28 +747,43 @@ async function runDaemon() {
       last_bridge_pending_ack_age_seconds: ackState.ack_pending_age_seconds,
       ack_pending: ackState.ack_pending,
       ack_stalled: ackState.ack_stalled,
+      response_delayed: responseState.response_delayed,
+      response_delayed_age_seconds: responseState.response_delayed_age_seconds,
+      response_delayed_thread_label: responseState.response_delayed_thread_label,
       ...threadSummary,
     };
   }
 
-  function markHealthy(data, threadSummary = {}) {
-    consecutiveUnhealthyChecks = 0;
-    mergeServiceState({
-      ...summarizeBridgeHealth(data, threadSummary),
-      last_health_probe_status: "healthy",
-      last_healthy_at: new Date().toISOString(),
-      last_unhealthy_at: "",
-      last_unhealthy_reason: "",
-      consecutive_unhealthy_checks: 0,
-    });
+function markHealthy(data, threadSummary = {}) {
+  const previousState = readServiceState();
+  const responseState = deriveResponseDelayedState(threadSummary);
+  const nextPatch = {
+    ...summarizeBridgeHealth(data, threadSummary),
+    last_health_probe_status: "healthy",
+    last_healthy_at: new Date().toISOString(),
+    last_unhealthy_at: "",
+    last_unhealthy_reason: "",
+    consecutive_unhealthy_checks: 0,
+  };
+  if (responseState.response_delayed && !Boolean(previousState.response_delayed)) {
+    nextPatch.last_response_delayed_at = new Date().toISOString();
+    nextPatch.total_response_delayed_count = Number(previousState.total_response_delayed_count || 0) + 1;
   }
+  consecutiveUnhealthyChecks = 0;
+  mergeServiceState(nextPatch);
+}
 
   function markUnhealthy(data, threadSummary = {}) {
     const previousState = readServiceState();
     consecutiveUnhealthyChecks += 1;
     const ackState = deriveAckStalledState(data);
+    const responseState = deriveResponseDelayedState(threadSummary);
     const reason = data.event_stalled
         ? "event_stalled"
+        : ackState.ack_stalled
+          ? "ack_stalled"
+          : responseState.response_delayed
+            ? "response_delayed"
         : data.stale
           ? "stale"
           : (data.connection_status || "disconnected");
@@ -637,21 +804,73 @@ async function runDaemon() {
       nextPatch.last_ack_stalled_at = new Date().toISOString();
       nextPatch.total_ack_stalled_count = Number(previousState.total_ack_stalled_count || 0) + 1;
     }
+    if (reason === "response_delayed" && isNewReason) {
+      nextPatch.last_response_delayed_at = new Date().toISOString();
+      nextPatch.total_response_delayed_count = Number(previousState.total_response_delayed_count || 0) + 1;
+    }
     mergeServiceState(nextPatch);
     return reason;
   }
 
+  async function shutdown(reason = "shutdown_requested") {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(timer);
+    mergeServiceState({
+      last_service_action: reason,
+      last_service_action_at: new Date().toISOString(),
+      last_service_action_details: "",
+    });
+    try {
+      await bridgeHost.disconnect();
+    } finally {
+      process.exit(0);
+    }
+  }
+
+  async function reloadIfSourceChanged() {
+    const nextFingerprint = captureSourceFingerprint(watchedSourcePaths);
+    const changedPaths = diffSourceFingerprint(sourceFingerprint, nextFingerprint);
+    if (!changedPaths.length) {
+      return false;
+    }
+    sourceFingerprint = nextFingerprint;
+    mergeServiceState({
+      last_service_action: "source_reload",
+      last_service_action_at: new Date().toISOString(),
+      last_service_action_details: changedPaths.join(","),
+    });
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          phase: "bridge_source_reload",
+          changed_paths: changedPaths,
+        },
+        null,
+        2,
+      ),
+    );
+    await shutdown("source_reload");
+    return true;
+  }
+
   async function ensureConnected() {
+    if (await reloadIfSourceChanged()) {
+      return;
+    }
     const current = await bridgeHost.getStatus();
     const data = current?.data || {};
-    const derivedData = {
-      ...data,
-      ...deriveAckStalledState(data),
-    };
     const threadPayload = await runBrokerJson(["bridge-conversations", "--bridge", "feishu", "--limit", "50"]).catch(() => ({ rows: [] }));
     const threadSummary = summarizeThreadRows(threadPayload.rows);
-    if (derivedData.connection_status === "connected" && !derivedData.stale && !derivedData.event_stalled) {
+    const derivedData = mergeBridgeStatusWithThreadSummary(data, threadSummary);
+    const previousState = readServiceState();
+    if (!shouldAutoReconnectBridge(derivedData)) {
       markHealthy(derivedData, threadSummary);
+      return;
+    }
+    if (shouldDeferIdleReconnect(derivedData, previousState)) {
+      markUnhealthy(derivedData, threadSummary);
       return;
     }
     if (reconnecting) {
@@ -666,7 +885,6 @@ async function runDaemon() {
     reconnecting = true;
     const recoveryReason = markUnhealthy(derivedData, threadSummary);
     const reconnectStartedAt = Date.now();
-    const previousState = readServiceState();
     mergeServiceState({
       last_reconnect_attempt_at: new Date().toISOString(),
       last_reconnect_attempt_reason: recoveryReason,
@@ -678,13 +896,10 @@ async function runDaemon() {
       const result = await bridgeHost.reconnect();
       await sleep(750);
       const afterStatus = await bridgeHost.getStatus();
-      const afterData = {
-        ...(afterStatus?.data || {}),
-        ...deriveAckStalledState(afterStatus?.data || {}),
-      };
       const afterPayload = await runBrokerJson(["bridge-conversations", "--bridge", "feishu", "--limit", "24"]).catch(() => ({ rows: [] }));
       const afterThreads = snapshotThreads(afterPayload.rows);
       const afterThreadSummary = summarizeThreadRows(afterPayload.rows);
+      const afterData = mergeBridgeStatusWithThreadSummary(afterStatus?.data || {}, afterThreadSummary);
       const mismatches = compareThreadSnapshots(beforeThreads, afterThreads);
       const recoveryOk = Boolean(result?.ok) && !afterData.stale && !afterData.event_stalled && mismatches.length === 0;
       if (recoveryOk && Object.keys(afterData).length) {
@@ -773,15 +988,6 @@ async function runDaemon() {
   const timer = setInterval(() => {
     void ensureConnected();
   }, HEARTBEAT_CHECK_INTERVAL_MS);
-
-  const shutdown = async () => {
-    clearInterval(timer);
-    try {
-      await bridgeHost.disconnect();
-    } finally {
-      process.exit(0);
-    }
-  };
 
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
@@ -1030,7 +1236,20 @@ async function main() {
   throw new Error(`unsupported command: ${command}`);
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({ ok: false, error: String(error?.message || error) }, null, 2));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(JSON.stringify({ ok: false, error: String(error?.message || error) }, null, 2));
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  buildWatchedSourcePaths,
+  captureSourceFingerprint,
+  diffSourceFingerprint,
+  deriveResponseDelayedState,
+  mergeBridgeStatusWithThreadSummary,
+  summarizeThreadRows,
+  shouldAutoReconnectBridge,
+  shouldDeferIdleReconnect,
+};

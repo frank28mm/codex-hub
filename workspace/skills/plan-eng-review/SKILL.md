@@ -51,8 +51,11 @@ Produce a technical judgment about feasibility, architecture boundaries, risk, a
 
 Return in this order:
 
-1. Status
+1. Current stage
 2. What I understood
 3. Engineering judgment
 4. Main risks or architectural concerns
-5. Recommended next step
+5. Stage conclusion
+6. Why this can move to execution, investigate first, or stop here
+7. Next input needed
+8. Recommended next step
