@@ -25,10 +25,12 @@ REQUIRED_PYTHON_MODULES = (
     ("pypdf", "pypdf"),
     ("qrcode", "qrcode[pil]"),
     ("certifi", "certifi"),
+    ("requests", "requests"),
 )
 
 FORBIDDEN_PATTERNS = [
     "/Users/" + "frank" + "/workspace-hub",
+    "/Users/" + "frank" + "/Codex Hub",
     "workspace-hub-data/" + "Codex-Workspace-Memory",
     "com." + "frank" + ".",
     "frank" + "@example.com",
@@ -39,13 +41,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def load_site() -> tuple[Path, Path]:
+def load_site() -> tuple[Path, Path, bool]:
     if yaml is None:
-        return WORKSPACE_ROOT.resolve(), (WORKSPACE_ROOT.parent / "memory").resolve()
+        return WORKSPACE_ROOT.resolve(), (WORKSPACE_ROOT.parent / "memory").resolve(), False
     raw = yaml.safe_load(SITE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     site = raw.get("site") or {}
     workspace_root = site.get("workspace_root")
     memory_root = site.get("memory_root")
+    feishu_enabled = bool(site.get("feishu_enabled", False))
     if workspace_root in (None, "", "auto"):
         workspace = WORKSPACE_ROOT
     else:
@@ -54,33 +57,47 @@ def load_site() -> tuple[Path, Path]:
         memory = WORKSPACE_ROOT.parent / "memory"
     else:
         memory = Path(str(memory_root)).expanduser()
-    return workspace.resolve(), memory.resolve()
+    return workspace.resolve(), memory.resolve(), feishu_enabled
 
 
-def check_paths(workspace_root: Path, memory_root: Path) -> list[tuple[str, bool, str]]:
+def check_paths(workspace_root: Path, memory_root: Path, *, feishu_enabled: bool) -> list[tuple[str, bool, str]]:
     required = [
         workspace_root / "README.md",
         workspace_root / "AGENTS.md",
         workspace_root / "MEMORY_SYSTEM.md",
         workspace_root / "ops" / "bootstrap_workspace_hub.py",
         workspace_root / "ops" / "accept_product.py",
+        workspace_root / "ops" / "lark_cli_backend.py",
         workspace_root / "ops" / "start-codex",
         workspace_root / "control" / "site.yaml",
         workspace_root / ".codex" / "config.toml",
+        workspace_root / "bridge" / "feishu" / "gateway.js",
         memory_root / "PROJECT_REGISTRY.md",
         memory_root / "ACTIVE_PROJECTS.md",
         memory_root / "NEXT_ACTIONS.md",
         memory_root / "07_dashboards" / "HOME.md",
     ]
+    if feishu_enabled:
+        required.extend(
+            [
+                workspace_root / "ops" / "feishu_bridge.env.example",
+                workspace_root / "control" / "feishu_resources.yaml",
+            ]
+        )
     return [(str(path), path.exists(), "required path") for path in required]
 
 
-def check_commands() -> list[tuple[str, bool, str]]:
-    return [
+def check_commands(*, feishu_enabled: bool) -> list[tuple[str, bool, str]]:
+    checks = [
         ("python3", shutil.which("python3") is not None, "required command"),
         ("node", shutil.which("node") is not None, "required command"),
+        ("npm", shutil.which("npm") is not None, "required command"),
+        ("npx", shutil.which("npx") is not None, "required command"),
         ("codex", shutil.which("codex") is not None, "required command"),
     ]
+    if feishu_enabled:
+        checks.append(("lark-cli", shutil.which("lark-cli") is not None, "required when Feishu is enabled"))
+    return checks
 
 
 def check_python_modules() -> list[tuple[str, bool, str]]:
@@ -99,7 +116,10 @@ def scan_forbidden(root: Path) -> list[tuple[str, str]]:
             continue
         if path == REPORT_PATH.resolve():
             continue
-        if any(part in {"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".next"} for part in path.parts):
+        if any(
+            part in {"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".next", "runtime", "logs", ".codex"}
+            for part in path.parts
+        ):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -143,13 +163,19 @@ def write_report(results: dict[str, object]) -> None:
     lines.extend(["", "## Bootstrap 状态", ""])
     bootstrap_ok = results["bootstrap_status_exists"]
     lines.append(f"- {'OK' if bootstrap_ok else 'FAIL'} bootstrap 状态文件：`{BOOTSTRAP_STATUS_PATH}`")
+    if results.get("feishu_enabled"):
+        lines.extend(["", "## Feishu CLI 状态", ""])
+        lines.append(
+            f"- {'OK' if results['lark_cli_configured'] else 'FAIL'} lark-cli 配置：`{results['lark_cli_config_path']}`"
+        )
     REPORT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def cmd_run(_: argparse.Namespace) -> int:
-    workspace_root, memory_root = load_site()
-    path_checks = check_paths(workspace_root, memory_root)
-    command_checks = check_commands()
+    workspace_root, memory_root, feishu_enabled = load_site()
+    lark_cli_config_path = Path.home() / ".lark-cli" / "config.json"
+    path_checks = check_paths(workspace_root, memory_root, feishu_enabled=feishu_enabled)
+    command_checks = check_commands(feishu_enabled=feishu_enabled)
     python_module_checks = check_python_modules()
     forbidden_hits = scan_forbidden(workspace_root)
     passed = (
@@ -158,16 +184,20 @@ def cmd_run(_: argparse.Namespace) -> int:
         and all(ok for _, ok, _ in python_module_checks)
         and not forbidden_hits
         and BOOTSTRAP_STATUS_PATH.exists()
+        and (not feishu_enabled or lark_cli_config_path.exists())
     )
     results = {
         "generated_at": utc_now(),
         "workspace_root": str(workspace_root),
         "memory_root": str(memory_root),
+        "feishu_enabled": feishu_enabled,
         "path_checks": path_checks,
         "command_checks": command_checks,
         "python_module_checks": python_module_checks,
         "forbidden_hits": forbidden_hits,
         "bootstrap_status_exists": BOOTSTRAP_STATUS_PATH.exists(),
+        "lark_cli_config_path": str(lark_cli_config_path),
+        "lark_cli_configured": lark_cli_config_path.exists(),
         "passed": passed,
     }
     write_report(results)

@@ -4,3 +4,4 @@ openpyxl
 pypdf
 qrcode[pil]
 certifi
+requests

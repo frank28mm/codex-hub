@@ -31,29 +31,29 @@
 这份公开版当前已经包含可运行的主链能力。  
 也就是说，用户不需要自己再拼一套系统，而是可以在完成自己的账号、授权和资源配置后，按这份 README 的流程直接部署并使用：
 
-- [ops/start-codex](/Users/frank/Codex Hub/workspace/ops/start-codex)
+- [ops/start-codex](./ops/start-codex)
   - 统一启动、项目路由和写回主链
-- [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
+- [AGENTS.md](./AGENTS.md)
   - 公开版完整运行协议
-- [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
+- [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)
   - 公开版记忆系统协议
-- [ops/feishu_agent.py](/Users/frank/Codex Hub/workspace/ops/feishu_agent.py)
+- [ops/feishu_agent.py](./ops/feishu_agent.py)
   - Feishu 对象操作与 OAuth
-- [ops/feishu_projection.py](/Users/frank/Codex Hub/workspace/ops/feishu_projection.py)
+- [ops/feishu_projection.py](./ops/feishu_projection.py)
   - 只读 Bitable 投影
-- [ops/weixin_bridge.py](/Users/frank/Codex Hub/workspace/ops/weixin_bridge.py)
+- [ops/weixin_bridge.py](./ops/weixin_bridge.py)
   - 微信私聊 bridge、二维码登录与常驻轮询
-- [bridge/feishu](/Users/frank/Codex Hub/workspace/bridge/feishu)
+- [bridge/feishu](./bridge/feishu)
   - 仓库内自包含的 Feishu 消息层、审批卡、回复卡与线程控制
-- [bridge/feishu_long_connection_service.js](/Users/frank/Codex Hub/workspace/bridge/feishu_long_connection_service.js)
+- [bridge/feishu_long_connection_service.js](./bridge/feishu_long_connection_service.js)
   - Feishu 长连接 bridge 入口
-- [ops/gstack_phase1_entry.py](/Users/frank/Codex Hub/workspace/ops/gstack_phase1_entry.py)
+- [ops/gstack_phase1_entry.py](./ops/gstack_phase1_entry.py)
   - gstack 主链与第二意见入口
-- [ops/claude_code_runner.py](/Users/frank/Codex Hub/workspace/ops/claude_code_runner.py)
+- [ops/claude_code_runner.py](./ops/claude_code_runner.py)
   - Claude second-opinion 执行器
-- [ops/bootstrap_workspace_hub.py](/Users/frank/Codex Hub/workspace/ops/bootstrap_workspace_hub.py)
+- [ops/bootstrap_workspace_hub.py](./ops/bootstrap_workspace_hub.py)
   - 一键初始化
-- [ops/accept_product.py](/Users/frank/Codex Hub/workspace/ops/accept_product.py)
+- [ops/accept_product.py](./ops/accept_product.py)
   - 一键验收
 
 ## 这些新增能力在使用上意味着什么
@@ -109,7 +109,7 @@
 - 新建或更新多维表格
 - 继续某个项目工作
 
-这时 Feishu 只是入口，底层仍然是同一套 `Codex Hub`。
+这时 Feishu 只是入口，底层仍然是同一套 `Codex Hub`。公开版当前也已经把官方 `Feishu CLI / lark-cli` 接入到底层 transport 与对象 backend，尽量复现私有版里“CoCo 继续像现在一样用”的体验。
 
 ### 场景 3：长期记忆 + 可视化看板
 
@@ -206,14 +206,14 @@
 > 如果你暂时先不走 Feishu，只想把公开版**快速手工跑起来**，当前最短路径已经收成两步：
 >
 > 1. `codex login`
-> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents`
+> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
 >
-> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance。
+> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance；如果你加上 `--install-feishu-cli`，它还会把官方 `lark-cli` 和官方 `lark-*` skills 一起装好。
 
 > [!TIP]
 > `Codex` 只要从当前 `workspace/` 启动，就会自动读取：
-> - [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
-> - [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
+> - [AGENTS.md](./AGENTS.md)
+> - [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)
 >
 > 这两份是运行协议，不需要用户手工复制到其他位置。
 
@@ -252,7 +252,7 @@ cd codex-hub/workspace
 ### 3. 执行一键 setup
 
 ```bash
-python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
+python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli
 ```
 
 这个 `setup` 会自动完成：
@@ -318,10 +318,11 @@ python3 ops/accept_product.py run
 验收会检查：
 
 - 路径是否完整
-- `python3 / node / codex` 是否可用
-- `PyYAML / python-docx / openpyxl / pypdf / qrcode / certifi` 是否已经装好
+- `python3 / node / npm / npx / codex` 是否可用
+- `PyYAML / python-docx / openpyxl / pypdf / qrcode / certifi / requests` 是否已经装好
 - 是否还残留个人现网路径
 - bootstrap 是否完成
+- 如果启用了 `Feishu`，还会检查 `lark-cli` 和本地配置是否存在
 
 结果会写到：
 
@@ -360,24 +361,38 @@ codex login
 
 1. 在 [control/site.yaml](./control/site.yaml) 里把：
    - `feishu_enabled: true`
-2. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
-3. 填入你的：
+2. 运行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
+```
+
+这一步会尽量替你把 Feishu 接入收成一条链：
+
+- 安装官方 `lark-cli`
+- 安装官方 `lark-*` skills
+- 拉起 Feishu 应用创建/配置
+- 引导一次用户 OAuth 授权
+- 最后跑一轮 `lark-cli doctor`
+
+3. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
+4. 填入你的：
    - `owner_open_id`
    - 默认 `calendar_id`
    - 文档目录
    - 表格别名
    - 只读投影资源
-4. 用一次 OAuth 登录：
+5. 如果你需要单独补一次 OAuth，也可以再执行：
 
 ```bash
 python3 ops/feishu_agent.py auth login
 ```
 
-5. 确保你的 Feishu 应用 scope 已经通过审核并发布
-6. 复制：
+6. 确保你的 Feishu 应用 scope 已经通过审核并发布
+7. 复制：
    - `ops/feishu_bridge.env.example`
    - 到 `ops/feishu_bridge.env.local`
-7. 然后执行：
+8. 然后执行：
 
 ```bash
 python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
@@ -398,8 +413,8 @@ python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
 
 那么当前仓库采用的就是**最简便的可工作方案**：
 
-1. **一个 Feishu 应用**
-2. **一次 OAuth 登录**
+1. **一个你自己创建的 Feishu 应用**
+2. **一条官方 `lark-cli` 配置与登录链**
 3. **仓库内自包含的 Feishu bridge runtime**
 4. **一个可选的只读 Bitable 投影**
 
@@ -550,6 +565,8 @@ python3 ops/weixin_bridge.py enable
 ```bash
 python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 python3 ops/bootstrap_workspace_hub.py install-python-deps
+python3 ops/bootstrap_workspace_hub.py install-feishu-cli
+python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 python3 ops/bootstrap_workspace_hub.py init
 python3 ops/bootstrap_workspace_hub.py status
 python3 ops/accept_product.py run
