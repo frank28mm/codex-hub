@@ -293,8 +293,8 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
             [
                 "Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.",
                 "Copy `ops/feishu_bridge.env.example` to `ops/feishu_bridge.env.local` and fill your Feishu app settings.",
-                "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, install official skills, and complete user authorization.",
-                "Complete one Feishu OAuth login with `python3 ops/feishu_agent.py auth login` after the official CLI setup succeeds.",
+                "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, and install the official skills bundle.",
+                "Complete one Feishu OAuth login with `python3 ops/feishu_agent.py auth login` after the CLI/app setup succeeds.",
                 "Ensure your CoCo Feishu app scopes are approved and published.",
                 "Optionally install the Feishu bridge launch agent with `python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge`.",
             ]
@@ -373,7 +373,8 @@ def setup_feishu_cli(
     create_app: bool,
     install: bool,
     install_skills: bool,
-    login_user: bool = True,
+    login_user: bool = False,
+    run_doctor: bool = False,
 ) -> dict[str, object]:
     results: dict[str, object] = {
         "install": {"skipped": True},
@@ -398,7 +399,8 @@ def setup_feishu_cli(
         results["auth_login"] = run_command(auth_cmd, WORKSPACE_ROOT)
         if int(results["auth_login"].get("returncode") or 0) != 0:
             return results
-    results["doctor"] = run_command(["lark-cli", "doctor"], WORKSPACE_ROOT)
+    if run_doctor:
+        results["doctor"] = run_command(["lark-cli", "doctor"], WORKSPACE_ROOT)
     return results
 
 
@@ -553,7 +555,8 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
         create_app=args.create_feishu_app,
         install=not args.skip_install,
         install_skills=not args.skip_skills,
-        login_user=not args.skip_login,
+        login_user=bool(getattr(args, "login_lark_cli_user", False) and not getattr(args, "skip_login", False)),
+        run_doctor=bool(getattr(args, "run_lark_cli_doctor", False)),
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     for key in ("config_init", "auth_login", "doctor"):
@@ -592,12 +595,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup_feishu_cli_parser = sub.add_parser(
         "setup-feishu-cli",
-        help="Install lark-cli, create/configure the Feishu app, and complete user authorization in one flow.",
+        help="Install lark-cli, create/configure the Feishu app, and prepare the public Feishu login flow.",
     )
-    setup_feishu_cli_parser.add_argument("--create-feishu-app", action="store_true", help="Create a new Feishu app in the browser before login.")
+    setup_feishu_cli_parser.add_argument("--create-feishu-app", action="store_true", help="Create a new Feishu app in the browser before configuration.")
     setup_feishu_cli_parser.add_argument("--skip-install", action="store_true", help="Skip the lark-cli and official skills installation stage.")
     setup_feishu_cli_parser.add_argument("--skip-skills", action="store_true", help="Skip installing the official Lark skills bundle.")
-    setup_feishu_cli_parser.add_argument("--skip-login", action="store_true", help="Skip the user authorization step after configuration.")
+    setup_feishu_cli_parser.add_argument(
+        "--login-lark-cli-user",
+        action="store_true",
+        help="Optional advanced step: run `lark-cli auth login` after configuration. This may trigger OS credential prompts.",
+    )
+    setup_feishu_cli_parser.add_argument(
+        "--run-lark-cli-doctor",
+        action="store_true",
+        help="Optional advanced step: run `lark-cli doctor` after setup for raw CLI diagnostics.",
+    )
+    setup_feishu_cli_parser.add_argument(
+        "--skip-login",
+        action="store_true",
+        help="Deprecated no-op for backward compatibility. The public default no longer runs raw `lark-cli auth login`.",
+    )
     setup_feishu_cli_parser.set_defaults(func=cmd_setup_feishu_cli)
 
     init_parser = sub.add_parser("init", help="Initialize runtime folders, generated config, and optional launchagents.")
@@ -624,7 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--setup-feishu-cli",
         action="store_true",
-        help="Install and configure the official Feishu CLI during bootstrap, including user authorization.",
+        help="Install and configure the official Feishu CLI during bootstrap without forcing raw lark-cli login.",
     )
     init_parser.add_argument(
         "--create-feishu-app",
@@ -670,7 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--setup-feishu-cli",
         action="store_true",
-        help="Install and configure the official Feishu CLI during setup, including user authorization.",
+        help="Install and configure the official Feishu CLI during setup without forcing raw lark-cli login.",
     )
     setup_parser.add_argument(
         "--create-feishu-app",
