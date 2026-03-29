@@ -23,6 +23,8 @@ SITE_CONFIG_PATH = WORKSPACE_ROOT / "control" / "site.yaml"
 BOOTSTRAP_STATUS_PATH = WORKSPACE_ROOT / "runtime" / "bootstrap-status.json"
 CODEX_CONFIG_PATH = WORKSPACE_ROOT / ".codex" / "config.toml"
 REQUIREMENTS_PATH = WORKSPACE_ROOT / "requirements.txt"
+MEMORY_TEMPLATE_ROOT = (WORKSPACE_ROOT.parent / "memory").resolve()
+DEFAULT_MEMORY_ROOT = (WORKSPACE_ROOT.parent / "memory.local").resolve()
 PYTHON_DEPENDENCIES = (
     ("yaml", "PyYAML"),
     ("docx", "python-docx"),
@@ -94,7 +96,7 @@ def default_site_config() -> SiteConfig:
     return SiteConfig(
         product_name="Codex Hub",
         workspace_root=WORKSPACE_ROOT.resolve(),
-        memory_root=(WORKSPACE_ROOT.parent / "memory").resolve(),
+        memory_root=DEFAULT_MEMORY_ROOT,
         operator_name="",
         timezone="Asia/Shanghai",
         launchagent_prefix="com.codexhub",
@@ -146,6 +148,46 @@ def required_memory_dirs(memory_root: Path) -> list[Path]:
 def ensure_dirs(paths: list[Path]) -> None:
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
+
+
+def seed_memory_template(memory_root: Path) -> dict[str, object]:
+    if memory_root.resolve() == MEMORY_TEMPLATE_ROOT:
+        return {
+            "seeded": False,
+            "skipped": True,
+            "reason": "runtime_uses_template_root",
+            "template_root": str(MEMORY_TEMPLATE_ROOT),
+            "memory_root": str(memory_root),
+        }
+    if not MEMORY_TEMPLATE_ROOT.exists():
+        return {
+            "seeded": False,
+            "skipped": True,
+            "reason": "template_root_missing",
+            "template_root": str(MEMORY_TEMPLATE_ROOT),
+            "memory_root": str(memory_root),
+        }
+    copied: list[str] = []
+    for source in sorted(MEMORY_TEMPLATE_ROOT.rglob("*")):
+        if source.name == ".DS_Store":
+            continue
+        relative = source.relative_to(MEMORY_TEMPLATE_ROOT)
+        destination = memory_root / relative
+        if source.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            continue
+        shutil.copy2(source, destination)
+        copied.append(str(destination))
+    return {
+        "seeded": bool(copied),
+        "copied_count": len(copied),
+        "template_root": str(MEMORY_TEMPLATE_ROOT),
+        "memory_root": str(memory_root),
+        "copied": copied,
+    }
 
 
 def write_codex_config(site: SiteConfig) -> None:
@@ -454,6 +496,7 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
         "product_name": site.product_name,
         "workspace_root": str(site.workspace_root),
         "memory_root": str(site.memory_root),
+        "memory_template_root": str(MEMORY_TEMPLATE_ROOT),
         "operator_name": site.operator_name,
         "timezone": site.timezone,
         "launchagent_prefix": site.launchagent_prefix,
@@ -478,6 +521,7 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "feishu_resources": (site.workspace_root / "control" / "feishu_resources.yaml").exists(),
             "feishu_bridge_env_example": (site.workspace_root / "ops" / "feishu_bridge.env.example").exists(),
             "lark_cli_config": LARK_CLI_CONFIG_PATH.exists(),
+            "memory_template_root": MEMORY_TEMPLATE_ROOT.exists(),
         },
         "manual_actions": [],
         "local_ready": False,
@@ -539,7 +583,13 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
             ]
         )
     else:
-        actions.append("Enable Feishu later by setting `site.feishu_enabled: true` after local bootstrap succeeds.")
+        if not commands.get("lark_cli"):
+            actions.append(
+                "If you want Feishu later, first install the official tooling with `python3 ops/bootstrap_workspace_hub.py install-feishu-cli`."
+            )
+        actions.append(
+            "When you are ready to connect Feishu, run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` so Codex can guide app creation, credential sync, and login."
+        )
     return actions
 
 
@@ -653,6 +703,22 @@ def setup_feishu_cli(
     return results
 
 
+def install_feishu_cli_only(*, install_skills: bool) -> dict[str, object]:
+    results: dict[str, object] = {
+        "install": install_feishu_cli_tooling(force=False, install_skills=install_skills),
+        "config_init": {"skipped": True},
+        "credentials_sync": {"skipped": True},
+        "auth_login": {"skipped": True},
+        "auth_status": {"skipped": True},
+        "doctor": {"skipped": True},
+    }
+    status = _run_feishu_auth_status()
+    results["auth_status"] = status
+    auth_payload = status.get("status") if isinstance(status, dict) else {}
+    results["summary"] = auth_payload if isinstance(auth_payload, dict) else {}
+    return results
+
+
 def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, object]:
     if not install:
         return {"installed": False, "skipped": True}
@@ -716,9 +782,11 @@ def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object
         site_update = {"changed": False, "feishu_enabled": site.feishu_enabled, "path": str(SITE_CONFIG_PATH)}
     ensure_dirs(required_workspace_dirs(site.workspace_root))
     ensure_dirs(required_memory_dirs(site.memory_root))
+    memory_template = seed_memory_template(site.memory_root)
     write_codex_config(site)
 
     payload = bootstrap_status_payload(site)
+    payload["memory_template"] = memory_template
     payload["site_updates"] = {"feishu_enabled": site_update}
     payload["setup_phase"] = "initializing"
     _write_bootstrap_status(payload)
@@ -732,18 +800,39 @@ def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object
     payload["launchagents"] = maybe_install_launchagents(site, install=args.install_launchagents)
     payload["setup_phase"] = "launchagent_install_complete"
     _write_bootstrap_status(payload)
-    payload["feishu_cli"] = setup_feishu_cli(
-        create_app=getattr(args, "create_feishu_app", False),
-        install=getattr(args, "install_feishu_cli", False) or getattr(args, "setup_feishu_cli", False),
-        install_skills=True,
-        login_user=getattr(args, "setup_feishu_cli", False),
-    )
-    payload["feishu_ready"] = bool(
-        isinstance(payload.get("feishu_cli"), dict)
-        and isinstance(payload["feishu_cli"].get("summary"), dict)
-        and payload["feishu_cli"]["summary"].get("full_ready")
-    )
-    payload["setup_phase"] = "feishu_setup_complete" if feishu_requested else "local_runtime_ready"
+    if bool(getattr(args, "setup_feishu_cli", False) or getattr(args, "create_feishu_app", False)):
+        payload["feishu_cli"] = setup_feishu_cli(
+            create_app=getattr(args, "create_feishu_app", False),
+            install=True,
+            install_skills=True,
+            login_user=True,
+        )
+        payload["feishu_ready"] = bool(
+            isinstance(payload.get("feishu_cli"), dict)
+            and isinstance(payload["feishu_cli"].get("summary"), dict)
+            and payload["feishu_cli"]["summary"].get("full_ready")
+        )
+        payload["setup_phase"] = "feishu_setup_complete"
+    elif bool(getattr(args, "install_feishu_cli", False)):
+        payload["feishu_cli"] = install_feishu_cli_only(install_skills=True)
+        payload["feishu_ready"] = bool(
+            isinstance(payload.get("feishu_cli"), dict)
+            and isinstance(payload["feishu_cli"].get("summary"), dict)
+            and payload["feishu_cli"]["summary"].get("full_ready")
+        )
+        payload["setup_phase"] = "feishu_tooling_install_complete"
+    else:
+        payload["feishu_cli"] = {
+            "install": {"skipped": True},
+            "config_init": {"skipped": True},
+            "credentials_sync": {"skipped": True},
+            "auth_login": {"skipped": True},
+            "auth_status": {"skipped": True},
+            "doctor": {"skipped": True},
+            "summary": {},
+        }
+        payload["feishu_ready"] = False
+        payload["setup_phase"] = "local_runtime_ready"
     _write_bootstrap_status(payload)
     payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)
     payload["setup_phase"] = "complete"
@@ -792,13 +881,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if isinstance(install_payload, dict):
             feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("cli"))
             feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("skills"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("config_init"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("credentials_sync"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("auth_login"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("doctor"))
-        summary = feishu_cli_result.get("summary")
-        if isinstance(summary, dict):
-            feishu_cli_ok = feishu_cli_ok and bool(summary.get("full_ready"))
+        if bool(getattr(args, "setup_feishu_cli", False) or getattr(args, "create_feishu_app", False)):
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("config_init"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("credentials_sync"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("auth_login"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("doctor"))
+            summary = feishu_cli_result.get("summary")
+            if isinstance(summary, dict):
+                feishu_cli_ok = feishu_cli_ok and bool(summary.get("full_ready"))
     payload = {
         "ok": acceptance_rc == 0 and dependency_result.get("returncode", 0) == 0 and feishu_cli_ok,
         "python_dependencies": dependency_result,
@@ -936,7 +1026,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--install-feishu-cli",
         action="store_true",
-        help="Install the official Feishu CLI and official Lark skills during bootstrap.",
+        help="Install the official Feishu CLI and official Lark skills during bootstrap without configuring or logging into Feishu.",
     )
     init_parser.add_argument(
         "--setup-feishu-cli",
@@ -982,7 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--install-feishu-cli",
         action="store_true",
-        help="Install the official Feishu CLI and official Lark skills during setup.",
+        help="Install the official Feishu CLI and official Lark skills during setup without configuring or logging into Feishu.",
     )
     setup_parser.add_argument(
         "--setup-feishu-cli",

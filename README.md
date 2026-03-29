@@ -28,7 +28,7 @@
 > [!NOTE]
 > 这套系统使用 **Obsidian-compatible Vault** 作为长期记忆模型。  
 > 它没有脱离 Obsidian 的记忆体系，但已经脱离了 `Obsidian` GUI 的硬依赖：
-> 没装 `Obsidian` 时，核心的项目路由、写回和看板同步仍然可以通过直接读写 `memory/` 文件来工作。  
+> 没装 `Obsidian` 时，核心的项目路由、写回和看板同步仍然可以通过直接读写运行时记忆区 `memory.local/` 来工作。
 > 如果你想获得完整体验，仍然强烈建议安装 `Obsidian`。
 
 这份仓库是 `Codex Hub` 的**可复制、可公开、可本地部署**版本
@@ -78,7 +78,11 @@
 >
 > 这条路径只负责把**本地版**收好：
 > Python 依赖、bootstrap、后台任务和 acceptance。
-> 如果你后面还要接 Feishu，不要停在 `--install-feishu-cli`，而是继续走专门的：
+> 如果这台机器还没有 `lark-cli`，你也可以先把工具一起装上：
+>
+> `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
+>
+> 但这一步仍然只是装工具，不会替你完成 Feishu 配置。后面还要继续走专门的：
 >
 > `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`
 
@@ -101,6 +105,8 @@
   - 产品代码、运行协议、Feishu bridge runtime、启动器、Electron 前端、自动化脚本、测试和系统文档
 - `memory/`
   - 模板化的长期记忆库骨架，供新部署者本地初始化使用
+- `memory.local/`
+  - 本地首次 bootstrap 后自动生成的运行时长期记忆区，默认不纳入 Git
 
 ## 依赖与官方链接
 
@@ -141,7 +147,7 @@
 - 继续某个项目
 - 读取项目上下文
 - 更新项目板和专题板
-- 做完后把结果写回 `memory/`
+- 做完后把结果写回 `memory.local/`
 
 适合：
 
@@ -168,7 +174,7 @@
 ### 场景 3：把 Obsidian 当长期记忆库，而不是聊天记录堆
 
 你不需要自己手工维护复杂数据库。
-系统会把真正需要长期保留的项目信息写回 `memory/`，你可以用 `Obsidian` 查看：
+系统会把真正需要长期保留的项目信息写回 `memory.local/`，你可以用 `Obsidian` 查看：
 
 - 当前有哪些活跃项目
 - 每个项目下一步是什么
@@ -330,6 +336,7 @@ cd codex-hub
 
 - `workspace/` 是程序本体
 - `memory/` 是模板化记忆库
+- `memory.local/` 会在首次 bootstrap 后自动生成，作为本机运行时记忆区
 
 ### 第 3 步：安装本地依赖
 
@@ -368,7 +375,7 @@ codex login
 这样系统会自动把：
 
 - 当前 `workspace/`
-- 旁边的 `memory/`
+- 旁边的 `memory.local/`
 
 视为一套可运行环境。
 
@@ -385,7 +392,7 @@ python3 ops/bootstrap_workspace_hub.py init
 
 - 生成本地 `.codex/config.toml`
 - 建立 `runtime/`、`logs/`、`reports/ops/`
-- 检查并补齐 `memory/` 骨架
+- 从仓库根层 `memory/` 模板生成本地 `memory.local/` 运行时骨架
 - 执行：
   - `refresh-index`
   - `rebuild-all`
@@ -425,7 +432,7 @@ python3 ops/accept_product.py run
 
 - 在 `workspace/` 下直接开 `Codex`
 - 用 `start-codex`
-- 用 `Obsidian` 打开 `memory/`
+- 用 `Obsidian` 打开 `memory.local/`
 
 #### 想像我一样用 Feishu 协作
 
@@ -577,7 +584,7 @@ npm run workspace
 部署完成后，最推荐的日常使用方式是：
 
 1. 平时在 `workspace/` 下直接使用 `Codex`
-2. 需要项目记忆时，让系统自动读写 `memory/`
+2. 需要项目记忆时，让系统自动读写 `memory.local/`
 3. 需要远程协作时，在 Feishu 里找你自己创建的机器人
 4. 需要手机查看项目/任务看板时，看飞书多维表格
 5. 需要本地控制台时，打开 Electron
@@ -590,7 +597,7 @@ npm run workspace
    - `acceptance`
    - 然后直接在 `workspace/` 里开 `Codex`
 2. 跑本地 + Obsidian：
-   - 在上面的基础上，用 `Obsidian` 打开 `memory/`
+   - 在上面的基础上，用 `Obsidian` 打开 `memory.local/`
 3. 跑本地 + Feishu：
    - 在上面的基础上，创建你自己的 Feishu 应用并完成一次 OAuth
 4. 跑本地 + 微信私聊：

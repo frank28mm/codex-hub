@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 from pathlib import Path
 
 
@@ -49,6 +50,40 @@ def test_maybe_install_launchagents_uses_poll_interval_for_watcher(monkeypatch) 
     assert observed[0][:4] == ["python3", "ops/codex_session_watcher.py", "install-launchagent", "--poll-interval"]
     assert observed[0][4] == "300"
     assert observed[-1][:3] == ["python3", "ops/knowledge_intake.py", "install-launchagent"]
+
+
+def test_default_site_config_uses_generated_memory_root(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(bootstrap, "WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr(bootstrap, "DEFAULT_MEMORY_ROOT", (workspace_root.parent / "memory.local").resolve())
+
+    site = bootstrap.default_site_config()
+
+    assert site.memory_root == (workspace_root.parent / "memory.local").resolve()
+
+
+def test_seed_memory_template_copies_template_files_without_overwriting(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    template_root = tmp_path / "memory"
+    runtime_root = tmp_path / "memory.local"
+    (template_root / "01_working").mkdir(parents=True)
+    (template_root / "PROJECT_REGISTRY.md").write_text("template registry\n", encoding="utf-8")
+    (template_root / "01_working" / "NOW.md").write_text("template now\n", encoding="utf-8")
+    (runtime_root / "PROJECT_REGISTRY.md").parent.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "PROJECT_REGISTRY.md").write_text("runtime registry\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "MEMORY_TEMPLATE_ROOT", template_root)
+
+    payload = bootstrap.seed_memory_template(runtime_root)
+
+    assert payload["seeded"] is True
+    assert (runtime_root / "PROJECT_REGISTRY.md").read_text(encoding="utf-8") == "runtime registry\n"
+    assert (runtime_root / "01_working" / "NOW.md").read_text(encoding="utf-8") == "template now\n"
 
 
 def test_perform_init_bootstraps_knowledge_base_before_sync(monkeypatch) -> None:
@@ -164,6 +199,36 @@ def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> Non
     assert payload["doctor"]["skipped"] is True
 
 
+def test_install_feishu_cli_only_does_not_trigger_config_or_login(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    observed: list[list[str]] = []
+
+    def fake_run_command(cmd, cwd):
+        observed.append(list(cmd))
+        return {"returncode": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
+    monkeypatch.setattr(bootstrap, "command_available", lambda name: False if name == "lark-cli" else True)
+    monkeypatch.setattr(bootstrap, "lark_cli_skills_installed", lambda: False)
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_feishu_auth_status",
+        lambda: {"status": {"object_ops_ready": False, "coco_bridge_ready": False, "full_ready": False}},
+    )
+
+    payload = bootstrap.install_feishu_cli_only(install_skills=True)
+
+    assert observed == [
+        ["npm", "install", "-g", bootstrap.LARK_CLI_PACKAGE],
+        ["npx", "skills", "add", bootstrap.LARK_CLI_SKILLS_REPO, "-y", "-g"],
+    ]
+    assert payload["config_init"]["skipped"] is True
+    assert payload["credentials_sync"]["skipped"] is True
+    assert payload["auth_login"]["skipped"] is True
+
+
 def test_setup_feishu_cli_auto_enables_feishu_in_site_config(monkeypatch, tmp_path: Path) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
@@ -247,6 +312,74 @@ def test_maybe_install_launchagents_times_out_instead_of_hanging(monkeypatch) ->
     assert observed[0][0][:3] == ["python3", "ops/codex_session_watcher.py", "install-launchagent"]
     assert observed[0][1] == bootstrap.LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS
     assert payload["results"]["health_check"]["timed_out"] is True
+
+
+def test_setup_with_install_feishu_cli_only_does_not_require_full_ready(monkeypatch, capsys) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "install_python_dependencies", lambda force=False: {"returncode": 0, "installed": True})
+    monkeypatch.setattr(bootstrap, "load_site_config", bootstrap.default_site_config)
+    monkeypatch.setattr(
+        bootstrap,
+        "perform_init",
+        lambda site, args: {
+            "product_name": site.product_name,
+            "feishu_cli": {
+                "install": {
+                    "cli": {"returncode": 0},
+                    "skills": {"returncode": 0},
+                },
+                "config_init": {"skipped": True},
+                "credentials_sync": {"skipped": True},
+                "auth_login": {"skipped": True},
+                "doctor": {"skipped": True},
+                "summary": {"object_ops_ready": False, "coco_bridge_ready": False, "full_ready": False},
+            },
+        },
+    )
+
+    def fake_run_command(cmd, cwd):
+        assert cmd == [bootstrap.sys.executable, "ops/accept_product.py", "run"]
+        return {"returncode": 0, "stdout": '{"passed": true}', "stderr": ""}
+
+    monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
+
+    args = argparse.Namespace(
+        skip_python_deps=False,
+        force_python_deps=False,
+        skip_sync=False,
+        install_launchagents=True,
+        install_feishu_bridge=False,
+        install_feishu_cli=True,
+        setup_feishu_cli=False,
+        create_feishu_app=False,
+        skip_acceptance=False,
+    )
+
+    rc = bootstrap.cmd_setup(args)
+    payload = capsys.readouterr().out
+
+    assert rc == 0
+    assert '"ok": true' in payload.lower()
+
+
+def test_build_manual_actions_guides_future_feishu_setup(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    site = bootstrap.default_site_config()
+    payload = {
+        "commands": {"codex": True, "lark_cli": False},
+        "python_modules": {module: True for module, _package in bootstrap.PYTHON_DEPENDENCIES},
+        "apps": {"codex_desktop": True, "obsidian": True},
+        "feishu_setup": {},
+    }
+
+    actions = bootstrap.build_manual_actions(site, payload)
+
+    assert any("install-feishu-cli" in action for action in actions)
+    assert any("setup-feishu-cli --create-feishu-app" in action for action in actions)
 
 
 def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:

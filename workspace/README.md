@@ -14,7 +14,8 @@
 如果你把整个仓库当成一个产品来看：
 
 - `workspace/` 是“代码和运行层”
-- `memory/` 是“模板化的长期记忆层”
+- 仓库根层 `memory/` 是“模板化的长期记忆层”
+- 本地实际运行时默认写入 sibling `memory.local/`
 
 ## 这是什么工具
 
@@ -110,7 +111,7 @@
 ### 场景 1：个人项目工作台
 
 你在 `workspace/` 下直接使用 `Codex`，让它持续处理某个项目。
-系统会自动结合 `memory/` 中的项目事实和上下文，而不是每次都从零开始。
+系统会自动结合运行时记忆根中的项目事实和上下文，而不是每次都从零开始。
 
 ### 场景 2：手机上的远程协作入口
 
@@ -133,7 +134,7 @@
 
 ### 场景 3：长期记忆 + 可视化看板
 
-项目事实长期保存在 sibling `memory/` 中；
+项目事实长期保存在 sibling `memory.local/` 中；
 同时又会自动投影到飞书多维表格，方便你在手机端查看项目总览和当前任务。
 
 ### 场景 4：桌面控制台
@@ -261,7 +262,11 @@
 >
 > 这条路径只负责把**本地运行层**收好：
 > Python 依赖、bootstrap、后台任务和 acceptance。
-> 如果你后面还要接 Feishu，不要停在 `--install-feishu-cli`，而是继续走专门的：
+> 如果这台机器还没有 `lark-cli`，你也可以先把工具一起装上：
+>
+> `python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
+>
+> 但这一步仍然只是装工具，不会替你完成 Feishu 配置。后面还要继续走专门的：
 >
 > `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`
 
@@ -300,7 +305,9 @@ cd codex-hub/workspace
 这意味着默认会使用：
 
 - 当前 `workspace/`
-- 旁边同级的 `memory/`
+- 旁边同级的 `memory.local/`
+
+仓库根层的 `memory/` 仍然保留为模板，只在首次 bootstrap 时用来生成本机运行时记忆区。
 
 如果你不想改目录结构，通常不需要改这两个值。
 
@@ -315,7 +322,7 @@ python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 - 安装 `requirements.txt` 里的 Python 依赖
 - 生成本地 `.codex/config.toml`
 - 建立 `runtime/`、`logs/`、`reports/ops/`
-- 确保 sibling `memory/` 骨架存在
+- 确保 sibling `memory.local/` 运行时骨架存在（首次会由仓库根层 `memory/` 模板自动生成）
 - bootstrap `Knowledge Base` project structure and launch its intake registry
 - 执行：
   - `refresh-index`
@@ -345,7 +352,7 @@ python3 ops/bootstrap_workspace_hub.py init
 
 - 生成本地 `.codex/config.toml`
 - 建立 `runtime/`、`logs/`、`reports/ops/`
-- 确保 sibling `memory/` 骨架存在
+- 确保 sibling `memory.local/` 运行时骨架存在
 - 执行：
   - `refresh-index`
   - `rebuild-all`
@@ -407,7 +414,7 @@ codex login
 #### Obsidian
 
 `Obsidian` 不是硬依赖。  
-系统可以直接读写 `memory/` 文件；你只是在需要人类查看、深链跳转和长期浏览时再打开 `Obsidian`。
+系统可以直接读写运行时记忆根文件；你只是在需要人类查看、深链跳转和长期浏览时再打开 `Obsidian`。
 
 #### Feishu
 
@@ -615,7 +622,7 @@ python3 ops/weixin_bridge.py enable
 最推荐的工作方式是：
 
 1. 平时直接在 `workspace/` 下使用 `Codex`
-2. 需要记忆时让系统自动读写 `memory/`
+2. 需要记忆时让系统自动读写 `memory.local/`
 3. 需要远程协作时用 Feishu 找你自己创建的机器人
 4. 需要轻量远程入口时用微信私聊找 `CoCo`
 5. 需要看项目和任务可视化时看 Feishu Bitable
@@ -624,7 +631,7 @@ python3 ops/weixin_bridge.py enable
 如果你是第一次上手，建议按这个顺序体验：
 
 1. 先只跑本地版，确认 `bootstrap + acceptance` 都通过
-2. 再打开 `Obsidian` 看 `memory/` 结构
+2. 再打开 `Obsidian` 看 `memory.local/` 结构
 3. 最后再接入 Feishu 和只读 Bitable，看远程协作体验
 
 ## 常用命令
