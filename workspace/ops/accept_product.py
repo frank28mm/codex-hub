@@ -5,6 +5,8 @@ import argparse
 import importlib.util
 import json
 import shutil
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -148,6 +150,39 @@ def scan_forbidden(root: Path) -> list[tuple[str, str]]:
     return hits
 
 
+def _extract_json_blob(text: str) -> dict[str, object]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        payload = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def read_feishu_auth_status(workspace_root: Path) -> dict[str, object]:
+    proc = subprocess.run(
+        [sys.executable, "ops/feishu_agent.py", "auth", "status"],
+        cwd=str(workspace_root),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    payload = _extract_json_blob(proc.stdout)
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+        "status": result if isinstance(result, dict) else {},
+    }
+
+
 def write_report(results: dict[str, object]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -185,6 +220,19 @@ def write_report(results: dict[str, object]) -> None:
         lines.append(
             f"- {'OK' if results['lark_cli_configured'] else 'FAIL'} lark-cli 配置：`{results['lark_cli_config_path']}`"
         )
+        feishu_auth = results.get("feishu_auth_status") or {}
+        if isinstance(feishu_auth, dict):
+            status = feishu_auth.get("status") or {}
+            if isinstance(status, dict):
+                lines.append(
+                    f"- {'OK' if status.get('object_ops_ready') else 'FAIL'} Feishu 对象能力登录：object_ops_ready=`{status.get('object_ops_ready')}`"
+                )
+                lines.append(
+                    f"- {'OK' if status.get('coco_bridge_ready') else 'FAIL'} CoCo bridge 凭据同步：coco_bridge_ready=`{status.get('coco_bridge_ready')}`"
+                )
+                lines.append(
+                    f"- {'OK' if status.get('full_ready') else 'FAIL'} Feishu 完整可用：full_ready=`{status.get('full_ready')}`"
+                )
     REPORT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -195,13 +243,16 @@ def cmd_run(_: argparse.Namespace) -> int:
     command_checks = check_commands(feishu_enabled=feishu_enabled)
     python_module_checks = check_python_modules()
     forbidden_hits = scan_forbidden(workspace_root)
+    feishu_auth_status = read_feishu_auth_status(workspace_root) if feishu_enabled else {"status": {}}
+    feishu_status = feishu_auth_status.get("status") if isinstance(feishu_auth_status, dict) else {}
+    feishu_full_ready = bool(isinstance(feishu_status, dict) and feishu_status.get("full_ready"))
     passed = (
         all(ok for _, ok, _ in path_checks)
         and all(ok for _, ok, _ in command_checks)
         and all(ok for _, ok, _ in python_module_checks)
         and not forbidden_hits
         and BOOTSTRAP_STATUS_PATH.exists()
-        and (not feishu_enabled or lark_cli_config_path.exists())
+        and (not feishu_enabled or (lark_cli_config_path.exists() and feishu_full_ready))
     )
     results = {
         "generated_at": utc_now(),
@@ -215,6 +266,7 @@ def cmd_run(_: argparse.Namespace) -> int:
         "bootstrap_status_exists": BOOTSTRAP_STATUS_PATH.exists(),
         "lark_cli_config_path": str(lark_cli_config_path),
         "lark_cli_configured": lark_cli_config_path.exists(),
+        "feishu_auth_status": feishu_auth_status,
         "passed": passed,
     }
     write_report(results)

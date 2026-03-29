@@ -1141,6 +1141,75 @@ def test_auth_status_reads_token_store(sample_env) -> None:
     assert payload["profile"]["name"] == "Frank"
 
 
+def test_auth_status_reports_lark_cli_readiness(sample_env, monkeypatch) -> None:
+    agent = feishu_agent.FeishuAgent(
+        env={
+            "WORKSPACE_HUB_CONTROL_ROOT": str(sample_env["control_root"]),
+            "WORKSPACE_HUB_RUNTIME_ROOT": str(sample_env["runtime_root"]),
+        }
+    )
+    monkeypatch.setattr(
+        agent,
+        "_lark_cli_config_status",
+        lambda: {"available": True, "configured": True, "app_id": "cli_test", "brand": "feishu"},
+    )
+    monkeypatch.setattr(
+        agent,
+        "_lark_cli_auth_status",
+        lambda: {
+            "available": True,
+            "logged_in": True,
+            "identity": "user",
+            "user_name": "Frank",
+            "user_open_id": "ou_test",
+            "token_status": "needs_refresh",
+        },
+    )
+
+    payload = agent.auth_status({})
+
+    assert payload["lark_cli"]["configured"] is True
+    assert payload["lark_cli_user_logged_in"] is True
+    assert payload["effective_user_auth_ready"] is True
+    assert payload["object_ops_ready"] is True
+    assert payload["coco_bridge_ready"] is False
+    assert payload["full_ready"] is False
+
+
+def test_auth_login_falls_back_to_lark_cli_when_bridge_credentials_missing(sample_env, monkeypatch) -> None:
+    agent = feishu_agent.FeishuAgent(
+        env={
+            "WORKSPACE_HUB_CONTROL_ROOT": str(sample_env["control_root"]),
+            "WORKSPACE_HUB_RUNTIME_ROOT": str(sample_env["runtime_root"]),
+        }
+    )
+    monkeypatch.setattr(
+        agent,
+        "_lark_cli_auth_login",
+        lambda payload: {
+            "identity": "user",
+            "user_name": "Frank",
+            "user_open_id": "ou_cli",
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "auth_status",
+        lambda payload: {
+            "object_ops_ready": True,
+            "coco_bridge_ready": False,
+            "full_ready": False,
+        },
+    )
+
+    payload = agent.auth_login({})
+
+    assert payload["ok"] is True
+    assert payload["auth_method"] == "lark-cli"
+    assert payload["user_open_id"] == "ou_cli"
+    assert payload["status"]["object_ops_ready"] is True
+
+
 def test_user_token_auto_refresh_uses_oidc_and_preserves_refresh_token(sample_env) -> None:
     token_store = sample_env["runtime_root"] / "feishu_user_token.json"
     token_store.write_text(

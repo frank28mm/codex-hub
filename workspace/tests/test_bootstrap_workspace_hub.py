@@ -61,6 +61,8 @@ def test_perform_init_bootstraps_knowledge_base_before_sync(monkeypatch) -> None
     monkeypatch.setattr(bootstrap, "maybe_install_launchagents", lambda site, install: {"installed": False, "skipped": True})
     monkeypatch.setattr(bootstrap, "maybe_install_feishu_bridge", lambda site, install: {"installed": False, "skipped": True})
     monkeypatch.setattr(bootstrap, "build_manual_actions", lambda site, payload: [])
+    monkeypatch.setattr(bootstrap, "_current_lark_cli_config", lambda: {"available": False, "configured": False})
+    monkeypatch.setattr(bootstrap, "_run_feishu_auth_status", lambda: {"status": {}})
     monkeypatch.setattr(bootstrap, "BOOTSTRAP_STATUS_PATH", Path("/tmp/bootstrap-status-test.json"))
     observed: list[tuple[str, list[str]]] = []
 
@@ -112,7 +114,7 @@ def test_setup_runs_acceptance_after_bootstrap(monkeypatch, capsys) -> None:
     assert '"ok": true' in payload.lower()
 
 
-def test_setup_feishu_cli_calls_install_and_config_only_by_default(monkeypatch) -> None:
+def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
     bootstrap = importlib.reload(bootstrap_module)
@@ -126,6 +128,23 @@ def test_setup_feishu_cli_calls_install_and_config_only_by_default(monkeypatch) 
     monkeypatch.setattr(bootstrap, "command_available", lambda name: False if name == "lark-cli" else True)
     monkeypatch.setattr(bootstrap, "lark_cli_skills_installed", lambda: False)
     monkeypatch.setattr(bootstrap, "LARK_CLI_CONFIG_PATH", Path("/tmp/nonexistent-lark-config.json"))
+    monkeypatch.setattr(
+        bootstrap,
+        "_sync_feishu_bridge_credentials",
+        lambda config_init_result=None: {
+            "env_path": "/tmp/feishu_bridge.env.local",
+            "app_id": "cli_test",
+            "app_id_synced": True,
+            "app_secret_synced": True,
+            "bridge_credentials_ready": True,
+            "changed": True,
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_feishu_auth_status",
+        lambda: {"status": {"object_ops_ready": True, "coco_bridge_ready": True, "full_ready": True}},
+    )
 
     payload = bootstrap.setup_feishu_cli(
         create_app=True,
@@ -137,12 +156,15 @@ def test_setup_feishu_cli_calls_install_and_config_only_by_default(monkeypatch) 
     assert observed[0] == ["npm", "install", "-g", bootstrap.LARK_CLI_PACKAGE]
     assert observed[1] == ["npx", "skills", "add", bootstrap.LARK_CLI_SKILLS_REPO, "-y", "-g"]
     assert observed[2] == ["lark-cli", "config", "init", "--new"]
-    assert len(observed) == 3
-    assert payload["auth_login"]["skipped"] is True
+    assert observed[3] == [bootstrap.sys.executable, "ops/feishu_agent.py", "auth", "login"]
+    assert len(observed) == 4
+    assert payload["credentials_sync"]["bridge_credentials_ready"] is True
+    assert payload["auth_login"]["returncode"] == 0
+    assert payload["summary"]["full_ready"] is True
     assert payload["doctor"]["skipped"] is True
 
 
-def test_setup_feishu_cli_can_optionally_run_lark_cli_login_and_doctor(monkeypatch) -> None:
+def test_setup_feishu_cli_can_skip_login_and_optionally_run_doctor(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
     bootstrap = importlib.reload(bootstrap_module)
@@ -158,16 +180,63 @@ def test_setup_feishu_cli_can_optionally_run_lark_cli_login_and_doctor(monkeypat
     monkeypatch.setattr(bootstrap, "command_available", lambda name: True)
     monkeypatch.setattr(bootstrap, "lark_cli_skills_installed", lambda: True)
     monkeypatch.setattr(bootstrap, "LARK_CLI_CONFIG_PATH", existing_config)
+    monkeypatch.setattr(
+        bootstrap,
+        "_sync_feishu_bridge_credentials",
+        lambda config_init_result=None: {
+            "env_path": "/tmp/feishu_bridge.env.local",
+            "app_id": "cli_test",
+            "app_id_synced": True,
+            "app_secret_synced": False,
+            "bridge_credentials_ready": False,
+            "changed": True,
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_feishu_auth_status",
+        lambda: {"status": {"object_ops_ready": False, "coco_bridge_ready": False, "full_ready": False}},
+    )
 
     payload = bootstrap.setup_feishu_cli(
         create_app=False,
         install=False,
         install_skills=False,
-        login_user=True,
+        login_user=False,
         run_doctor=True,
     )
 
-    assert observed[0] == ["lark-cli", "auth", "login", "--domain", bootstrap.DEFAULT_FEISHU_CLI_DOMAINS]
-    assert observed[1] == ["lark-cli", "doctor"]
-    assert payload["auth_login"]["returncode"] == 0
+    assert observed[0] == ["lark-cli", "doctor"]
+    assert payload["auth_login"]["skipped"] is True
     assert payload["doctor"]["returncode"] == 0
+
+
+def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(
+        bootstrap,
+        "setup_feishu_cli",
+        lambda **kwargs: {
+            "install": {"skipped": True},
+            "config_init": {"skipped": True},
+            "credentials_sync": {"bridge_credentials_ready": False},
+            "auth_login": {"skipped": True},
+            "auth_status": {"status": {"object_ops_ready": True, "coco_bridge_ready": False, "full_ready": False}},
+            "doctor": {"skipped": True},
+            "summary": {"object_ops_ready": True, "coco_bridge_ready": False, "full_ready": False},
+        },
+    )
+    args = argparse.Namespace(
+        create_feishu_app=False,
+        skip_install=True,
+        skip_skills=True,
+        login_lark_cli_user=False,
+        skip_login=False,
+        run_lark_cli_doctor=False,
+    )
+
+    rc = bootstrap.cmd_setup_feishu_cli(args)
+
+    assert rc == 1
