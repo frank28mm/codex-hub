@@ -424,9 +424,10 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 - 安装官方 `lark-cli`
 - 安装官方 `lark-*` skills
 - 拉起 Feishu 应用创建/配置
-- 不再默认触发原生 `lark-cli auth login`
-- 不再默认跑 `lark-cli doctor`
-- 公开版默认不把系统钥匙串验证当成登录前置步骤
+- 自动同步公开版运行时需要的 `app_id`
+- 自动执行公开版统一的 Feishu 登录链
+- 最后输出当前 `object_ops_ready / coco_bridge_ready / full_ready` 状态
+- 公开版不再把系统钥匙串验证当成默认登录前置步骤
 
 3. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
 4. 填入你的：
@@ -435,26 +436,21 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
    - 文档目录
    - 表格别名
    - 只读投影资源
-5. 然后执行一次公开版自己的 OAuth 登录：
+5. 如果 `setup-feishu-cli` 最后没有达到 `full_ready=true`，再执行排查：
 
 ```bash
-python3 ops/feishu_agent.py auth login
+python3 ops/feishu_agent.py auth status
 ```
-
-如果你只是想让公开版正常工作，到这里就够了。
 
 只有在你明确要排查原生 `lark-cli` 身份时，才再额外执行：
 
 ```bash
-lark-cli auth login --domain open.feishu.cn
+lark-cli auth login --domain event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail
 lark-cli doctor
 ```
 
 6. 确保你的 Feishu 应用 scope 已经通过审核并发布
-7. 复制：
-   - `ops/feishu_bridge.env.example`
-   - 到 `ops/feishu_bridge.env.local`
-8. 然后执行：
+7. 然后执行：
 
 ```bash
 python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
@@ -462,7 +458,7 @@ python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
 
 对普通用户来说，最省事的方式不是手工自己逐项配，而是：
 
-- 让 `Codex` 来帮你完成飞书机器人接入、资源模板填写、OAuth 流程引导、bridge 安装和验证
+- 让 `Codex` 来帮你完成飞书机器人接入、资源模板填写、统一登录链、bridge 安装和验证
 - 你自己只在飞书页面完成必要确认
 
 ## Feishu 最简接入方式

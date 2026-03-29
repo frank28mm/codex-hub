@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,8 @@ LARK_CLI_SKILLS_REPO = "https://github.com/larksuite/cli"
 LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
 LARK_CLI_SKILLS_ROOT = Path.home() / ".agents" / "skills"
 DEFAULT_FEISHU_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
+FEISHU_BRIDGE_ENV_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.local"
+FEISHU_BRIDGE_ENV_EXAMPLE_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.example"
 
 
 @dataclass
@@ -223,7 +226,124 @@ def result_failed(result: object) -> bool:
     return int(result.get("returncode") or 0) != 0
 
 
+def _extract_json_blob(text: str) -> dict[str, object]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        payload = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _parse_env_text(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def _upsert_env_value(text: str, key: str, value: str) -> str:
+    line = f"{key}={value}"
+    pattern = re.compile(rf"(?m)^{re.escape(key)}=.*$")
+    if pattern.search(text):
+        return pattern.sub(line, text)
+    prefix = text if text.endswith("\n") or not text else text + "\n"
+    return f"{prefix}{line}\n"
+
+
+def _current_lark_cli_config() -> dict[str, object]:
+    if not command_available("lark-cli"):
+        return {"available": False, "configured": False}
+    result = run_command(["lark-cli", "config", "show"], WORKSPACE_ROOT)
+    payload = _extract_json_blob(str(result.get("stdout") or ""))
+    app_id = str(payload.get("appId") or "").strip()
+    return {
+        "available": True,
+        "configured": bool(app_id),
+        "app_id": app_id,
+        "brand": str(payload.get("brand") or "").strip(),
+        "lang": str(payload.get("lang") or "").strip(),
+        "source": str(LARK_CLI_CONFIG_PATH),
+        "raw": payload,
+    }
+
+
+def _parse_created_app_credentials(*outputs: str) -> dict[str, str]:
+    combined = "\n".join(str(item or "") for item in outputs if item)
+    app_id_match = re.search(r"\b(cli_[a-z0-9]+)\b", combined)
+    secret_match = re.search(r"(?im)(?:app[_ ]secret|appsecret)\s*[:=]\s*([A-Za-z0-9._-]{8,})", combined)
+    values: dict[str, str] = {}
+    if app_id_match:
+        values["app_id"] = str(app_id_match.group(1))
+    if secret_match:
+        candidate = str(secret_match.group(1)).strip()
+        if "*" not in candidate:
+            values["app_secret"] = candidate
+    return values
+
+
+def _sync_feishu_bridge_credentials(config_init_result: dict[str, object] | None = None) -> dict[str, object]:
+    current = _current_lark_cli_config()
+    app_id = str(current.get("app_id") or "").strip()
+    parsed = _parse_created_app_credentials(
+        str((config_init_result or {}).get("stdout") or ""),
+        str((config_init_result or {}).get("stderr") or ""),
+    )
+    app_secret_from_create = str(parsed.get("app_secret") or "").strip()
+    existing_text = ""
+    if FEISHU_BRIDGE_ENV_PATH.exists():
+        existing_text = FEISHU_BRIDGE_ENV_PATH.read_text(encoding="utf-8")
+    elif FEISHU_BRIDGE_ENV_EXAMPLE_PATH.exists():
+        existing_text = FEISHU_BRIDGE_ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    existing_values = _parse_env_text(existing_text)
+    existing_secret = str(existing_values.get("FEISHU_APP_SECRET") or "").strip()
+    effective_secret = existing_secret or app_secret_from_create
+    rendered = existing_text
+    changed = False
+    if app_id and str(existing_values.get("FEISHU_APP_ID") or "").strip() != app_id:
+        rendered = _upsert_env_value(rendered, "FEISHU_APP_ID", app_id)
+        changed = True
+    if effective_secret and str(existing_values.get("FEISHU_APP_SECRET") or "").strip() != effective_secret:
+        rendered = _upsert_env_value(rendered, "FEISHU_APP_SECRET", effective_secret)
+        changed = True
+    created = bool(app_id and not FEISHU_BRIDGE_ENV_PATH.exists())
+    if changed or created:
+        FEISHU_BRIDGE_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FEISHU_BRIDGE_ENV_PATH.write_text(rendered, encoding="utf-8")
+    return {
+        "env_path": str(FEISHU_BRIDGE_ENV_PATH),
+        "app_id": app_id,
+        "app_id_synced": bool(app_id),
+        "app_secret_synced": bool(effective_secret),
+        "app_secret_source": "existing_env" if existing_secret else ("config_init_output" if app_secret_from_create else ""),
+        "bridge_credentials_ready": bool(app_id and effective_secret),
+        "changed": changed or created,
+    }
+
+
+def _run_feishu_auth_status() -> dict[str, object]:
+    result = run_command([sys.executable, "ops/feishu_agent.py", "auth", "status"], WORKSPACE_ROOT)
+    payload = _extract_json_blob(str(result.get("stdout") or ""))
+    result["status"] = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    return result
+
+
 def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
+    feishu_cli_status = _current_lark_cli_config()
+    feishu_auth_status = _run_feishu_auth_status() if site.feishu_enabled and command_available("python3") else {"status": {}}
     return {
         "generated_at": utc_now(),
         "product_name": site.product_name,
@@ -264,9 +384,12 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
         },
         "feishu_cli": {
             "installed": command_available("lark-cli"),
-            "configured": LARK_CLI_CONFIG_PATH.exists(),
+            "configured": bool(feishu_cli_status.get("configured")),
             "skills_installed": lark_cli_skills_installed(),
+            "app_id": str(feishu_cli_status.get("app_id") or ""),
+            "brand": str(feishu_cli_status.get("brand") or ""),
         },
+        "feishu_setup": (feishu_auth_status or {}).get("status") or {},
     }
 
 
@@ -289,14 +412,22 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
     if not apps.get("obsidian"):
         actions.append("Optional but strongly recommended: install Obsidian for full Vault browsing and `obsidian://` deep-link support.")
     if site.feishu_enabled:
+        feishu_setup = payload.get("feishu_setup") if isinstance(payload.get("feishu_setup"), dict) else {}
+        actions.append("Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.")
+        if not feishu_setup.get("full_ready"):
+            actions.append(
+                "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, sync bridge credentials, and complete login."
+            )
+        if feishu_setup.get("object_ops_ready") and not feishu_setup.get("coco_bridge_ready"):
+            actions.append(
+                "Feishu object operations are ready, but CoCo bridge credentials are still incomplete. Finish the bridge app secret sync before enabling the live Feishu bridge."
+            )
+        elif not feishu_setup.get("object_ops_ready"):
+            actions.append("Complete the Feishu login flow until `object_ops_ready=true`.")
         actions.extend(
             [
-                "Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.",
-                "Copy `ops/feishu_bridge.env.example` to `ops/feishu_bridge.env.local` and fill your Feishu app settings.",
-                "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, and install the official skills bundle.",
-                "Complete one Feishu OAuth login with `python3 ops/feishu_agent.py auth login` after the CLI/app setup succeeds.",
                 "Ensure your CoCo Feishu app scopes are approved and published.",
-                "Optionally install the Feishu bridge launch agent with `python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge`.",
+                "Optionally install the Feishu bridge launch agent with `python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge` after Feishu reports `full_ready=true`.",
             ]
         )
     else:
@@ -373,13 +504,15 @@ def setup_feishu_cli(
     create_app: bool,
     install: bool,
     install_skills: bool,
-    login_user: bool = False,
+    login_user: bool = True,
     run_doctor: bool = False,
 ) -> dict[str, object]:
     results: dict[str, object] = {
         "install": {"skipped": True},
         "config_init": {"skipped": True},
+        "credentials_sync": {"skipped": True},
         "auth_login": {"skipped": not login_user},
+        "auth_status": {"skipped": True},
         "doctor": {"skipped": True},
     }
     if install:
@@ -394,13 +527,21 @@ def setup_feishu_cli(
         results["config_init"] = run_command(config_cmd, WORKSPACE_ROOT)
         if int(results["config_init"].get("returncode") or 0) != 0:
             return results
+    results["credentials_sync"] = _sync_feishu_bridge_credentials(
+        results["config_init"] if isinstance(results.get("config_init"), dict) else None
+    )
     if login_user:
-        auth_cmd = ["lark-cli", "auth", "login", "--domain", DEFAULT_FEISHU_CLI_DOMAINS]
+        auth_cmd = [sys.executable, "ops/feishu_agent.py", "auth", "login"]
         results["auth_login"] = run_command(auth_cmd, WORKSPACE_ROOT)
         if int(results["auth_login"].get("returncode") or 0) != 0:
+            results["auth_status"] = _run_feishu_auth_status()
             return results
+    results["auth_status"] = _run_feishu_auth_status()
     if run_doctor:
         results["doctor"] = run_command(["lark-cli", "doctor"], WORKSPACE_ROOT)
+    status = results.get("auth_status")
+    auth_payload = status.get("status") if isinstance(status, dict) else {}
+    results["summary"] = auth_payload if isinstance(auth_payload, dict) else {}
     return results
 
 
@@ -519,8 +660,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
             feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("cli"))
             feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("skills"))
         feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("config_init"))
+        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("credentials_sync"))
         feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("auth_login"))
         feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("doctor"))
+        summary = feishu_cli_result.get("summary")
+        if isinstance(summary, dict):
+            feishu_cli_ok = feishu_cli_ok and bool(summary.get("full_ready"))
     payload = {
         "ok": acceptance_rc == 0 and dependency_result.get("returncode", 0) == 0 and feishu_cli_ok,
         "python_dependencies": dependency_result,
@@ -555,11 +700,11 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
         create_app=args.create_feishu_app,
         install=not args.skip_install,
         install_skills=not args.skip_skills,
-        login_user=bool(getattr(args, "login_lark_cli_user", False) and not getattr(args, "skip_login", False)),
+        login_user=not bool(getattr(args, "skip_login", False)),
         run_doctor=bool(getattr(args, "run_lark_cli_doctor", False)),
     )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    for key in ("config_init", "auth_login", "doctor"):
+    for key in ("config_init", "credentials_sync", "auth_login", "doctor"):
         result = payload.get(key)
         if isinstance(result, dict) and not result.get("skipped"):
             if int(result.get("returncode") or 0) != 0:
@@ -571,6 +716,9 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
             if isinstance(result, dict) and not result.get("skipped"):
                 if int(result.get("returncode") or 0) != 0:
                     return 1
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and not summary.get("full_ready"):
+        return 1
     return 0
 
 
@@ -595,7 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup_feishu_cli_parser = sub.add_parser(
         "setup-feishu-cli",
-        help="Install lark-cli, create/configure the Feishu app, and prepare the public Feishu login flow.",
+        help="Install lark-cli, create/configure the Feishu app, sync bridge credentials, and complete the public Feishu login flow.",
     )
     setup_feishu_cli_parser.add_argument("--create-feishu-app", action="store_true", help="Create a new Feishu app in the browser before configuration.")
     setup_feishu_cli_parser.add_argument("--skip-install", action="store_true", help="Skip the lark-cli and official skills installation stage.")
@@ -603,7 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_feishu_cli_parser.add_argument(
         "--login-lark-cli-user",
         action="store_true",
-        help="Optional advanced step: run `lark-cli auth login` after configuration. This may trigger OS credential prompts.",
+        help="Deprecated compatibility flag. The default setup now runs the unified Codex Hub Feishu login flow automatically.",
     )
     setup_feishu_cli_parser.add_argument(
         "--run-lark-cli-doctor",
@@ -613,7 +761,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_feishu_cli_parser.add_argument(
         "--skip-login",
         action="store_true",
-        help="Deprecated no-op for backward compatibility. The public default no longer runs raw `lark-cli auth login`.",
+        help="Skip the final Feishu login step. This leaves the setup incomplete and is intended only for debugging.",
     )
     setup_feishu_cli_parser.set_defaults(func=cmd_setup_feishu_cli)
 
@@ -641,7 +789,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--setup-feishu-cli",
         action="store_true",
-        help="Install and configure the official Feishu CLI during bootstrap without forcing raw lark-cli login.",
+        help="Install and configure the official Feishu CLI during bootstrap, then run the unified Feishu login flow.",
     )
     init_parser.add_argument(
         "--create-feishu-app",
@@ -687,7 +835,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--setup-feishu-cli",
         action="store_true",
-        help="Install and configure the official Feishu CLI during setup without forcing raw lark-cli login.",
+        help="Install and configure the official Feishu CLI during setup, then run the unified Feishu login flow.",
     )
     setup_parser.add_argument(
         "--create-feishu-app",

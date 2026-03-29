@@ -493,27 +493,21 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 - 安装官方 `lark-cli`
 - 安装官方 `lark-*` skills
 - 打开 Feishu 应用创建/配置
-- 不再默认触发原生 `lark-cli auth login`
-- 不再默认跑 `lark-cli doctor`
-- 公开版默认不把系统钥匙串验证当成登录前置步骤
+- 自动同步公开版运行时需要的 `app_id`
+- 自动执行公开版统一的 Feishu 登录链
+- 最后输出当前 `object_ops_ready / coco_bridge_ready / full_ready` 状态
+- 公开版不再把系统钥匙串验证当成默认登录前置步骤
 
-公开版默认的登录主路径是：
-
-在 `workspace/` 里执行：
+如果 `setup-feishu-cli` 结束后还没有到 `full_ready=true`，先在 `workspace/` 里执行：
 
 ```bash
-python3 ops/feishu_agent.py auth login
+python3 ops/feishu_agent.py auth status
 ```
-
-这一步的目标是：
-
-- 完成一次用户身份授权
-- 后续由系统自动续期
 
 如果你明确要排查原生 `lark-cli` 身份，再手动执行：
 
 ```bash
-lark-cli auth login --domain open.feishu.cn
+lark-cli auth login --domain event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail
 lark-cli doctor
 ```
 
@@ -535,10 +529,12 @@ lark-cli doctor
 
 你要做的是：
 
-1. 复制：
-   - `workspace/ops/feishu_bridge.env.example`
-   - 到 `workspace/ops/feishu_bridge.env.local`
-2. 填入你自己的 Feishu 应用配置
+1. 先跑一次：
+   - `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`
+2. 确认它最后输出：
+   - `object_ops_ready=true`
+   - `coco_bridge_ready=true`
+   - `full_ready=true`
 3. 然后启动或安装 bridge
 
 当前最简便的正式方式是：

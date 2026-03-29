@@ -6,7 +6,9 @@ import json
 import mimetypes
 import os
 import plistlib
+import shutil
 import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -45,6 +47,8 @@ DEFAULT_OAUTH_PORT = 14589
 DEFAULT_OAUTH_PATH = "/feishu-auth/callback"
 DEFAULT_TOKEN_STORE_NAME = "feishu_user_token.json"
 DEFAULT_LAUNCH_AGENT_NAME = "com.codexhub.coco-feishu-bridge.plist"
+DEFAULT_LARK_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
+DEFAULT_LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
 
 
 class FeishuAgentError(RuntimeError):
@@ -302,6 +306,21 @@ def _parse_iso_timestamp(value: str) -> float:
         return 0.0
 
 
+def _extract_json_blob(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        payload = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _user_match_score(user: dict[str, Any], query: str) -> int:
     target = str(query or "").strip().lower()
     if not target:
@@ -359,6 +378,90 @@ class FeishuAgent:
         self._user_token_store_path = default_user_token_store_path(self.env)
         self._ssl_context = _build_ssl_context()
         self._calendar_cache: list[dict[str, Any]] | None = None
+
+    def _lark_cli_available(self) -> bool:
+        return shutil.which("lark-cli") is not None
+
+    def _lark_cli_config_status(self) -> dict[str, Any]:
+        if not self._lark_cli_available():
+            return {"available": False, "configured": False}
+        try:
+            proc = subprocess.run(
+                ["lark-cli", "config", "show"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except Exception as exc:
+            return {"available": True, "configured": False, "error": str(exc)}
+        payload = _extract_json_blob(proc.stdout)
+        if not payload and DEFAULT_LARK_CLI_CONFIG_PATH.exists():
+            try:
+                config_payload = json.loads(DEFAULT_LARK_CLI_CONFIG_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                config_payload = {}
+            apps = config_payload.get("apps") if isinstance(config_payload, dict) else []
+            if isinstance(apps, list) and apps:
+                latest = apps[-1] if isinstance(apps[-1], dict) else {}
+                if isinstance(latest, dict):
+                    payload = {
+                        "appId": latest.get("appId"),
+                        "brand": latest.get("brand"),
+                        "lang": latest.get("lang"),
+                    }
+        app_id = str(payload.get("appId") or "").strip()
+        return {
+            "available": True,
+            "configured": bool(app_id),
+            "app_id": app_id,
+            "brand": str(payload.get("brand") or "").strip(),
+            "lang": str(payload.get("lang") or "").strip(),
+            "config_path": str(DEFAULT_LARK_CLI_CONFIG_PATH),
+        }
+
+    def _lark_cli_auth_status(self) -> dict[str, Any]:
+        if not self._lark_cli_available():
+            return {"available": False, "logged_in": False}
+        try:
+            proc = subprocess.run(
+                ["lark-cli", "auth", "status"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except Exception as exc:
+            return {"available": True, "logged_in": False, "error": str(exc)}
+        payload = _extract_json_blob(proc.stdout)
+        identity = str(payload.get("identity") or "").strip()
+        user_open_id = str(payload.get("userOpenId") or "").strip()
+        return {
+            "available": True,
+            "logged_in": bool(identity),
+            "identity": identity,
+            "token_status": str(payload.get("tokenStatus") or "").strip(),
+            "user_name": str(payload.get("userName") or "").strip(),
+            "user_open_id": user_open_id,
+            "app_id": str(payload.get("appId") or "").strip(),
+            "scope": str(payload.get("scope") or "").strip(),
+            "expires_at": str(payload.get("expiresAt") or "").strip(),
+            "refresh_expires_at": str(payload.get("refreshExpiresAt") or "").strip(),
+        }
+
+    def _lark_cli_auth_login(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._lark_cli_available():
+            raise FeishuAgentError("lark-cli is not installed", code="lark_cli_missing")
+        domains = payload.get("domains") or payload.get("domain") or DEFAULT_LARK_CLI_DOMAINS
+        scope = str(payload.get("scope") or "").strip()
+        command = ["lark-cli", "auth", "login"]
+        if scope:
+            command.extend(["--scope", scope])
+        else:
+            command.extend(["--domain", str(domains)])
+        proc = subprocess.run(command, text=True, capture_output=True, check=False)
+        if proc.returncode != 0:
+            message = str(proc.stderr or proc.stdout or "lark_cli_auth_login_failed").strip()
+            raise FeishuAgentError(message, code="lark_cli_auth_login_failed")
+        return self._lark_cli_auth_status()
 
     # ---- core transport ----
 
@@ -1610,8 +1713,26 @@ class FeishuAgent:
         access_expire_at = str(store.get("access_token_expire_at") or "").strip()
         refresh_expire_at = str(store.get("refresh_token_expire_at") or "").strip()
         auth_method = str(store.get("auth_method") or "").strip()
+        lark_cli_config = self._lark_cli_config_status()
+        lark_cli_auth = self._lark_cli_auth_status()
+        lark_cli_user_logged_in = bool(
+            lark_cli_config.get("configured")
+            and lark_cli_auth.get("logged_in")
+            and str(lark_cli_auth.get("identity") or "").strip() == "user"
+        )
+        effective_user_auth_ready = bool(access_token or lark_cli_user_logged_in)
+        bridge_credentials_ready = bool(self.app_id and self.app_secret)
+        object_ops_ready = bool(lark_cli_config.get("configured") and effective_user_auth_ready)
+        next_steps: list[str] = []
+        if not lark_cli_config.get("configured"):
+            next_steps.append("Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`.")
+        elif not effective_user_auth_ready:
+            next_steps.append("Complete the Feishu user login flow until `object_ops_ready=true`.")
+        if object_ops_ready and not bridge_credentials_ready:
+            next_steps.append("Sync `FEISHU_APP_SECRET` into `ops/feishu_bridge.env.local` and rerun setup.")
         return {
-            "configured": bool(self.app_id and self.app_secret),
+            "configured": bridge_credentials_ready,
+            "bridge_credentials_ready": bridge_credentials_ready,
             "has_user_access_token": bool(access_token),
             "has_refresh_token": bool(refresh_token),
             "auto_refresh_ready": bool(refresh_token),
@@ -1621,6 +1742,14 @@ class FeishuAgent:
             "access_token_expire_at": access_expire_at,
             "refresh_token_expire_at": refresh_expire_at,
             "profile": store.get("profile") or {},
+            "lark_cli": lark_cli_config,
+            "lark_cli_auth": lark_cli_auth,
+            "lark_cli_user_logged_in": lark_cli_user_logged_in,
+            "effective_user_auth_ready": effective_user_auth_ready,
+            "object_ops_ready": object_ops_ready,
+            "coco_bridge_ready": bridge_credentials_ready,
+            "full_ready": bool(object_ops_ready and bridge_credentials_ready),
+            "next_steps": next_steps,
         }
 
     def auth_clear(self, _payload: dict[str, Any]) -> dict[str, Any]:
@@ -1632,6 +1761,16 @@ class FeishuAgent:
         return payload if isinstance(payload, dict) else {}
 
     def auth_login(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.app_id or not self.app_secret:
+            status = self._lark_cli_auth_login(payload)
+            return {
+                "ok": True,
+                "auth_method": "lark-cli",
+                "identity": status.get("identity"),
+                "user_open_id": status.get("user_open_id"),
+                "user_name": status.get("user_name"),
+                "status": self.auth_status({}),
+            }
         redirect_uri = str(payload.get("redirect_uri") or self.oauth_redirect_uri or DEFAULT_OAUTH_REDIRECT_URI).strip()
         parsed_redirect = urllib.parse.urlparse(redirect_uri)
         if parsed_redirect.scheme not in {"http", "https"}:
@@ -1725,6 +1864,7 @@ class FeishuAgent:
         self._save_user_token_store(stored)
         return {
             "ok": True,
+            "auth_method": "codex-hub-oauth",
             "authorize_url": authorize_url,
             "redirect_uri": redirect_uri,
             "scopes": scopes,
@@ -1732,6 +1872,7 @@ class FeishuAgent:
             "profile": profile,
             "access_token_expire_at": stored.get("access_token_expire_at", ""),
             "refresh_token_expire_at": stored.get("refresh_token_expire_at", ""),
+            "status": self.auth_status({}),
         }
 
     def _md_to_blocks(self, text: str) -> list[dict[str, Any]]:
