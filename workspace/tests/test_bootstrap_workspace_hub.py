@@ -36,11 +36,11 @@ def test_maybe_install_launchagents_uses_poll_interval_for_watcher(monkeypatch) 
     bootstrap = importlib.reload(bootstrap_module)
     observed: list[list[str]] = []
 
-    def fake_run_command(cmd, cwd):
+    def fake_run_command(cmd, cwd, *, timeout_seconds):
         observed.append(list(cmd))
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
-    monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
+    monkeypatch.setattr(bootstrap, "run_command_with_timeout", fake_run_command)
     site = bootstrap.default_site_config()
 
     payload = bootstrap.maybe_install_launchagents(site, install=True)
@@ -164,6 +164,23 @@ def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> Non
     assert payload["doctor"]["skipped"] is True
 
 
+def test_setup_feishu_cli_auto_enables_feishu_in_site_config(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    site_config = tmp_path / "site.yaml"
+    site_config.write_text(
+        "version: 1\nsite:\n  product_name: Codex Hub\n  feishu_enabled: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "SITE_CONFIG_PATH", site_config)
+
+    payload = bootstrap._ensure_site_feishu_enabled()
+
+    assert payload["feishu_enabled"] is True
+    assert "feishu_enabled: true" in site_config.read_text(encoding="utf-8")
+
+
 def test_setup_feishu_cli_can_skip_login_and_optionally_run_doctor(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
@@ -211,10 +228,49 @@ def test_setup_feishu_cli_can_skip_login_and_optionally_run_doctor(monkeypatch) 
     assert payload["doctor"]["returncode"] == 0
 
 
+def test_maybe_install_launchagents_times_out_instead_of_hanging(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    observed: list[tuple[list[str], int]] = []
+
+    def fake_run_command_with_timeout(cmd, cwd, *, timeout_seconds):
+        observed.append((list(cmd), timeout_seconds))
+        return {"returncode": 124, "stderr": "timed out", "timed_out": True}
+
+    monkeypatch.setattr(bootstrap, "run_command_with_timeout", fake_run_command_with_timeout)
+    site = bootstrap.default_site_config()
+
+    payload = bootstrap.maybe_install_launchagents(site, install=True)
+
+    assert payload["installed"] is False
+    assert observed[0][0][:3] == ["python3", "ops/codex_session_watcher.py", "install-launchagent"]
+    assert observed[0][1] == bootstrap.LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS
+    assert payload["results"]["health_check"]["timed_out"] is True
+
+
 def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
     bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "_ensure_site_feishu_enabled", lambda: {"changed": True, "feishu_enabled": True})
+    monkeypatch.setattr(
+        bootstrap,
+        "load_site_config",
+        lambda: bootstrap.SiteConfig(
+            product_name="Codex Hub",
+            workspace_root=bootstrap.WORKSPACE_ROOT,
+            memory_root=bootstrap.WORKSPACE_ROOT.parent / "memory",
+            operator_name="",
+            timezone="Asia/Shanghai",
+            launchagent_prefix="com.codexhub",
+            feishu_enabled=True,
+            electron_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(bootstrap, "bootstrap_status_payload", lambda site: {"manual_actions": [], "feishu_cli": {}, "feishu_setup": {}})
+    monkeypatch.setattr(bootstrap, "build_manual_actions", lambda site, payload: [])
+    monkeypatch.setattr(bootstrap, "_write_bootstrap_status", lambda payload: None)
     monkeypatch.setattr(
         bootstrap,
         "setup_feishu_cli",

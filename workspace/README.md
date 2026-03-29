@@ -257,9 +257,13 @@
 > 如果你暂时先不走 Feishu，只想把公开版**快速手工跑起来**，当前最短路径已经收成两步：
 >
 > 1. `codex login`
-> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
+> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents`
 >
-> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance；如果你加上 `--install-feishu-cli`，它还会把官方 `lark-cli` 和官方 `lark-*` skills 一起装好。
+> 这条路径只负责把**本地运行层**收好：
+> Python 依赖、bootstrap、后台任务和 acceptance。
+> 如果你后面还要接 Feishu，不要停在 `--install-feishu-cli`，而是继续走专门的：
+>
+> `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`
 
 > [!TIP]
 > `Codex` 只要从当前 `workspace/` 启动，就会自动读取：
@@ -303,7 +307,7 @@ cd codex-hub/workspace
 ### 3. 执行一键 setup
 
 ```bash
-python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli
+python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 ```
 
 这个 `setup` 会自动完成：
@@ -411,9 +415,7 @@ codex login
 
 如果你需要 Feishu 协作，请继续：
 
-1. 在 [control/site.yaml](./control/site.yaml) 里把：
-   - `feishu_enabled: true`
-2. 运行：
+1. 运行：
 
 ```bash
 python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
@@ -424,23 +426,32 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 - 安装官方 `lark-cli`
 - 安装官方 `lark-*` skills
 - 拉起 Feishu 应用创建/配置
+- 自动把 [control/site.yaml](./control/site.yaml) 切到 `feishu_enabled: true`
 - 自动同步公开版运行时需要的 `app_id`
 - 自动执行公开版统一的 Feishu 登录链
 - 最后输出当前 `object_ops_ready / coco_bridge_ready / full_ready` 状态
 - 公开版不再把系统钥匙串验证当成默认登录前置步骤
 
-3. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
-4. 填入你的：
+2. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
+3. 填入你的：
    - `owner_open_id`
    - 默认 `calendar_id`
    - 文档目录
    - 表格别名
    - 只读投影资源
-5. 如果 `setup-feishu-cli` 最后没有达到 `full_ready=true`，再执行排查：
+4. 如果 `setup-feishu-cli` 最后没有达到 `full_ready=true`，再执行排查：
 
 ```bash
 python3 ops/feishu_agent.py auth status
 ```
+
+当前口径是：
+
+- `object_ops_ready=true`：官方 CLI 对象能力已经可用
+- `coco_bridge_ready=true`：`CoCo` bridge 凭据也已经齐
+- `full_ready=true`：Feishu 完整可用
+
+也就是说，只有 `full_ready=true` 才算这条 Feishu 接入真正做完。
 
 只有在你明确要排查原生 `lark-cli` 身份时，才再额外执行：
 
@@ -449,8 +460,8 @@ lark-cli auth login --domain event,im,docs,drive,base,task,calendar,vc,minutes,c
 lark-cli doctor
 ```
 
-6. 确保你的 Feishu 应用 scope 已经通过审核并发布
-7. 然后执行：
+5. 确保你的 Feishu 应用 scope 已经通过审核并发布
+6. 然后执行：
 
 ```bash
 python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge
