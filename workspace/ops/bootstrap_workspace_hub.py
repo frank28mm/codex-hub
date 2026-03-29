@@ -27,6 +27,8 @@ PYTHON_DEPENDENCIES = (
     ("docx", "python-docx"),
     ("openpyxl", "openpyxl"),
     ("pypdf", "pypdf"),
+    ("requests", "requests"),
+    ("bs4", "beautifulsoup4"),
     ("qrcode", "qrcode[pil]"),
     ("certifi", "certifi"),
 )
@@ -284,6 +286,14 @@ def maybe_sync(site: SiteConfig, skip_sync: bool) -> dict[str, object]:
     return {name: run_command(cmd, site.workspace_root) for name, cmd in commands.items()}
 
 
+def maybe_bootstrap_knowledge_base(site: SiteConfig) -> dict[str, object]:
+    commands = {
+        "knowledge_bootstrap": ["python3", "ops/knowledge_intake.py", "bootstrap"],
+        "discover_projects": ["python3", "ops/codex_memory.py", "discover-projects"],
+    }
+    return {name: run_command(cmd, site.workspace_root) for name, cmd in commands.items()}
+
+
 def install_python_dependencies(*, force: bool = False) -> dict[str, object]:
     missing = missing_python_packages()
     if not missing and not force:
@@ -325,6 +335,10 @@ def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, obj
             ["python3", "ops/feishu_projection.py", "install-launchagent", "--interval", "900"],
             site.workspace_root,
         ),
+        "knowledge_intake": run_command(
+            ["python3", "ops/knowledge_intake.py", "install-launchagent", "--hour", "4", "--minute", "0"],
+            site.workspace_root,
+        ),
     }
     return {"installed": True, "results": results}
 
@@ -355,6 +369,7 @@ def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object
     write_codex_config(site)
 
     payload = bootstrap_status_payload(site)
+    payload["knowledge_base"] = maybe_bootstrap_knowledge_base(site)
     payload["sync_results"] = maybe_sync(site, skip_sync=args.skip_sync)
     payload["launchagents"] = maybe_install_launchagents(site, install=args.install_launchagents)
     payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)

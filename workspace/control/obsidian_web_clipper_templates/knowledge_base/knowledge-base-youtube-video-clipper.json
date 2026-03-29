@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Knowledge Base - YouTube Video",
+  "behavior": "create",
+  "noteNameFormat": "{{schema:@VideoObject:uploadDate|date:\"YYYY-MM-DD\"}} video {{schema:@VideoObject:author|safe_name}} - {{schema:@VideoObject:name|safe_name|trim}}",
+  "path": "02_episodic/clips/Knowledge Base/inbox",
+  "vault": "memory",
+  "context": "{{schema:@VideoObject:description}}",
+  "properties": [
+    {
+      "name": "title",
+      "value": "{{schema:@VideoObject:name}}",
+      "id": "kb-youtube-video--title"
+    },
+    {
+      "name": "url",
+      "value": "{{schema:@VideoObject:embedUrl|replace:\"embed/\":\"watch?v=\"}}",
+      "id": "kb-youtube-video--url"
+    },
+    {
+      "name": "domain",
+      "value": "youtube.com",
+      "id": "kb-youtube-video--domain"
+    },
+    {
+      "name": "clipped_at",
+      "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+      "id": "kb-youtube-video--clipped-at"
+    },
+    {
+      "name": "source_type",
+      "value": "youtube-video",
+      "id": "kb-youtube-video--source-type"
+    },
+    {
+      "name": "processing_status",
+      "value": "inbox",
+      "id": "kb-youtube-video--processing-status"
+    },
+    {
+      "name": "topic_candidates",
+      "value": "",
+      "type": "multitext",
+      "id": "kb-youtube-video--topic-candidates"
+    },
+    {
+      "name": "channel",
+      "value": "{{schema:@VideoObject:author}}",
+      "id": "kb-youtube-video--channel"
+    },
+    {
+      "name": "published",
+      "value": "{{schema:@VideoObject:uploadDate|date:\"YYYY-MM-DD\"}}",
+      "type": "date",
+      "id": "kb-youtube-video--published"
+    },
+    {
+      "name": "thumbnail_url",
+      "value": "{{schema:@VideoObject:thumbnailUrl|first}}",
+      "id": "kb-youtube-video--thumbnail-url"
+    },
+    {
+      "name": "duration",
+      "value": "{{schema:@VideoObject:duration|replace:\"PT\":\"\":\"S\",\"\"|duration}}",
+      "id": "kb-youtube-video--duration"
+    }
+  ],
+  "triggers": [
+    "https://www.youtube.com/watch"
+  ],
+  "noteContentFormat": "# {{schema:@VideoObject:name}}\n\n> Source: {{schema:@VideoObject:embedUrl|replace:\"embed/\":\"watch?v=\"}}\n> Channel: {{schema:@VideoObject:author}}\n> Published: {{schema:@VideoObject:uploadDate|date:\"YYYY-MM-DD\"}}\n\n![{{schema:@VideoObject:name}}]({{schema:@VideoObject:thumbnailUrl|first}})\n\n## Description\n\n{{schema:@VideoObject:description}}\n\n## Transcript\n\n{% set transcripts = selector:transcript-segment-view-model > .yt-core-attributed-string %}\n{% set timestamps = selector:transcript-segment-view-model > .ytwTranscriptSegmentViewModelTimestamp %}\n{% if transcripts and timestamps %}{% for line in transcripts %}- {{timestamps[loop.index0]}} {{line}}\n{% endfor %}{% else %}> 打开 YouTube 的 `...more -> Show transcript` 后再剪藏，可把字幕一起保存进来。\n{% endif %}\n",
+  "id": "kb-youtube-video"
+}

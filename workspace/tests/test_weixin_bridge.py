@@ -129,7 +129,7 @@ def test_route_private_message_keeps_workspace_scope_for_unbound_prompt(sample_e
             "response": {
                 "ok": True,
                 "finalize_launch": {
-                    "project_name": "AI Coding课程",
+                    "project_name": "Learning Lab",
                     "session_id": "sess-general-1",
                     "summary_excerpt": "我是 CoCo，这里是整个 Codex Hub 工作区的微信私聊入口。",
                 },

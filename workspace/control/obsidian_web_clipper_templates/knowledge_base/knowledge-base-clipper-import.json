@@ -1,0 +1,300 @@
+{
+  "vaults": [
+    "memory"
+  ],
+  "template_list": [
+    "kb-general-article",
+    "kb-official-docs",
+    "kb-research-web",
+    "kb-highlight",
+    "kb-youtube-video"
+  ],
+  "template_kb-general-article": {
+    "schemaVersion": "0.1.0",
+    "name": "Knowledge Base - General Article",
+    "behavior": "create",
+    "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} article {{title|safe_name}}",
+    "path": "02_episodic/clips/Knowledge Base/inbox",
+    "vault": "memory",
+    "context": "{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,.wx_profile_card_container,.weui-desktop-mass-appmsg__like-read,.reward_qrcode,.js_product_loop_content,.original_area_primary\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}",
+    "properties": [
+      {
+        "name": "title",
+        "value": "{{title}}",
+        "id": "kb-general-article--title"
+      },
+      {
+        "name": "url",
+        "value": "{{url}}",
+        "id": "kb-general-article--url"
+      },
+      {
+        "name": "domain",
+        "value": "{{site}}",
+        "id": "kb-general-article--domain"
+      },
+      {
+        "name": "clipped_at",
+        "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+        "id": "kb-general-article--clipped-at"
+      },
+      {
+        "name": "source_type",
+        "value": "web-article",
+        "id": "kb-general-article--source-type"
+      },
+      {
+        "name": "processing_status",
+        "value": "inbox",
+        "id": "kb-general-article--processing-status"
+      },
+      {
+        "name": "topic_candidates",
+        "value": "",
+        "type": "multitext",
+        "id": "kb-general-article--topic-candidates"
+      }
+    ],
+    "triggers": [
+      "schema:@Article"
+    ],
+    "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n{% if image %}![{{title}}]({{image}})\n\n{% endif %}## Captured content\n\n{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,.wx_profile_card_container,.weui-desktop-mass-appmsg__like-read,.reward_qrcode,.js_product_loop_content,.original_area_primary\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}\n",
+    "id": "kb-general-article"
+  },
+  "template_kb-official-docs": {
+    "schemaVersion": "0.1.0",
+    "name": "Knowledge Base - Official Docs",
+    "behavior": "create",
+    "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} docs {{title|safe_name}}",
+    "path": "02_episodic/clips/Knowledge Base/inbox",
+    "vault": "memory",
+    "context": "{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}",
+    "properties": [
+      {
+        "name": "title",
+        "value": "{{title}}",
+        "id": "kb-official-docs--title"
+      },
+      {
+        "name": "url",
+        "value": "{{url}}",
+        "id": "kb-official-docs--url"
+      },
+      {
+        "name": "domain",
+        "value": "{{site}}",
+        "id": "kb-official-docs--domain"
+      },
+      {
+        "name": "clipped_at",
+        "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+        "id": "kb-official-docs--clipped-at"
+      },
+      {
+        "name": "source_type",
+        "value": "official-docs",
+        "id": "kb-official-docs--source-type"
+      },
+      {
+        "name": "processing_status",
+        "value": "inbox",
+        "id": "kb-official-docs--processing-status"
+      },
+      {
+        "name": "topic_candidates",
+        "value": "",
+        "type": "multitext",
+        "id": "kb-official-docs--topic-candidates"
+      }
+    ],
+    "triggers": [
+      "/\\/docs\\//",
+      "/\\/documentation\\//",
+      "/\\/guide\\//",
+      "/\\/reference\\//",
+      "schema:@TechArticle"
+    ],
+    "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n{% if image %}![{{title}}]({{image}})\n\n{% endif %}## Captured content\n\n{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}\n",
+    "id": "kb-official-docs"
+  },
+  "template_kb-research-web": {
+    "schemaVersion": "0.1.0",
+    "name": "Knowledge Base - Research Web",
+    "behavior": "create",
+    "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} paper {{title|safe_name}}",
+    "path": "02_episodic/clips/Knowledge Base/inbox",
+    "vault": "memory",
+    "context": "{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}",
+    "properties": [
+      {
+        "name": "title",
+        "value": "{{title}}",
+        "id": "kb-research-web--title"
+      },
+      {
+        "name": "url",
+        "value": "{{url}}",
+        "id": "kb-research-web--url"
+      },
+      {
+        "name": "domain",
+        "value": "{{site}}",
+        "id": "kb-research-web--domain"
+      },
+      {
+        "name": "clipped_at",
+        "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+        "id": "kb-research-web--clipped-at"
+      },
+      {
+        "name": "source_type",
+        "value": "research-web",
+        "id": "kb-research-web--source-type"
+      },
+      {
+        "name": "processing_status",
+        "value": "inbox",
+        "id": "kb-research-web--processing-status"
+      },
+      {
+        "name": "topic_candidates",
+        "value": "",
+        "type": "multitext",
+        "id": "kb-research-web--topic-candidates"
+      }
+    ],
+    "triggers": [
+      "https://arxiv.org/",
+      "https://openreview.net/",
+      "https://paperswithcode.com/",
+      "schema:@ScholarlyArticle"
+    ],
+    "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n{% if image %}![{{title}}]({{image}})\n\n{% endif %}## Captured content\n\n{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}\n",
+    "id": "kb-research-web"
+  },
+  "template_kb-highlight": {
+    "schemaVersion": "0.1.0",
+    "name": "Knowledge Base - Highlight",
+    "behavior": "create",
+    "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} highlight {{title|safe_name}}",
+    "path": "02_episodic/clips/Knowledge Base/inbox",
+    "vault": "memory",
+    "context": "{{highlights|trim}}",
+    "properties": [
+      {
+        "name": "title",
+        "value": "{{title}}",
+        "id": "kb-highlight--title"
+      },
+      {
+        "name": "url",
+        "value": "{{url}}",
+        "id": "kb-highlight--url"
+      },
+      {
+        "name": "domain",
+        "value": "{{site}}",
+        "id": "kb-highlight--domain"
+      },
+      {
+        "name": "clipped_at",
+        "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+        "id": "kb-highlight--clipped-at"
+      },
+      {
+        "name": "source_type",
+        "value": "web-highlight",
+        "id": "kb-highlight--source-type"
+      },
+      {
+        "name": "processing_status",
+        "value": "inbox",
+        "id": "kb-highlight--processing-status"
+      },
+      {
+        "name": "topic_candidates",
+        "value": "",
+        "type": "multitext",
+        "id": "kb-highlight--topic-candidates"
+      }
+    ],
+    "triggers": [
+      "schema:@Article"
+    ],
+    "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n## Highlights\n\n{{context}}\n",
+    "id": "kb-highlight"
+  },
+  "template_kb-youtube-video": {
+    "schemaVersion": "0.1.0",
+    "name": "Knowledge Base - YouTube Video",
+    "behavior": "create",
+    "noteNameFormat": "{{schema:@VideoObject:uploadDate|date:\"YYYY-MM-DD\"}} video {{schema:@VideoObject:author|safe_name}} - {{schema:@VideoObject:name|safe_name|trim}}",
+    "path": "02_episodic/clips/Knowledge Base/inbox",
+    "vault": "memory",
+    "context": "{{schema:@VideoObject:description}}",
+    "properties": [
+      {
+        "name": "title",
+        "value": "{{schema:@VideoObject:name}}",
+        "id": "kb-youtube-video--title"
+      },
+      {
+        "name": "url",
+        "value": "{{schema:@VideoObject:embedUrl|replace:\"embed/\":\"watch?v=\"}}",
+        "id": "kb-youtube-video--url"
+      },
+      {
+        "name": "domain",
+        "value": "youtube.com",
+        "id": "kb-youtube-video--domain"
+      },
+      {
+        "name": "clipped_at",
+        "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+        "id": "kb-youtube-video--clipped-at"
+      },
+      {
+        "name": "source_type",
+        "value": "youtube-video",
+        "id": "kb-youtube-video--source-type"
+      },
+      {
+        "name": "processing_status",
+        "value": "inbox",
+        "id": "kb-youtube-video--processing-status"
+      },
+      {
+        "name": "topic_candidates",
+        "value": "",
+        "type": "multitext",
+        "id": "kb-youtube-video--topic-candidates"
+      },
+      {
+        "name": "channel",
+        "value": "{{schema:@VideoObject:author}}",
+        "id": "kb-youtube-video--channel"
+      },
+      {
+        "name": "published",
+        "value": "{{schema:@VideoObject:uploadDate|date:\"YYYY-MM-DD\"}}",
+        "type": "date",
+        "id": "kb-youtube-video--published"
+      },
+      {
+        "name": "thumbnail_url",
+        "value": "{{schema:@VideoObject:thumbnailUrl|first}}",
+        "id": "kb-youtube-video--thumbnail-url"
+      },
+      {
+        "name": "duration",
+        "value": "{{schema:@VideoObject:duration|replace:\"PT\":\"\":\"S\",\"\"|duration}}",
+        "id": "kb-youtube-video--duration"
+      }
+    ],
+    "triggers": [
+      "https://www.youtube.com/watch"
+    ],
+    "noteContentFormat": "# {{schema:@VideoObject:name}}\n\n> Source: {{schema:@VideoObject:embedUrl|replace:\"embed/\":\"watch?v=\"}}\n> Channel: {{schema:@VideoObject:author}}\n> Published: {{schema:@VideoObject:uploadDate|date:\"YYYY-MM-DD\"}}\n\n![{{schema:@VideoObject:name}}]({{schema:@VideoObject:thumbnailUrl|first}})\n\n## Description\n\n{{schema:@VideoObject:description}}\n\n## Transcript\n\n{% set transcripts = selector:transcript-segment-view-model > .yt-core-attributed-string %}\n{% set timestamps = selector:transcript-segment-view-model > .ytwTranscriptSegmentViewModelTimestamp %}\n{% if transcripts and timestamps %}{% for line in transcripts %}- {{timestamps[loop.index0]}} {{line}}\n{% endfor %}{% else %}> 打开 YouTube 的 `...more -> Show transcript` 后再剪藏，可把字幕一起保存进来。\n{% endif %}\n",
+    "id": "kb-youtube-video"
+  }
+}

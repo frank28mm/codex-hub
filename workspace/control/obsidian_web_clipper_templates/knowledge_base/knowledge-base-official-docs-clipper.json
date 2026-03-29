@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Knowledge Base - Official Docs",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} docs {{title|safe_name}}",
+  "path": "02_episodic/clips/Knowledge Base/inbox",
+  "vault": "memory",
+  "context": "{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}",
+  "properties": [
+    {
+      "name": "title",
+      "value": "{{title}}",
+      "id": "kb-official-docs--title"
+    },
+    {
+      "name": "url",
+      "value": "{{url}}",
+      "id": "kb-official-docs--url"
+    },
+    {
+      "name": "domain",
+      "value": "{{site}}",
+      "id": "kb-official-docs--domain"
+    },
+    {
+      "name": "clipped_at",
+      "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+      "id": "kb-official-docs--clipped-at"
+    },
+    {
+      "name": "source_type",
+      "value": "official-docs",
+      "id": "kb-official-docs--source-type"
+    },
+    {
+      "name": "processing_status",
+      "value": "inbox",
+      "id": "kb-official-docs--processing-status"
+    },
+    {
+      "name": "topic_candidates",
+      "value": "",
+      "type": "multitext",
+      "id": "kb-official-docs--topic-candidates"
+    }
+  ],
+  "triggers": [
+    "/\\/docs\\//",
+    "/\\/documentation\\//",
+    "/\\/guide\\//",
+    "/\\/reference\\//",
+    "schema:@TechArticle"
+  ],
+  "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n{% if image %}![{{title}}]({{image}})\n\n{% endif %}## Captured content\n\n{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}\n",
+  "id": "kb-official-docs"
+}

@@ -23,15 +23,17 @@ REQUIRED_PYTHON_MODULES = (
     ("docx", "python-docx"),
     ("openpyxl", "openpyxl"),
     ("pypdf", "pypdf"),
+    ("requests", "requests"),
+    ("bs4", "beautifulsoup4"),
     ("qrcode", "qrcode[pil]"),
     ("certifi", "certifi"),
 )
 
 FORBIDDEN_PATTERNS = [
-    "/Users/" + "frank" + "/workspace-hub",
-    "workspace-hub-data/" + "Codex-Workspace-Memory",
+    "/Users/" + "frank" + "/",
+    "workspace-" + "hub-data",
+    "Codex-" + "Workspace-Memory",
     "com." + "frank" + ".",
-    "frank" + "@example.com",
 ]
 
 
@@ -64,8 +66,10 @@ def check_paths(workspace_root: Path, memory_root: Path) -> list[tuple[str, bool
         workspace_root / "MEMORY_SYSTEM.md",
         workspace_root / "ops" / "bootstrap_workspace_hub.py",
         workspace_root / "ops" / "accept_product.py",
+        workspace_root / "ops" / "knowledge_intake.py",
         workspace_root / "ops" / "start-codex",
         workspace_root / "control" / "site.yaml",
+        workspace_root / "control" / "obsidian_web_clipper_templates" / "knowledge_base" / "README.md",
         workspace_root / ".codex" / "config.toml",
         memory_root / "PROJECT_REGISTRY.md",
         memory_root / "ACTIVE_PROJECTS.md",

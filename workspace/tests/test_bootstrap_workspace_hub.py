@@ -48,6 +48,36 @@ def test_maybe_install_launchagents_uses_poll_interval_for_watcher(monkeypatch) 
     assert payload["installed"] is True
     assert observed[0][:4] == ["python3", "ops/codex_session_watcher.py", "install-launchagent", "--poll-interval"]
     assert observed[0][4] == "300"
+    assert observed[-1][:3] == ["python3", "ops/knowledge_intake.py", "install-launchagent"]
+
+
+def test_perform_init_bootstraps_knowledge_base_before_sync(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "ensure_dirs", lambda paths: None)
+    monkeypatch.setattr(bootstrap, "write_codex_config", lambda site: None)
+    monkeypatch.setattr(bootstrap, "maybe_sync", lambda site, skip_sync: {"verify_consistency": {"returncode": 0}})
+    monkeypatch.setattr(bootstrap, "maybe_install_launchagents", lambda site, install: {"installed": False, "skipped": True})
+    monkeypatch.setattr(bootstrap, "maybe_install_feishu_bridge", lambda site, install: {"installed": False, "skipped": True})
+    monkeypatch.setattr(bootstrap, "build_manual_actions", lambda site, payload: [])
+    monkeypatch.setattr(bootstrap, "BOOTSTRAP_STATUS_PATH", Path("/tmp/bootstrap-status-test.json"))
+    observed: list[tuple[str, list[str]]] = []
+
+    def fake_run_command(cmd, cwd):
+        observed.append((str(cwd), list(cmd)))
+        return {"returncode": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
+    site = bootstrap.default_site_config()
+    args = argparse.Namespace(skip_sync=False, install_launchagents=False, install_feishu_bridge=False)
+
+    payload = bootstrap.perform_init(site, args)
+
+    assert payload["knowledge_base"]["knowledge_bootstrap"]["returncode"] == 0
+    assert payload["knowledge_base"]["discover_projects"]["returncode"] == 0
+    assert observed[0][1] == ["python3", "ops/knowledge_intake.py", "bootstrap"]
+    assert observed[1][1] == ["python3", "ops/codex_memory.py", "discover-projects"]
 
 
 def test_setup_runs_acceptance_after_bootstrap(monkeypatch, capsys) -> None:

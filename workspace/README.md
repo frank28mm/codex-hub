@@ -31,29 +31,31 @@
 这份公开版当前已经包含可运行的主链能力。  
 也就是说，用户不需要自己再拼一套系统，而是可以在完成自己的账号、授权和资源配置后，按这份 README 的流程直接部署并使用：
 
-- [ops/start-codex](/Users/frank/Codex Hub/workspace/ops/start-codex)
+- [ops/start-codex](./ops/start-codex)
   - 统一启动、项目路由和写回主链
-- [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
+- [AGENTS.md](./AGENTS.md)
   - 公开版完整运行协议
-- [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
+- [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)
   - 公开版记忆系统协议
-- [ops/feishu_agent.py](/Users/frank/Codex Hub/workspace/ops/feishu_agent.py)
+- [ops/feishu_agent.py](./ops/feishu_agent.py)
   - Feishu 对象操作与 OAuth
-- [ops/feishu_projection.py](/Users/frank/Codex Hub/workspace/ops/feishu_projection.py)
+- [ops/feishu_projection.py](./ops/feishu_projection.py)
   - 只读 Bitable 投影
-- [ops/weixin_bridge.py](/Users/frank/Codex Hub/workspace/ops/weixin_bridge.py)
+- [ops/weixin_bridge.py](./ops/weixin_bridge.py)
   - 微信私聊 bridge、二维码登录与常驻轮询
-- [bridge/feishu](/Users/frank/Codex Hub/workspace/bridge/feishu)
+- [bridge/feishu](./bridge/feishu)
   - 仓库内自包含的 Feishu 消息层、审批卡、回复卡与线程控制
-- [bridge/feishu_long_connection_service.js](/Users/frank/Codex Hub/workspace/bridge/feishu_long_connection_service.js)
+- [bridge/feishu_long_connection_service.js](./bridge/feishu_long_connection_service.js)
   - Feishu 长连接 bridge 入口
-- [ops/gstack_phase1_entry.py](/Users/frank/Codex Hub/workspace/ops/gstack_phase1_entry.py)
+- [ops/gstack_phase1_entry.py](./ops/gstack_phase1_entry.py)
   - gstack 主链与第二意见入口
-- [ops/claude_code_runner.py](/Users/frank/Codex Hub/workspace/ops/claude_code_runner.py)
+- [ops/claude_code_runner.py](./ops/claude_code_runner.py)
   - Claude second-opinion 执行器
-- [ops/bootstrap_workspace_hub.py](/Users/frank/Codex Hub/workspace/ops/bootstrap_workspace_hub.py)
+- [ops/bootstrap_workspace_hub.py](./ops/bootstrap_workspace_hub.py)
   - 一键初始化
-- [ops/accept_product.py](/Users/frank/Codex Hub/workspace/ops/accept_product.py)
+- [ops/accept_product.py](./ops/accept_product.py)
+- [ops/knowledge_intake.py](./ops/knowledge_intake.py)
+  - Knowledge Base intake, topic routing, source registry, and clipper-driven ingestion
   - 一键验收
 
 ## 这些新增能力在使用上意味着什么
@@ -212,8 +214,8 @@
 
 > [!TIP]
 > `Codex` 只要从当前 `workspace/` 启动，就会自动读取：
-> - [AGENTS.md](/Users/frank/Codex Hub/workspace/AGENTS.md)
-> - [MEMORY_SYSTEM.md](/Users/frank/Codex Hub/workspace/MEMORY_SYSTEM.md)
+> - [AGENTS.md](./AGENTS.md)
+> - [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)
 >
 > 这两份是运行协议，不需要用户手工复制到其他位置。
 
@@ -261,6 +263,7 @@ python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 - 生成本地 `.codex/config.toml`
 - 建立 `runtime/`、`logs/`、`reports/ops/`
 - 确保 sibling `memory/` 骨架存在
+- bootstrap `Knowledge Base` project structure and launch its intake registry
 - 执行：
   - `refresh-index`
   - `rebuild-all`
