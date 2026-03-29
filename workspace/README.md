@@ -39,6 +39,14 @@
   - 公开版记忆系统协议
 - [ops/feishu_agent.py](/Users/frank/Codex Hub/workspace/ops/feishu_agent.py)
   - Feishu 对象操作与 OAuth
+- [ops/workspace_job_schema.py](/Users/frank/Codex Hub/workspace/ops/workspace_job_schema.py)
+  - `Program Harness + Wake Loop` 的结构化 contract
+- [ops/board_job_projector.py](/Users/frank/Codex Hub/workspace/ops/board_job_projector.py)
+  - 把项目板任务投影成可长期推进的 program/job
+- [ops/background_job_executor.py](/Users/frank/Codex Hub/workspace/ops/background_job_executor.py)
+  - 长任务执行 loop、阶段推进、gate 与外发写回
+- [ops/workspace_wake_broker.py](/Users/frank/Codex Hub/workspace/ops/workspace_wake_broker.py)
+  - wake 入口、项目级唤醒与恢复调度
 - [ops/feishu_projection.py](/Users/frank/Codex Hub/workspace/ops/feishu_projection.py)
   - 只读 Bitable 投影
 - [ops/weixin_bridge.py](/Users/frank/Codex Hub/workspace/ops/weixin_bridge.py)
@@ -76,11 +84,13 @@
 - 更完整的运行协议
 - `gstack` 主链
 - second-opinion 执行器
+- `Program Harness + Wake Loop`
 
 所以公开版不只是“能启动 Codex”，而是更接近：
 
 - 用 `Codex Hub` 统一调度项目
 - 按协议读写记忆
+- 用项目级 scope 持续推进长任务，而不是只停留在单轮对话
 - 在复杂任务里走更完整的工作流
 - 在需要时给出第二意见
 
@@ -120,6 +130,30 @@
 
 如果你需要本地线程视图、上下文抽屉或服务控制面，可以打开 Electron。
 但这不是唯一入口，只是桌面工作台。
+
+### 场景 5：把复杂任务交给系统持续推进
+
+公开版现在已经包含 `Program Harness + Wake Loop`。
+对人来说，不需要手工操作 loop，而是直接给出：
+
+- 项目范围
+- 目标
+- 边界条件
+
+例如：
+
+- “只在 `TINT` 项目里推进 landing page 改版，先做到可验收。”
+- “继续整理 `Codex Hub` 的 Feishu 迁移，并把结果同步回项目文档。”
+
+系统会把它变成：
+
+- 项目级 program
+- 结构化 handoff bundle
+- 定期 wake
+- 每轮只推进一个子目标
+- 自动写回项目板、报告和远程协作入口
+
+这也是公开版现在和“普通聊天机器人”最大的区别之一。
 
 ## 依赖与官方链接
 
