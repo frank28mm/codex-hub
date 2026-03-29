@@ -261,7 +261,11 @@
 >
 > 这条路径只负责把**本地运行层**收好：
 > Python 依赖、bootstrap、后台任务和 acceptance。
-> 如果你后面还要接 Feishu，不要停在 `--install-feishu-cli`，而是继续走专门的：
+> 如果这台机器还没有 `lark-cli`，你也可以先把工具一起装上：
+>
+> `python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
+>
+> 但这一步仍然只是装工具，不会替你完成 Feishu 配置。后面还要继续走专门的：
 >
 > `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`
 

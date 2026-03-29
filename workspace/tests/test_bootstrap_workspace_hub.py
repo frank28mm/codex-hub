@@ -329,6 +329,24 @@ def test_setup_with_install_feishu_cli_only_does_not_require_full_ready(monkeypa
     assert '"ok": true' in payload.lower()
 
 
+def test_build_manual_actions_guides_future_feishu_setup(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    site = bootstrap.default_site_config()
+    payload = {
+        "commands": {"codex": True, "lark_cli": False},
+        "python_modules": {module: True for module, _package in bootstrap.PYTHON_DEPENDENCIES},
+        "apps": {"codex_desktop": True, "obsidian": True},
+        "feishu_setup": {},
+    }
+
+    actions = bootstrap.build_manual_actions(site, payload)
+
+    assert any("install-feishu-cli" in action for action in actions)
+    assert any("setup-feishu-cli --create-feishu-app" in action for action in actions)
+
+
 def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 

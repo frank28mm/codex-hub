@@ -539,7 +539,13 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
             ]
         )
     else:
-        actions.append("Enable Feishu later by setting `site.feishu_enabled: true` after local bootstrap succeeds.")
+        if not commands.get("lark_cli"):
+            actions.append(
+                "If you want Feishu later, first install the official tooling with `python3 ops/bootstrap_workspace_hub.py install-feishu-cli`."
+            )
+        actions.append(
+            "When you are ready to connect Feishu, run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` so Codex can guide app creation, credential sync, and login."
+        )
     return actions
 
 
