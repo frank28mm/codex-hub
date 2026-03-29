@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import importlib.util
 import json
 import re
 import shutil
 import subprocess
 import sys
+import webbrowser
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 try:
     import yaml
@@ -43,6 +46,8 @@ LARK_CLI_SKILLS_ROOT = Path.home() / ".agents" / "skills"
 DEFAULT_FEISHU_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
 FEISHU_BRIDGE_ENV_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.local"
 FEISHU_BRIDGE_ENV_EXAMPLE_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.example"
+FEISHU_SETUP_STATE_PATH = WORKSPACE_ROOT / "runtime" / "feishu-setup-state.json"
+FEISHU_APP_BASEINFO_URL_TEMPLATE = "https://open.feishu.cn/app/{app_id}/baseinfo"
 LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS = 45
 
 
@@ -261,6 +266,37 @@ def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
     }
 
 
+def run_interactive_command(
+    cmd: list[str],
+    cwd: Path,
+    *,
+    on_output: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    captured: list[str] = []
+    assert proc.stdout is not None
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip("\n")
+        captured.append(line)
+        if on_output is not None:
+            on_output(line)
+        print(line, flush=True)
+    proc.wait()
+    return {
+        "command": cmd,
+        "returncode": proc.returncode,
+        "stdout": "\n".join(captured).strip(),
+        "stderr": "",
+    }
+
+
 def run_command_with_timeout(cmd: list[str], cwd: Path, *, timeout_seconds: int) -> dict[str, object]:
     try:
         proc = subprocess.run(
@@ -329,6 +365,39 @@ def _parse_env_text(text: str) -> dict[str, str]:
     return values
 
 
+def _write_feishu_setup_state(payload: dict[str, object]) -> None:
+    FEISHU_SETUP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FEISHU_SETUP_STATE_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _load_feishu_setup_state() -> dict[str, object]:
+    if not FEISHU_SETUP_STATE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(FEISHU_SETUP_STATE_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_first_url(text: str) -> str:
+    match = re.search(r"(https?://[^\s\"']+)", str(text or ""))
+    return str(match.group(1)).strip() if match else ""
+
+
+def _browser_hint(url: str) -> dict[str, object]:
+    if not url:
+        return {"opened": False, "url": "", "error": "missing_url"}
+    try:
+        opened = bool(webbrowser.open(url, new=2))
+    except Exception as exc:
+        return {"opened": False, "url": url, "error": str(exc)}
+    return {"opened": opened, "url": url}
+
+
 def _upsert_env_value(text: str, key: str, value: str) -> str:
     line = f"{key}={value}"
     pattern = re.compile(rf"(?m)^{re.escape(key)}=.*$")
@@ -369,7 +438,11 @@ def _parse_created_app_credentials(*outputs: str) -> dict[str, str]:
     return values
 
 
-def _sync_feishu_bridge_credentials(config_init_result: dict[str, object] | None = None) -> dict[str, object]:
+def _sync_feishu_bridge_credentials(
+    config_init_result: dict[str, object] | None = None,
+    *,
+    app_secret_override: str = "",
+) -> dict[str, object]:
     current = _current_lark_cli_config()
     app_id = str(current.get("app_id") or "").strip()
     parsed = _parse_created_app_credentials(
@@ -384,7 +457,7 @@ def _sync_feishu_bridge_credentials(config_init_result: dict[str, object] | None
         existing_text = FEISHU_BRIDGE_ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
     existing_values = _parse_env_text(existing_text)
     existing_secret = str(existing_values.get("FEISHU_APP_SECRET") or "").strip()
-    effective_secret = existing_secret or app_secret_from_create
+    effective_secret = str(app_secret_override or existing_secret or app_secret_from_create).strip()
     rendered = existing_text
     changed = False
     if app_id and str(existing_values.get("FEISHU_APP_ID") or "").strip() != app_id:
@@ -402,9 +475,187 @@ def _sync_feishu_bridge_credentials(config_init_result: dict[str, object] | None
         "app_id": app_id,
         "app_id_synced": bool(app_id),
         "app_secret_synced": bool(effective_secret),
-        "app_secret_source": "existing_env" if existing_secret else ("config_init_output" if app_secret_from_create else ""),
+        "app_secret_source": (
+            "interactive_prompt"
+            if app_secret_override
+            else ("existing_env" if existing_secret else ("config_init_output" if app_secret_from_create else ""))
+        ),
         "bridge_credentials_ready": bool(app_id and effective_secret),
         "changed": changed or created,
+    }
+
+
+def _feishu_app_baseinfo_url(app_id: str) -> str:
+    value = str(app_id or "").strip()
+    if not value:
+        return ""
+    return FEISHU_APP_BASEINFO_URL_TEMPLATE.format(app_id=value)
+
+
+def _build_feishu_setup_summary(
+    auth_status: dict[str, object],
+    *,
+    app_id: str = "",
+    phase: str = "",
+    needs_user_action: bool | None = None,
+    user_action_kind: str = "",
+    browser_url: str = "",
+    prompt: str = "",
+) -> dict[str, object]:
+    payload = dict(auth_status)
+    resolved_app_id = str(app_id or payload.get("lark_cli", {}).get("app_id") or "").strip() if isinstance(payload.get("lark_cli"), dict) else str(app_id or "").strip()
+    object_ops_ready = bool(payload.get("object_ops_ready"))
+    coco_bridge_ready = bool(payload.get("coco_bridge_ready"))
+    full_ready = bool(payload.get("full_ready"))
+    default_phase = "ready" if full_ready else (
+        "awaiting_app_secret" if object_ops_ready and not coco_bridge_ready else (
+            "awaiting_user_authorization" if not object_ops_ready and resolved_app_id else "awaiting_app_creation"
+        )
+    )
+    resolved_phase = phase or default_phase
+    resolved_browser_url = browser_url or (
+        _feishu_app_baseinfo_url(resolved_app_id) if resolved_phase == "awaiting_app_secret" else ""
+    )
+    if needs_user_action is None:
+        needs_user_action = not full_ready
+    if not prompt:
+        if resolved_phase == "awaiting_app_secret":
+            prompt = (
+                "浏览器将打开新创建应用的基础信息页。请在页面里查看并复制 App Secret；"
+                "随后回到终端粘贴一次即可。不要反复批准 macOS Keychain 弹窗，它不是这条标准流程的一部分。"
+            )
+        elif resolved_phase == "awaiting_user_authorization":
+            prompt = "浏览器将打开飞书授权页。请登录并同意授权，脚本会在你确认后自动继续。"
+        elif resolved_phase == "awaiting_app_creation":
+            prompt = "浏览器将打开飞书应用创建/配置页。请按页面提示完成创建，然后脚本会继续后续步骤。"
+    payload.update(
+        {
+            "phase": resolved_phase,
+            "needs_user_action": bool(needs_user_action),
+            "user_action_kind": user_action_kind or (
+                "browser_copy_secret" if resolved_phase == "awaiting_app_secret" else (
+                    "browser_authorization" if resolved_phase in {"awaiting_user_authorization", "awaiting_app_creation"} else ""
+                )
+            ),
+            "browser_url": resolved_browser_url,
+            "prompt": prompt,
+            "app_id": resolved_app_id,
+        }
+    )
+    return payload
+
+
+def _run_lark_cli_config_init_guided(*, create_app: bool) -> dict[str, object]:
+    config_cmd = ["lark-cli", "config", "init"]
+    if create_app:
+        config_cmd.append("--new")
+    discovered_url = ""
+    browser_result: dict[str, object] = {"opened": False, "url": ""}
+
+    def on_output(line: str) -> None:
+        nonlocal discovered_url, browser_result
+        if discovered_url:
+            return
+        url = _extract_first_url(line)
+        if not url:
+            return
+        discovered_url = url
+        browser_result = _browser_hint(url)
+        _write_feishu_setup_state(
+            {
+                "updated_at": utc_now(),
+                "phase": "awaiting_app_creation",
+                "needs_user_action": True,
+                "user_action_kind": "browser_authorization",
+                "browser_url": url,
+                "prompt": "浏览器将打开飞书应用创建/配置页。请完成创建或确认，脚本会在你完成后继续。",
+            }
+        )
+        print("Opening the Feishu app setup page in your browser. Complete the app creation there, then return here.", flush=True)
+
+    result = run_interactive_command(config_cmd, WORKSPACE_ROOT, on_output=on_output)
+    if not discovered_url:
+        discovered_url = _extract_first_url(str(result.get("stdout") or ""))
+        if discovered_url:
+            browser_result = _browser_hint(discovered_url)
+    result["browser_url"] = discovered_url
+    result["browser"] = browser_result
+    return result
+
+
+def _prompt_for_app_secret(app_id: str) -> dict[str, object]:
+    browser_url = _feishu_app_baseinfo_url(app_id)
+    browser_result = _browser_hint(browser_url) if browser_url else {"opened": False, "url": browser_url}
+    prompt = (
+        "已创建飞书应用，但 CoCo bridge 还缺 App Secret。浏览器会打开应用基础信息页。"
+        "请在页面中查看并复制 App Secret，然后回到终端粘贴一次。不要理会或反复批准 macOS Keychain 弹窗，它不属于这条标准流程。"
+    )
+    _write_feishu_setup_state(
+        {
+            "updated_at": utc_now(),
+            "phase": "awaiting_app_secret",
+            "needs_user_action": True,
+            "user_action_kind": "browser_copy_secret",
+            "browser_url": browser_url,
+            "prompt": prompt,
+            "app_id": app_id,
+        }
+    )
+    print(prompt, flush=True)
+    if not sys.stdin.isatty():
+        return {
+            "provided": False,
+            "skipped": True,
+            "browser_url": browser_url,
+            "browser": browser_result,
+            "prompt": prompt,
+            "reason": "stdin_not_tty",
+        }
+    secret = getpass.getpass("Paste the App Secret (input hidden): ").strip()
+    return {
+        "provided": bool(secret),
+        "skipped": not bool(secret),
+        "browser_url": browser_url,
+        "browser": browser_result,
+        "prompt": prompt,
+        "app_secret": secret,
+        "reason": "" if secret else "empty_secret",
+    }
+
+
+def _run_lark_cli_auth_login_guided() -> dict[str, object]:
+    start = run_command(
+        ["lark-cli", "auth", "login", "--recommend", "--no-wait", "--json"],
+        WORKSPACE_ROOT,
+    )
+    payload = _extract_json_blob(str(start.get("stdout") or ""))
+    verification_url = str(payload.get("verification_url") or "").strip()
+    device_code = str(payload.get("device_code") or "").strip()
+    browser_result = _browser_hint(verification_url) if verification_url else {"opened": False, "url": verification_url}
+    prompt = "浏览器将打开飞书授权页。请登录并同意授权，脚本会在你确认后自动继续完成登录。"
+    _write_feishu_setup_state(
+        {
+            "updated_at": utc_now(),
+            "phase": "awaiting_user_authorization",
+            "needs_user_action": True,
+            "user_action_kind": "browser_authorization",
+            "browser_url": verification_url,
+            "prompt": prompt,
+            "device_code_expires_in": payload.get("expires_in"),
+        }
+    )
+    if verification_url:
+        print(prompt, flush=True)
+    if not device_code:
+        start["verification_url"] = verification_url
+        start["browser"] = browser_result
+        return {"start": start, "complete": {"skipped": True}, "verification_url": verification_url, "browser": browser_result}
+    complete = run_command(["lark-cli", "auth", "login", "--device-code", device_code], WORKSPACE_ROOT)
+    return {
+        "start": start,
+        "complete": complete,
+        "verification_url": verification_url,
+        "browser": browser_result,
     }
 
 
@@ -444,7 +695,7 @@ def _infer_local_ready(site: SiteConfig, payload: dict[str, object] | None = Non
 def _refresh_bootstrap_status(site: SiteConfig, payload: dict[str, object]) -> dict[str, object]:
     refreshed = dict(payload)
     dynamic = bootstrap_status_payload(site)
-    for key in ("commands", "python_modules", "apps", "files", "feishu_cli", "feishu_setup"):
+    for key in ("commands", "python_modules", "apps", "files", "feishu_cli", "feishu_setup", "feishu_guide"):
         refreshed[key] = dynamic.get(key, refreshed.get(key))
     refreshed["manual_actions"] = build_manual_actions(site, refreshed)
     refreshed["checked_at"] = utc_now()
@@ -491,6 +742,11 @@ def _launchagent_results_ready(results: dict[str, object]) -> bool:
 def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
     feishu_cli_status = _current_lark_cli_config()
     feishu_auth_status = _run_feishu_auth_status() if site.feishu_enabled and command_available("python3") else {"status": {}}
+    feishu_guide = _load_feishu_setup_state()
+    current_app_id = str(feishu_cli_status.get("app_id") or "").strip()
+    guide_app_id = str(feishu_guide.get("app_id") or "").strip()
+    if (not site.feishu_enabled) or (guide_app_id and current_app_id and guide_app_id != current_app_id):
+        feishu_guide = {}
     return {
         "generated_at": utc_now(),
         "product_name": site.product_name,
@@ -542,6 +798,7 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "brand": str(feishu_cli_status.get("brand") or ""),
         },
         "feishu_setup": (feishu_auth_status or {}).get("status") or {},
+        "feishu_guide": feishu_guide,
     }
 
 
@@ -565,17 +822,26 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
         actions.append("Optional but strongly recommended: install Obsidian for full Vault browsing and `obsidian://` deep-link support.")
     if site.feishu_enabled:
         feishu_setup = payload.get("feishu_setup") if isinstance(payload.get("feishu_setup"), dict) else {}
+        feishu_guide = payload.get("feishu_guide") if isinstance(payload.get("feishu_guide"), dict) else {}
         actions.append("Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.")
         if not feishu_setup.get("full_ready"):
             actions.append(
                 "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, sync bridge credentials, and complete login."
             )
+        if feishu_guide.get("needs_user_action"):
+            prompt = str(feishu_guide.get("prompt") or "").strip()
+            browser_url = str(feishu_guide.get("browser_url") or "").strip()
+            if prompt:
+                actions.append(prompt)
+            if browser_url:
+                actions.append(f"Open the browser page shown by bootstrap: {browser_url}")
         if feishu_setup.get("object_ops_ready") and not feishu_setup.get("coco_bridge_ready"):
             actions.append(
-                "Feishu object operations are ready, but CoCo bridge credentials are still incomplete. Finish the bridge app secret sync before enabling the live Feishu bridge."
+                "Feishu object operations are ready, but CoCo bridge credentials are still incomplete. Open the app baseinfo page, copy the App Secret once, and rerun `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli`."
             )
         elif not feishu_setup.get("object_ops_ready"):
             actions.append("Complete the Feishu login flow until `object_ops_ready=true`.")
+        actions.append("Ignore repeated macOS Keychain popups during Feishu onboarding. They are not part of the standard public setup flow.")
         actions.extend(
             [
                 "Ensure your CoCo Feishu app scopes are approved and published.",
@@ -669,7 +935,8 @@ def setup_feishu_cli(
         "install": {"skipped": True},
         "config_init": {"skipped": True},
         "credentials_sync": {"skipped": True},
-        "auth_login": {"skipped": not login_user},
+        "app_secret_prompt": {"skipped": True},
+        "auth_login": {"skipped": True},
         "auth_status": {"skipped": True},
         "doctor": {"skipped": True},
     }
@@ -679,27 +946,77 @@ def setup_feishu_cli(
         if isinstance(cli_result, dict) and int(cli_result.get("returncode") or 0) != 0:
             return results
     if create_app or not LARK_CLI_CONFIG_PATH.exists():
-        config_cmd = ["lark-cli", "config", "init"]
-        if create_app:
-            config_cmd.append("--new")
-        results["config_init"] = run_command(config_cmd, WORKSPACE_ROOT)
+        results["config_init"] = _run_lark_cli_config_init_guided(create_app=create_app)
         if int(results["config_init"].get("returncode") or 0) != 0:
+            status = _run_feishu_auth_status()
+            results["auth_status"] = status
+            summary = _build_feishu_setup_summary(
+                status.get("status") if isinstance(status.get("status"), dict) else {},
+                phase="awaiting_app_creation",
+                needs_user_action=True,
+                user_action_kind="browser_authorization",
+                browser_url=str(results["config_init"].get("browser_url") or ""),
+                prompt="浏览器已打开飞书应用创建页。请完成创建后重新运行 `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`。",
+            )
+            results["summary"] = summary
+            _write_feishu_setup_state({"updated_at": utc_now(), **summary})
             return results
     results["credentials_sync"] = _sync_feishu_bridge_credentials(
         results["config_init"] if isinstance(results.get("config_init"), dict) else None
     )
+    if not results["credentials_sync"].get("bridge_credentials_ready"):
+        app_id = str(results["credentials_sync"].get("app_id") or "").strip()
+        results["app_secret_prompt"] = _prompt_for_app_secret(app_id)
+        if results["app_secret_prompt"].get("provided"):
+            results["credentials_sync"] = _sync_feishu_bridge_credentials(
+                results["config_init"] if isinstance(results.get("config_init"), dict) else None,
+                app_secret_override=str(results["app_secret_prompt"].get("app_secret") or "").strip(),
+            )
+    if not results["credentials_sync"].get("bridge_credentials_ready"):
+        results["auth_status"] = _run_feishu_auth_status()
+        status_payload = results["auth_status"].get("status") if isinstance(results["auth_status"], dict) else {}
+        summary = _build_feishu_setup_summary(
+            status_payload if isinstance(status_payload, dict) else {},
+            app_id=str(results["credentials_sync"].get("app_id") or ""),
+            phase="awaiting_app_secret",
+            needs_user_action=True,
+            user_action_kind="browser_copy_secret",
+            browser_url=str(results["app_secret_prompt"].get("browser_url") or _feishu_app_baseinfo_url(str(results["credentials_sync"].get("app_id") or ""))),
+            prompt=str(results["app_secret_prompt"].get("prompt") or ""),
+        )
+        results["summary"] = summary
+        _write_feishu_setup_state({"updated_at": utc_now(), **summary})
+        return results
     if login_user:
-        auth_cmd = [sys.executable, "ops/feishu_agent.py", "auth", "login"]
-        results["auth_login"] = run_command(auth_cmd, WORKSPACE_ROOT)
-        if int(results["auth_login"].get("returncode") or 0) != 0:
+        results["auth_login"] = _run_lark_cli_auth_login_guided()
+        auth_complete = results["auth_login"].get("complete") if isinstance(results["auth_login"], dict) else {}
+        if isinstance(auth_complete, dict) and int(auth_complete.get("returncode") or 0) != 0:
             results["auth_status"] = _run_feishu_auth_status()
+            status_payload = results["auth_status"].get("status") if isinstance(results["auth_status"], dict) else {}
+            summary = _build_feishu_setup_summary(
+                status_payload if isinstance(status_payload, dict) else {},
+                app_id=str(results["credentials_sync"].get("app_id") or ""),
+                phase="awaiting_user_authorization",
+                needs_user_action=True,
+                user_action_kind="browser_authorization",
+                browser_url=str(results["auth_login"].get("verification_url") or ""),
+                prompt="浏览器已打开飞书授权页。请完成授权后重新运行 `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli`。",
+            )
+            results["summary"] = summary
+            _write_feishu_setup_state({"updated_at": utc_now(), **summary})
             return results
+    else:
+        results["auth_login"] = {"skipped": True, "reason": "skip_login_requested"}
     results["auth_status"] = _run_feishu_auth_status()
     if run_doctor:
         results["doctor"] = run_command(["lark-cli", "doctor"], WORKSPACE_ROOT)
     status = results.get("auth_status")
     auth_payload = status.get("status") if isinstance(status, dict) else {}
-    results["summary"] = auth_payload if isinstance(auth_payload, dict) else {}
+    results["summary"] = _build_feishu_setup_summary(
+        auth_payload if isinstance(auth_payload, dict) else {},
+        app_id=str(results["credentials_sync"].get("app_id") or ""),
+    )
+    _write_feishu_setup_state({"updated_at": utc_now(), **results["summary"]})
     return results
 
 
@@ -715,7 +1032,7 @@ def install_feishu_cli_only(*, install_skills: bool) -> dict[str, object]:
     status = _run_feishu_auth_status()
     results["auth_status"] = status
     auth_payload = status.get("status") if isinstance(status, dict) else {}
-    results["summary"] = auth_payload if isinstance(auth_payload, dict) else {}
+    results["summary"] = _build_feishu_setup_summary(auth_payload if isinstance(auth_payload, dict) else {})
     return results
 
 
@@ -943,6 +1260,11 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
     status_payload["setup_phase"] = "feishu_setup_complete"
     status_payload["feishu_cli"] = payload.get("install") if isinstance(payload.get("install"), dict) else status_payload.get("feishu_cli", {})
     status_payload["feishu_setup"] = summary if isinstance(summary, dict) else {}
+    status_payload["feishu_guide"] = {
+        key: summary.get(key)
+        for key in ("phase", "needs_user_action", "user_action_kind", "browser_url", "prompt", "app_id")
+        if isinstance(summary, dict) and summary.get(key) not in (None, "")
+    }
     status_payload["feishu_ready"] = bool(isinstance(summary, dict) and summary.get("full_ready"))
     status_payload["manual_actions"] = build_manual_actions(site, status_payload)
     _write_bootstrap_status(status_payload)
@@ -959,7 +1281,7 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
             if isinstance(result, dict) and not result.get("skipped"):
                 if int(result.get("returncode") or 0) != 0:
                     return 1
-    if isinstance(summary, dict) and not summary.get("full_ready"):
+    if isinstance(summary, dict) and not summary.get("full_ready") and not summary.get("needs_user_action"):
         return 1
     return 0
 

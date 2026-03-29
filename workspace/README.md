@@ -432,12 +432,27 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 
 - 安装官方 `lark-cli`
 - 安装官方 `lark-*` skills
-- 拉起 Feishu 应用创建/配置
+- 拉起 Feishu 应用创建/配置，并自动打开浏览器页面
 - 自动把 [control/site.yaml](./control/site.yaml) 切到 `feishu_enabled: true`
 - 自动同步公开版运行时需要的 `app_id`
-- 自动执行公开版统一的 Feishu 登录链
+- 如果还缺 `App Secret`，自动打开应用基础信息页，并明确提示你只复制一次 `App Secret`
+- 自动拉起官方 Feishu 授权页，并在你同意后继续完成登录
 - 最后输出当前 `object_ops_ready / coco_bridge_ready / full_ready` 状态
 - 公开版不再把系统钥匙串验证当成默认登录前置步骤
+
+这里的推荐节奏是：
+
+1. 浏览器打开**应用创建/配置页**时，先完成 App 创建
+2. 如果终端提示还缺 `App Secret`，浏览器会继续打开**应用基础信息页**
+3. 只在那一步把 `App Secret` 复制一次，回到终端粘贴
+4. 之后浏览器会自动打开**飞书授权页**
+5. 你在浏览器里同意授权，脚本继续完成登录
+
+也就是说，公开版现在的标准流程是 **browser-first**：
+
+- 不需要靠反复点 macOS Keychain 弹窗来“碰运气”
+- 如果看见系统钥匙串弹窗，不要把它当成公开版 Feishu 安装成功的前置条件
+- 以终端里打印出来的 `phase / prompt / browser_url` 为准
 
 2. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
 3. 填入你的：
@@ -457,6 +472,8 @@ python3 ops/feishu_agent.py auth status
 - `object_ops_ready=true`：官方 CLI 对象能力已经可用
 - `coco_bridge_ready=true`：`CoCo` bridge 凭据也已经齐
 - `full_ready=true`：Feishu 完整可用
+- `phase=awaiting_app_secret`：App 已创建，但还差一次 `App Secret` 同步
+- `phase=awaiting_user_authorization`：浏览器授权页还没完成确认
 
 也就是说，只有 `full_ready=true` 才算这条 Feishu 接入真正做完。
 

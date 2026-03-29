@@ -46,6 +46,7 @@ DEFAULT_OAUTH_REDIRECT_URI = "http://127.0.0.1:14589/feishu-auth/callback"
 DEFAULT_OAUTH_PORT = 14589
 DEFAULT_OAUTH_PATH = "/feishu-auth/callback"
 DEFAULT_TOKEN_STORE_NAME = "feishu_user_token.json"
+DEFAULT_SETUP_STATE_NAME = "feishu-setup-state.json"
 DEFAULT_LAUNCH_AGENT_NAME = "com.codexhub.coco-feishu-bridge.plist"
 DEFAULT_LARK_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
 DEFAULT_LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
@@ -96,6 +97,14 @@ def default_user_token_store_path(env: dict[str, str] | None = None) -> Path:
     if explicit:
         return Path(explicit)
     return _runtime_root(source) / DEFAULT_TOKEN_STORE_NAME
+
+
+def default_setup_state_path(env: dict[str, str] | None = None) -> Path:
+    source = env or os.environ
+    explicit = str(source.get("WORKSPACE_HUB_FEISHU_SETUP_STATE_PATH", "")).strip()
+    if explicit:
+        return Path(explicit)
+    return _runtime_root(source) / DEFAULT_SETUP_STATE_NAME
 
 
 def _parse_env_file(text: str) -> dict[str, str]:
@@ -376,6 +385,7 @@ class FeishuAgent:
         suffix = (self.app_id or "default")[-8:]
         self._cache_path = Path(tempfile.gettempdir()) / f".codex_hub_feishu_tok_{suffix}.json"
         self._user_token_store_path = default_user_token_store_path(self.env)
+        self._setup_state_path = default_setup_state_path(self.env)
         self._ssl_context = _build_ssl_context()
         self._calendar_cache: list[dict[str, Any]] | None = None
 
@@ -462,6 +472,15 @@ class FeishuAgent:
             message = str(proc.stderr or proc.stdout or "lark_cli_auth_login_failed").strip()
             raise FeishuAgentError(message, code="lark_cli_auth_login_failed")
         return self._lark_cli_auth_status()
+
+    def _load_setup_state(self) -> dict[str, Any]:
+        if not self._setup_state_path.exists():
+            return {}
+        try:
+            payload = json.loads(self._setup_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     # ---- core transport ----
 
@@ -1715,6 +1734,7 @@ class FeishuAgent:
         auth_method = str(store.get("auth_method") or "").strip()
         lark_cli_config = self._lark_cli_config_status()
         lark_cli_auth = self._lark_cli_auth_status()
+        setup_state = self._load_setup_state()
         lark_cli_user_logged_in = bool(
             lark_cli_config.get("configured")
             and lark_cli_auth.get("logged_in")
@@ -1723,13 +1743,41 @@ class FeishuAgent:
         effective_user_auth_ready = bool(access_token or lark_cli_user_logged_in)
         bridge_credentials_ready = bool(self.app_id and self.app_secret)
         object_ops_ready = bool(lark_cli_config.get("configured") and effective_user_auth_ready)
+        app_id = str(self.app_id or lark_cli_config.get("app_id") or "").strip()
+        if str(setup_state.get("app_id") or "").strip() and app_id and str(setup_state.get("app_id") or "").strip() != app_id:
+            setup_state = {}
+        browser_url = str(setup_state.get("browser_url") or "").strip()
+        prompt = str(setup_state.get("prompt") or "").strip()
+        phase = str(setup_state.get("phase") or "").strip()
+        user_action_kind = str(setup_state.get("user_action_kind") or "").strip()
         next_steps: list[str] = []
         if not lark_cli_config.get("configured"):
             next_steps.append("Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`.")
         elif not effective_user_auth_ready:
             next_steps.append("Complete the Feishu user login flow until `object_ops_ready=true`.")
         if object_ops_ready and not bridge_credentials_ready:
-            next_steps.append("Sync `FEISHU_APP_SECRET` into `ops/feishu_bridge.env.local` and rerun setup.")
+            next_steps.append("Open the app baseinfo page, copy the App Secret once, and rerun `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli`.")
+        if not phase:
+            if object_ops_ready and not bridge_credentials_ready:
+                phase = "awaiting_app_secret"
+            elif not object_ops_ready and lark_cli_config.get("configured"):
+                phase = "awaiting_user_authorization"
+            elif not lark_cli_config.get("configured"):
+                phase = "awaiting_app_creation"
+            else:
+                phase = "ready"
+        if not browser_url and phase == "awaiting_app_secret" and app_id:
+            browser_url = f"https://open.feishu.cn/app/{app_id}/baseinfo"
+        if not prompt:
+            if phase == "awaiting_app_secret":
+                prompt = (
+                    "请打开应用基础信息页，查看并复制 App Secret，然后重新运行 `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli`。"
+                    "不要反复批准 macOS Keychain 弹窗，它不是公开版标准流程的一部分。"
+                )
+            elif phase == "awaiting_user_authorization":
+                prompt = "请完成浏览器中的飞书授权页，完成后重新运行 `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli` 或查看状态。"
+            elif phase == "awaiting_app_creation":
+                prompt = "请运行 `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` 创建并配置飞书应用。"
         return {
             "configured": bridge_credentials_ready,
             "bridge_credentials_ready": bridge_credentials_ready,
@@ -1749,6 +1797,16 @@ class FeishuAgent:
             "object_ops_ready": object_ops_ready,
             "coco_bridge_ready": bridge_credentials_ready,
             "full_ready": bool(object_ops_ready and bridge_credentials_ready),
+            "phase": phase,
+            "needs_user_action": not bool(object_ops_ready and bridge_credentials_ready),
+            "user_action_kind": user_action_kind or (
+                "browser_copy_secret"
+                if phase == "awaiting_app_secret"
+                else ("browser_authorization" if phase in {"awaiting_user_authorization", "awaiting_app_creation"} else "")
+            ),
+            "browser_url": browser_url,
+            "prompt": prompt,
+            "app_id": app_id,
             "next_steps": next_steps,
         }
 
