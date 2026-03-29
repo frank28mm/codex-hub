@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +41,7 @@ LARK_CLI_SKILLS_ROOT = Path.home() / ".agents" / "skills"
 DEFAULT_FEISHU_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
 FEISHU_BRIDGE_ENV_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.local"
 FEISHU_BRIDGE_ENV_EXAMPLE_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.example"
+LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS = 45
 
 
 @dataclass
@@ -218,6 +219,37 @@ def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
     }
 
 
+def run_command_with_timeout(cmd: list[str], cwd: Path, *, timeout_seconds: int) -> dict[str, object]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = str(exc.stdout or "").strip()
+        stderr = str(exc.stderr or "").strip()
+        message = stderr or stdout or f"timed out after {timeout_seconds}s"
+        return {
+            "command": cmd,
+            "returncode": 124,
+            "stdout": stdout,
+            "stderr": message,
+            "timed_out": True,
+            "timeout_seconds": timeout_seconds,
+        }
+    return {
+        "command": cmd,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+        "timeout_seconds": timeout_seconds,
+    }
+
+
 def result_failed(result: object) -> bool:
     if not isinstance(result, dict):
         return False
@@ -341,6 +373,79 @@ def _run_feishu_auth_status() -> dict[str, object]:
     return result
 
 
+def _write_bootstrap_status(payload: dict[str, object]) -> None:
+    BOOTSTRAP_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BOOTSTRAP_STATUS_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _infer_local_ready(site: SiteConfig, payload: dict[str, object] | None = None) -> bool:
+    candidate = payload or {}
+    explicit = candidate.get("local_ready")
+    phase = str(candidate.get("setup_phase") or "").strip()
+    if explicit is not None and (bool(explicit) or phase):
+        return bool(explicit)
+    required = [
+        CODEX_CONFIG_PATH,
+        site.workspace_root / "runtime",
+        site.workspace_root / "logs",
+        site.workspace_root / "reports",
+        site.memory_root / "PROJECT_REGISTRY.md",
+        site.memory_root / "ACTIVE_PROJECTS.md",
+        site.memory_root / "NEXT_ACTIONS.md",
+    ]
+    return all(path.exists() for path in required)
+
+
+def _refresh_bootstrap_status(site: SiteConfig, payload: dict[str, object]) -> dict[str, object]:
+    refreshed = dict(payload)
+    dynamic = bootstrap_status_payload(site)
+    for key in ("commands", "python_modules", "apps", "files", "feishu_cli", "feishu_setup"):
+        refreshed[key] = dynamic.get(key, refreshed.get(key))
+    refreshed["manual_actions"] = build_manual_actions(site, refreshed)
+    refreshed["checked_at"] = utc_now()
+    refreshed["local_ready"] = _infer_local_ready(site, refreshed)
+    refreshed["feishu_ready"] = bool(
+        isinstance(refreshed.get("feishu_setup"), dict) and refreshed["feishu_setup"].get("full_ready")
+    )
+    if not refreshed.get("setup_phase") and refreshed["local_ready"]:
+        refreshed["setup_phase"] = "complete"
+    return refreshed
+
+
+def _ensure_site_feishu_enabled() -> dict[str, object]:
+    if not SITE_CONFIG_PATH.exists():
+        return {"changed": False, "feishu_enabled": False, "path": str(SITE_CONFIG_PATH), "reason": "site_config_missing"}
+    text = SITE_CONFIG_PATH.read_text(encoding="utf-8")
+    if "feishu_enabled: true" in text:
+        return {"changed": False, "feishu_enabled": True, "path": str(SITE_CONFIG_PATH)}
+    if yaml is not None:
+        payload = yaml.safe_load(text) or {}
+        site = payload.get("site") or {}
+        site["feishu_enabled"] = True
+        payload["site"] = site
+        SITE_CONFIG_PATH.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        return {"changed": True, "feishu_enabled": True, "path": str(SITE_CONFIG_PATH)}
+    updated = re.sub(r"(?m)^(\s*feishu_enabled:\s*)false\s*$", r"\1true", text, count=1)
+    if updated == text:
+        updated = text.rstrip("\n") + "\n  feishu_enabled: true\n"
+    SITE_CONFIG_PATH.write_text(updated, encoding="utf-8")
+    return {"changed": True, "feishu_enabled": True, "path": str(SITE_CONFIG_PATH)}
+
+
+def _launchagent_results_ready(results: dict[str, object]) -> bool:
+    if not isinstance(results, dict):
+        return False
+    for item in results.values():
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("returncode") or 0) != 0:
+            return False
+    return True
+
+
 def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
     feishu_cli_status = _current_lark_cli_config()
     feishu_auth_status = _run_feishu_auth_status() if site.feishu_enabled and command_available("python3") else {"status": {}}
@@ -375,6 +480,9 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "lark_cli_config": LARK_CLI_CONFIG_PATH.exists(),
         },
         "manual_actions": [],
+        "local_ready": False,
+        "feishu_ready": False,
+        "setup_phase": "pending",
         "sync_results": {},
         "launchagents": {
             "installed": False,
@@ -549,28 +657,33 @@ def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, obj
     if not install:
         return {"installed": False, "skipped": True}
     results = {
-        "watcher": run_command(
+        "watcher": run_command_with_timeout(
             ["python3", "ops/codex_session_watcher.py", "install-launchagent", "--poll-interval", "300"],
             site.workspace_root,
+            timeout_seconds=LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS,
         ),
-        "dashboard_sync": run_command(
+        "dashboard_sync": run_command_with_timeout(
             ["python3", "ops/codex_dashboard_sync.py", "install-launchagent", "--interval", "900"],
             site.workspace_root,
+            timeout_seconds=LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS,
         ),
-        "health_check": run_command(
+        "health_check": run_command_with_timeout(
             ["python3", "ops/workspace_hub_health_check.py", "install-launchagent", "--interval", "14400"],
             site.workspace_root,
+            timeout_seconds=LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS,
         ),
-        "feishu_projection": run_command(
+        "feishu_projection": run_command_with_timeout(
             ["python3", "ops/feishu_projection.py", "install-launchagent", "--interval", "900"],
             site.workspace_root,
+            timeout_seconds=LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS,
         ),
-        "knowledge_intake": run_command(
+        "knowledge_intake": run_command_with_timeout(
             ["python3", "ops/knowledge_intake.py", "install-launchagent", "--hour", "4", "--minute", "0"],
             site.workspace_root,
+            timeout_seconds=LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS,
         ),
     }
-    return {"installed": True, "results": results}
+    return {"installed": _launchagent_results_ready(results), "results": results}
 
 
 def maybe_install_feishu_bridge(site: SiteConfig, install: bool) -> dict[str, object]:
@@ -594,28 +707,48 @@ def maybe_install_feishu_bridge(site: SiteConfig, install: bool) -> dict[str, ob
 
 
 def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object]:
+    feishu_requested = bool(getattr(args, "setup_feishu_cli", False) or getattr(args, "create_feishu_app", False))
+    if feishu_requested:
+        site_update = _ensure_site_feishu_enabled()
+        if site_update.get("feishu_enabled"):
+            site = replace(site, feishu_enabled=True)
+    else:
+        site_update = {"changed": False, "feishu_enabled": site.feishu_enabled, "path": str(SITE_CONFIG_PATH)}
     ensure_dirs(required_workspace_dirs(site.workspace_root))
     ensure_dirs(required_memory_dirs(site.memory_root))
     write_codex_config(site)
 
     payload = bootstrap_status_payload(site)
+    payload["site_updates"] = {"feishu_enabled": site_update}
+    payload["setup_phase"] = "initializing"
+    _write_bootstrap_status(payload)
     payload["knowledge_base"] = maybe_bootstrap_knowledge_base(site)
+    payload["setup_phase"] = "knowledge_bootstrap_complete"
+    _write_bootstrap_status(payload)
     payload["sync_results"] = maybe_sync(site, skip_sync=args.skip_sync)
+    payload["local_ready"] = True
+    payload["setup_phase"] = "local_runtime_ready"
+    _write_bootstrap_status(payload)
     payload["launchagents"] = maybe_install_launchagents(site, install=args.install_launchagents)
+    payload["setup_phase"] = "launchagent_install_complete"
+    _write_bootstrap_status(payload)
     payload["feishu_cli"] = setup_feishu_cli(
         create_app=getattr(args, "create_feishu_app", False),
         install=getattr(args, "install_feishu_cli", False) or getattr(args, "setup_feishu_cli", False),
         install_skills=True,
         login_user=getattr(args, "setup_feishu_cli", False),
     )
-    payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)
-    payload["manual_actions"] = build_manual_actions(site, payload)
-
-    BOOTSTRAP_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    BOOTSTRAP_STATUS_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    payload["feishu_ready"] = bool(
+        isinstance(payload.get("feishu_cli"), dict)
+        and isinstance(payload["feishu_cli"].get("summary"), dict)
+        and payload["feishu_cli"]["summary"].get("full_ready")
     )
+    payload["setup_phase"] = "feishu_setup_complete" if feishu_requested else "local_runtime_ready"
+    _write_bootstrap_status(payload)
+    payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)
+    payload["setup_phase"] = "complete"
+    payload["manual_actions"] = build_manual_actions(site, payload)
+    _write_bootstrap_status(payload)
     return payload
 
 
@@ -680,6 +813,8 @@ def cmd_status(_: argparse.Namespace) -> int:
     site = load_site_config()
     if BOOTSTRAP_STATUS_PATH.exists():
         payload = json.loads(BOOTSTRAP_STATUS_PATH.read_text(encoding="utf-8"))
+        payload = _refresh_bootstrap_status(site, payload)
+        _write_bootstrap_status(payload)
     else:
         payload = bootstrap_status_payload(site)
         payload["manual_actions"] = build_manual_actions(site, payload)
@@ -696,6 +831,7 @@ def cmd_install_feishu_cli(args: argparse.Namespace) -> int:
 
 
 def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
+    site_update = _ensure_site_feishu_enabled()
     payload = setup_feishu_cli(
         create_app=args.create_feishu_app,
         install=not args.skip_install,
@@ -703,6 +839,23 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
         login_user=not bool(getattr(args, "skip_login", False)),
         run_doctor=bool(getattr(args, "run_lark_cli_doctor", False)),
     )
+    site = load_site_config()
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    status_payload = bootstrap_status_payload(site)
+    status_payload["site_updates"] = {"feishu_enabled": site_update}
+    existing_payload = {}
+    if BOOTSTRAP_STATUS_PATH.exists():
+        try:
+            existing_payload = json.loads(BOOTSTRAP_STATUS_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_payload = {}
+    status_payload["local_ready"] = _infer_local_ready(site, existing_payload if isinstance(existing_payload, dict) else {})
+    status_payload["setup_phase"] = "feishu_setup_complete"
+    status_payload["feishu_cli"] = payload.get("install") if isinstance(payload.get("install"), dict) else status_payload.get("feishu_cli", {})
+    status_payload["feishu_setup"] = summary if isinstance(summary, dict) else {}
+    status_payload["feishu_ready"] = bool(isinstance(summary, dict) and summary.get("full_ready"))
+    status_payload["manual_actions"] = build_manual_actions(site, status_payload)
+    _write_bootstrap_status(status_payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     for key in ("config_init", "credentials_sync", "auth_login", "doctor"):
         result = payload.get(key)
@@ -716,7 +869,6 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
             if isinstance(result, dict) and not result.get("skipped"):
                 if int(result.get("returncode") or 0) != 0:
                     return 1
-    summary = payload.get("summary")
     if isinstance(summary, dict) and not summary.get("full_ready"):
         return 1
     return 0

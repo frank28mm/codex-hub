@@ -183,6 +183,24 @@ def read_feishu_auth_status(workspace_root: Path) -> dict[str, object]:
     }
 
 
+def infer_bootstrap_local_ready(workspace_root: Path, memory_root: Path, payload: dict[str, object] | None = None) -> bool:
+    candidate = payload or {}
+    explicit = candidate.get("local_ready")
+    phase = str(candidate.get("setup_phase") or "").strip()
+    if explicit is not None and (bool(explicit) or phase):
+        return bool(explicit)
+    required = [
+        workspace_root / ".codex" / "config.toml",
+        workspace_root / "runtime",
+        workspace_root / "logs",
+        workspace_root / "reports",
+        memory_root / "PROJECT_REGISTRY.md",
+        memory_root / "ACTIVE_PROJECTS.md",
+        memory_root / "NEXT_ACTIONS.md",
+    ]
+    return all(path.exists() for path in required)
+
+
 def write_report(results: dict[str, object]) -> None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -215,6 +233,9 @@ def write_report(results: dict[str, object]) -> None:
     lines.extend(["", "## Bootstrap 状态", ""])
     bootstrap_ok = results["bootstrap_status_exists"]
     lines.append(f"- {'OK' if bootstrap_ok else 'FAIL'} bootstrap 状态文件：`{BOOTSTRAP_STATUS_PATH}`")
+    lines.append(
+        f"- {'OK' if results.get('bootstrap_local_ready') else 'FAIL'} 本地初始化完成：local_ready=`{results.get('bootstrap_local_ready')}` phase=`{results.get('bootstrap_phase')}`"
+    )
     if results.get("feishu_enabled"):
         lines.extend(["", "## Feishu CLI 状态", ""])
         lines.append(
@@ -246,12 +267,24 @@ def cmd_run(_: argparse.Namespace) -> int:
     feishu_auth_status = read_feishu_auth_status(workspace_root) if feishu_enabled else {"status": {}}
     feishu_status = feishu_auth_status.get("status") if isinstance(feishu_auth_status, dict) else {}
     feishu_full_ready = bool(isinstance(feishu_status, dict) and feishu_status.get("full_ready"))
+    bootstrap_status = {}
+    bootstrap_local_ready = False
+    bootstrap_phase = ""
+    if BOOTSTRAP_STATUS_PATH.exists():
+        try:
+            bootstrap_status = json.loads(BOOTSTRAP_STATUS_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            bootstrap_status = {}
+        if isinstance(bootstrap_status, dict):
+            bootstrap_local_ready = infer_bootstrap_local_ready(workspace_root, memory_root, bootstrap_status)
+            bootstrap_phase = str(bootstrap_status.get("setup_phase") or "")
     passed = (
         all(ok for _, ok, _ in path_checks)
         and all(ok for _, ok, _ in command_checks)
         and all(ok for _, ok, _ in python_module_checks)
         and not forbidden_hits
         and BOOTSTRAP_STATUS_PATH.exists()
+        and bootstrap_local_ready
         and (not feishu_enabled or (lark_cli_config_path.exists() and feishu_full_ready))
     )
     results = {
@@ -264,6 +297,8 @@ def cmd_run(_: argparse.Namespace) -> int:
         "python_module_checks": python_module_checks,
         "forbidden_hits": forbidden_hits,
         "bootstrap_status_exists": BOOTSTRAP_STATUS_PATH.exists(),
+        "bootstrap_local_ready": bootstrap_local_ready,
+        "bootstrap_phase": bootstrap_phase,
         "lark_cli_config_path": str(lark_cli_config_path),
         "lark_cli_configured": lark_cli_config_path.exists(),
         "feishu_auth_status": feishu_auth_status,
