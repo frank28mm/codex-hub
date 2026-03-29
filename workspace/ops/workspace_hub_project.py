@@ -10,8 +10,9 @@ PROJECT_ALIASES = (
     "Codex Obsidian记忆与行动系统",
 )
 DEFAULT_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MEMORY_TEMPLATE_ROOT = (DEFAULT_WORKSPACE_ROOT.parent / "memory").resolve()
 DEFAULT_LOCAL_VAULT_ROOT = Path(
-    os.environ.get("WORKSPACE_HUB_VAULT_ROOT", str(DEFAULT_WORKSPACE_ROOT.parent / "memory"))
+    os.environ.get("WORKSPACE_HUB_VAULT_ROOT", str(DEFAULT_WORKSPACE_ROOT.parent / "memory.local"))
 ).resolve()
 LEGACY_ICLOUD_VAULT_ROOT = DEFAULT_LOCAL_VAULT_ROOT
 

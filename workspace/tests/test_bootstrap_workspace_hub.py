@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 from pathlib import Path
 
 
@@ -49,6 +50,40 @@ def test_maybe_install_launchagents_uses_poll_interval_for_watcher(monkeypatch) 
     assert observed[0][:4] == ["python3", "ops/codex_session_watcher.py", "install-launchagent", "--poll-interval"]
     assert observed[0][4] == "300"
     assert observed[-1][:3] == ["python3", "ops/knowledge_intake.py", "install-launchagent"]
+
+
+def test_default_site_config_uses_generated_memory_root(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setattr(bootstrap, "WORKSPACE_ROOT", workspace_root)
+    monkeypatch.setattr(bootstrap, "DEFAULT_MEMORY_ROOT", (workspace_root.parent / "memory.local").resolve())
+
+    site = bootstrap.default_site_config()
+
+    assert site.memory_root == (workspace_root.parent / "memory.local").resolve()
+
+
+def test_seed_memory_template_copies_template_files_without_overwriting(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    template_root = tmp_path / "memory"
+    runtime_root = tmp_path / "memory.local"
+    (template_root / "01_working").mkdir(parents=True)
+    (template_root / "PROJECT_REGISTRY.md").write_text("template registry\n", encoding="utf-8")
+    (template_root / "01_working" / "NOW.md").write_text("template now\n", encoding="utf-8")
+    (runtime_root / "PROJECT_REGISTRY.md").parent.mkdir(parents=True, exist_ok=True)
+    (runtime_root / "PROJECT_REGISTRY.md").write_text("runtime registry\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "MEMORY_TEMPLATE_ROOT", template_root)
+
+    payload = bootstrap.seed_memory_template(runtime_root)
+
+    assert payload["seeded"] is True
+    assert (runtime_root / "PROJECT_REGISTRY.md").read_text(encoding="utf-8") == "runtime registry\n"
+    assert (runtime_root / "01_working" / "NOW.md").read_text(encoding="utf-8") == "template now\n"
 
 
 def test_perform_init_bootstraps_knowledge_base_before_sync(monkeypatch) -> None:

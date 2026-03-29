@@ -5,7 +5,8 @@
 1. Workspace：
    - 当前 `workspace/` 根目录
 2. Obsidian-compatible Memory：
-   - 同级目录 `../memory/`
+   - 运行时默认位于同级目录 `../memory.local/`
+   - 仓库根层 `../memory/` 只保留模板骨架
 
 ## 启动原则
 
@@ -13,11 +14,11 @@
 2. 当前 `workspace/` 的 Codex app 直开模式是推荐的日常主模式。
 3. 标准入口 `ops/start-codex` 负责显式强制启动、排障和脚本化调用。
 4. 如果 Obsidian 已安装但没有运行，标准入口会在需要时尝试在后台打开对应 Vault。
-5. Codex 对记忆系统的主交互仍然是直接读写 `memory/` 文件，而不是依赖 Obsidian GUI 才能工作。
+5. Codex 对记忆系统的主交互仍然是直接读写运行时记忆根文件，而不是依赖 Obsidian GUI 才能工作。
 6. 如果用户直接在 Codex app 中打开当前 `workspace/` 作为工作区，`AGENTS.md`、repo skill 和 session watcher 仍应生效。
 7. 当前 `workspace/` 对应的正式项目名是 `Codex Hub`，系统演进通过项目板与摘要页进入同一套记忆体系。
 8. Obsidian 不是硬依赖，但如果想获得完整体验，仍然强烈建议安装：
-   - 方便查看 `memory/`
+   - 方便查看运行时记忆根
    - 方便使用 `obsidian://` 深链
    - 方便把长期记忆和人类阅读界面统一起来
 
@@ -38,7 +39,7 @@
 
 1. `AGENTS.md`
 2. 本文件
-3. `memory/` 根层：
+3. 运行时记忆根：
    - `PROJECT_REGISTRY.md`
    - `ACTIVE_PROJECTS.md`
    - `NEXT_ACTIONS.md`
@@ -145,7 +146,7 @@
 
 1. 面向管理者、协作者或外部分享的汇总报告统一放在：
    - `reports/`
-2. 报告是对系统的可读汇总，不是机器事实源；任务与状态仍以 `memory/` 结构化主表为准。
+2. 报告是对系统的可读汇总，不是机器事实源；任务与状态仍以运行时记忆根中的结构化主表为准。
 
 ## 分层事实源口径
 

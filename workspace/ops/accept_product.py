@@ -20,6 +20,7 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 SITE_CONFIG_PATH = WORKSPACE_ROOT / "control" / "site.yaml"
 BOOTSTRAP_STATUS_PATH = WORKSPACE_ROOT / "runtime" / "bootstrap-status.json"
 REPORT_PATH = WORKSPACE_ROOT / "reports" / "system" / "product-acceptance-latest.md"
+DEFAULT_MEMORY_ROOT = (WORKSPACE_ROOT.parent / "memory.local").resolve()
 REQUIRED_PYTHON_MODULES = (
     ("yaml", "PyYAML"),
     ("docx", "python-docx"),
@@ -48,7 +49,7 @@ def utc_now() -> str:
 
 def load_site() -> tuple[Path, Path, bool]:
     if yaml is None:
-        return WORKSPACE_ROOT.resolve(), (WORKSPACE_ROOT.parent / "memory").resolve(), False
+        return WORKSPACE_ROOT.resolve(), DEFAULT_MEMORY_ROOT, False
     raw = yaml.safe_load(SITE_CONFIG_PATH.read_text(encoding="utf-8")) or {}
     site = raw.get("site") or {}
     workspace_root = site.get("workspace_root")
@@ -59,7 +60,7 @@ def load_site() -> tuple[Path, Path, bool]:
     else:
         workspace = Path(str(workspace_root)).expanduser()
     if memory_root in (None, "", "auto"):
-        memory = WORKSPACE_ROOT.parent / "memory"
+        memory = DEFAULT_MEMORY_ROOT
     else:
         memory = Path(str(memory_root)).expanduser()
     return workspace.resolve(), memory.resolve(), feishu_enabled

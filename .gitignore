@@ -10,3 +10,4 @@ workspace/**/.next/
 workspace/**/__pycache__/
 workspace/**/.pytest_cache/
 workspace/**/.mypy_cache/
+memory.local/

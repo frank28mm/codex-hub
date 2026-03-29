@@ -1,21 +1,21 @@
 # Codex Hub Workspace AGENTS
 
 1. 所有 Codex 会话默认从当前 `workspace/` 根目录启动。
-2. 这里是行动系统工作层，不是长期记忆库；长期记忆位于同级目录 `../memory/`。
+2. 这里是行动系统工作层，不是长期记忆库；公开版运行时长期记忆默认位于同级目录 `../memory.local/`，仓库根层 `../memory/` 只保留模板骨架。
 3. `projects/` 目录用于承载真实项目的本地工作副本，不属于行动系统仓的版本管理范围。
 4. 不要把 `projects/` 下的项目文件、项目源码、项目构建产物提交到 `Codex Hub` 产品仓。
-5. 新会话启动时只允许读取最小入口，不允许全量扫描整个 `memory/`。
+5. 新会话启动时只允许读取最小入口，不允许全量扫描整个运行时记忆根。
 6. 先读取 [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)。
 7. `ops/start-codex` 是最强保证的显式入口：
    - 不要求用户先手动打开 Obsidian
-   - 会在需要时自动确保 sibling `memory/` 可被后台读取，并在安装了 Obsidian 时尝试把 Vault 打开在后台
+   - 会在需要时自动确保运行时记忆根（默认 sibling `memory.local/`）可被后台读取，并在安装了 Obsidian 时尝试把 Vault 打开在后台
    - 启动前自动发现并注册新项目
    - 启动后自动维护 `session-router.json`
    - 在项目/专题绑定后自动输出上下文建议摘要
-   - 会话结束后自动写回 `memory/`
+   - 会话结束后自动写回运行时记忆根
 8. 如果 Codex app 直接在当前 `workspace/` 中打开新对话，这就是推荐的日常主模式，也必须遵循同一套协议，而不是退化成普通项目对话。
-9. app 直开模式下，优先依赖后台守护进程 [ops/codex_session_watcher.py](./ops/codex_session_watcher.py) 自动同步本地 session 到 `memory/`。
-10. 与这套系统有关的 `memory/` 读写、项目路由、会后写回，统一遵循 repo skill `obsidian-memory-workflow`。
+9. app 直开模式下，优先依赖后台守护进程 [ops/codex_session_watcher.py](./ops/codex_session_watcher.py) 自动同步本地 session 到运行时记忆根。
+10. 与这套系统有关的运行时记忆读写、项目路由、会后写回，统一遵循 repo skill `obsidian-memory-workflow`。
 11. 如果当前会话发生在这个 `workspace/` 内，开始阶段应优先：
    - 使用 `obsidian-memory-workflow`
    - 按需运行 `python3 ops/codex_memory.py discover-projects`
@@ -59,7 +59,7 @@
    - 不再手写项目数、项目名单或 `todo / doing / blocked / done` 状态事实
    - 一切状态判断以自动区为准
 21. `Codex Hub` 在公开版里也是正式项目：
-   - 相关系统演进任务应落在 `memory/` 的 `Codex Hub-项目板`
+   - 相关系统演进任务应落在运行时记忆根的 `Codex Hub-项目板`
    - 不再只靠聊天和报告追踪系统开发
 22. 飞书线程规则固定为：
    - 机器人私聊是整个 `Codex Hub` 工作区的最高权限入口，不绑定单个项目
