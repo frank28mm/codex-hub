@@ -14,6 +14,7 @@
 
 - 统一启动与项目路由
 - `Obsidian-compatible` 记忆系统读写
+- 长任务 `Program Harness + Wake Loop`
 - 自包含的 Feishu bridge runtime 与对象操作主链
 - 可选的微信私聊 bridge
 - 只读 Bitable 投影
@@ -69,9 +70,9 @@
 > 如果你暂时先不走 Feishu，只想把公开版**快速手工跑起来**，当前最短路径已经收成两步：
 >
 > 1. `codex login`
-> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents`
+> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
 >
-> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance。
+> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance；如果你加上 `--install-feishu-cli`，它还会把官方 `lark-cli` 和官方 `lark-*` skills 一起装好。
 
 > [!TIP]
 > 真正驱动系统运行的协议文件在：
@@ -149,7 +150,7 @@
 - 建一个多维表格
 - 继续处理某个项目
 
-这时 `Codex Hub` 会把远程聊天入口当成工作入口，而不是第二套系统。
+这时 `Codex Hub` 会把远程聊天入口当成工作入口，而不是第二套系统。公开版当前也默认保留 `CoCo` 入口语义：人类继续通过私聊 `CoCo` 或在项目群里 `@CoCo` 发起工作，底层则优先吃官方 `Feishu CLI / lark-cli` 的 transport 与对象能力。
 
 适合：
 
@@ -246,6 +247,31 @@ Electron 不是这套系统唯一入口。
 - 再给一个顾问式建议
 
 这轮公开版已经把这条主链也带进来了，所以这类“不是只执行，而是帮你判断和复审”的工作方式，也已经进入公开版。
+
+## 长任务现在怎么用
+
+公开版现在已经包含 `Program Harness + Wake Loop`。
+
+对人类用户来说，最重要的不是学习一套新命令，而是继续按原来的自然语言方式说清楚三件事：
+
+- 项目范围
+- 想推进到什么目标
+- 哪些动作需要边界或批准
+
+例如：
+
+- “只在 `TINT` 项目里推进首页改版，先做到可验收。”
+- “继续推进 `Codex Hub` 的 Feishu 迁移，涉及外发前先停在批准。”
+
+系统会把这类请求变成一个项目级 program，并在后续 wake 中持续推进：
+
+- 读项目事实源
+- 选择当前最重要的子目标
+- 执行并验证
+- 写回项目板、报告和远程入口
+- 判断继续、阻塞、切阶段还是完成
+
+所以公开版现在已经不只是“消息收发 + 对象操作”，而是能承载持续推进的长任务运行时。
 
 ## 普通用户从零到可用的完整流程
 
@@ -442,7 +468,23 @@ python3 ops/accept_product.py run
 - 常用表格别名
 - 只读投影表格资源
 
-### 第 11 步：完成一次 Feishu OAuth
+### 第 11 步：完成官方 Feishu CLI 配置与 OAuth
+
+如果你想尽量一键化地完成 Feishu 接入，先执行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
+```
+
+这一步会尽量把下面几件事串起来：
+
+- 安装官方 `lark-cli`
+- 安装官方 `lark-*` skills
+- 打开 Feishu 应用创建/配置
+- 引导完成一次 OAuth 授权
+- 最后跑一轮 `lark-cli doctor`
+
+如果你后面还需要单独补一次 OAuth，可以再执行：
 
 在 `workspace/` 里执行：
 
@@ -481,8 +523,8 @@ python3 ops/feishu_agent.py auth login
 
 当前最简便的正式方式是：
 
-1. 一个 Feishu 应用
-2. 一次 OAuth 登录
+1. 一个你自己创建的 Feishu 应用
+2. 一条官方 `lark-cli` 配置与登录链
 3. 公开版仓库自带的 Feishu 长连接 bridge runtime
 4. 可选的只读 Bitable 投影
 

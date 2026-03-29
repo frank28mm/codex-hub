@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Knowledge Base - Research Web",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} paper {{title|safe_name}}",
+  "path": "02_episodic/clips/Knowledge Base/inbox",
+  "vault": "memory",
+  "context": "{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}",
+  "properties": [
+    {
+      "name": "title",
+      "value": "{{title}}",
+      "id": "kb-research-web--title"
+    },
+    {
+      "name": "url",
+      "value": "{{url}}",
+      "id": "kb-research-web--url"
+    },
+    {
+      "name": "domain",
+      "value": "{{site}}",
+      "id": "kb-research-web--domain"
+    },
+    {
+      "name": "clipped_at",
+      "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+      "id": "kb-research-web--clipped-at"
+    },
+    {
+      "name": "source_type",
+      "value": "research-web",
+      "id": "kb-research-web--source-type"
+    },
+    {
+      "name": "processing_status",
+      "value": "inbox",
+      "id": "kb-research-web--processing-status"
+    },
+    {
+      "name": "topic_candidates",
+      "value": "",
+      "type": "multitext",
+      "id": "kb-research-web--topic-candidates"
+    }
+  ],
+  "triggers": [
+    "https://arxiv.org/",
+    "https://openreview.net/",
+    "https://paperswithcode.com/",
+    "schema:@ScholarlyArticle"
+  ],
+  "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n{% if image %}![{{title}}]({{image}})\n\n{% endif %}## Captured content\n\n{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,[aria-label='advertisement'],[class*='advert'],[class*='sponsor']\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}\n",
+  "id": "kb-research-web"
+}

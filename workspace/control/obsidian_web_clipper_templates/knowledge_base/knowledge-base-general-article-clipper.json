@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Knowledge Base - General Article",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} article {{title|safe_name}}",
+  "path": "02_episodic/clips/Knowledge Base/inbox",
+  "vault": "memory",
+  "context": "{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,.wx_profile_card_container,.weui-desktop-mass-appmsg__like-read,.reward_qrcode,.js_product_loop_content,.original_area_primary\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}",
+  "properties": [
+    {
+      "name": "title",
+      "value": "{{title}}",
+      "id": "kb-general-article--title"
+    },
+    {
+      "name": "url",
+      "value": "{{url}}",
+      "id": "kb-general-article--url"
+    },
+    {
+      "name": "domain",
+      "value": "{{site}}",
+      "id": "kb-general-article--domain"
+    },
+    {
+      "name": "clipped_at",
+      "value": "{{date|date:\"YYYY-MM-DDTHH:mm:ssZ\"}}",
+      "id": "kb-general-article--clipped-at"
+    },
+    {
+      "name": "source_type",
+      "value": "web-article",
+      "id": "kb-general-article--source-type"
+    },
+    {
+      "name": "processing_status",
+      "value": "inbox",
+      "id": "kb-general-article--processing-status"
+    },
+    {
+      "name": "topic_candidates",
+      "value": "",
+      "type": "multitext",
+      "id": "kb-general-article--topic-candidates"
+    }
+  ],
+  "triggers": [
+    "schema:@Article"
+  ],
+  "noteContentFormat": "# {{title}}\n\n> Source: {{url}}\n\n{% if image %}![{{title}}]({{image}})\n\n{% endif %}## Captured content\n\n{{contentHtml|remove_html:(\"script,style,nav,header,footer,aside,.advertisement,.advert,.ads,.ad,.sponsored,.google-auto-placed,.entry-sponsor,.related-articles,.related-posts,.wx_profile_card_container,.weui-desktop-mass-appmsg__like-read,.reward_qrcode,.js_product_loop_content,.original_area_primary\")|markdown|replace:\"/\\n{3,}/g\":\"\\n\\n\"|trim}}\n",
+  "id": "kb-general-article"
+}

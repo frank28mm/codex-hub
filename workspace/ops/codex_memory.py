@@ -75,6 +75,7 @@ AUTO_FOLLOWUP_MARKERS = ("<!-- AUTO_FOLLOWUPS_START -->", "<!-- AUTO_FOLLOWUPS_E
 AUTO_WRITEBACK_MARKERS = ("<!-- AUTO_WRITEBACK_START -->", "<!-- AUTO_WRITEBACK_END -->")
 AUTO_PROJECT_TASKS_MARKERS = ("<!-- AUTO_PROJECT_TASKS_START -->", "<!-- AUTO_PROJECT_TASKS_END -->")
 AUTO_TOPIC_ROLLUPS_MARKERS = ("<!-- AUTO_TOPIC_ROLLUPS_START -->", "<!-- AUTO_TOPIC_ROLLUPS_END -->")
+AUTO_GFLOW_RUNS_MARKERS = ("<!-- AUTO_GFLOW_RUNS_START -->", "<!-- AUTO_GFLOW_RUNS_END -->")
 AUTO_TASK_TABLE_MARKERS = ("<!-- AUTO_TASK_TABLE_START -->", "<!-- AUTO_TASK_TABLE_END -->")
 AUTO_CURRENT_TASKS_MARKERS = ("<!-- AUTO_CURRENT_TASKS_START -->", "<!-- AUTO_CURRENT_TASKS_END -->")
 AUTO_PROJECT_ROLLUP_MARKERS = ("<!-- AUTO_PROJECT_ROLLUP_START -->", "<!-- AUTO_PROJECT_ROLLUP_END -->")
@@ -231,7 +232,8 @@ def recent_event_ids(path: Path, limit: int = 50) -> set[str]:
 
 
 def load_registry() -> list[dict[str, Any]]:
-    text = read_text(REGISTRY_MD)
+    registry_path = Path(os.environ.get("WORKSPACE_HUB_VAULT_ROOT", str(VAULT_ROOT))) / "PROJECT_REGISTRY.md"
+    text = read_text(registry_path)
     match = REGISTRY_RE.search(text)
     if not match:
         return []
@@ -600,9 +602,13 @@ def default_current_task_lines() -> list[str]:
     ]
 
 
-def build_current_task_lines(project_rows: list[dict[str, str]], rollup_rows: list[dict[str, str]]) -> list[str]:
+def build_current_task_lines(
+    project_rows: list[dict[str, str]],
+    rollup_rows: list[dict[str, str]],
+    gflow_rows: list[dict[str, str]] | None = None,
+) -> list[str]:
     grouped = {"todo": [], "doing": [], "blocked": [], "done": []}
-    combined = project_rows + rollup_rows
+    combined = project_rows + rollup_rows + list(gflow_rows or [])
     combined.sort(key=lambda row: (STATUS_ORDER.get(row.get("状态", "todo"), 99), row.get("更新时间", ""), row.get("ID", "")))
     for row in combined:
         status = normalize_task_status(row.get("状态", "todo"))
@@ -622,9 +628,13 @@ def build_current_task_lines(project_rows: list[dict[str, str]], rollup_rows: li
     return lines
 
 
-def select_project_focus_tasks(project_rows: list[dict[str, str]], rollup_rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+def select_project_focus_tasks(
+    project_rows: list[dict[str, str]],
+    rollup_rows: list[dict[str, str]],
+    gflow_rows: list[dict[str, str]] | None = None,
+) -> dict[str, list[dict[str, str]]]:
     sections = {"doing": [], "todo": [], "blocked": [], "done": []}
-    for row in project_rows + rollup_rows:
+    for row in project_rows + rollup_rows + list(gflow_rows or []):
         status = normalize_task_status(row.get("状态", "todo"))
         if status not in sections:
             continue
@@ -634,8 +644,12 @@ def select_project_focus_tasks(project_rows: list[dict[str, str]], rollup_rows: 
     return sections
 
 
-def project_board_next_action(project_rows: list[dict[str, str]], rollup_rows: list[dict[str, str]]) -> str:
-    sections = select_project_focus_tasks(project_rows, rollup_rows)
+def project_board_next_action(
+    project_rows: list[dict[str, str]],
+    rollup_rows: list[dict[str, str]],
+    gflow_rows: list[dict[str, str]] | None = None,
+) -> str:
+    sections = select_project_focus_tasks(project_rows, rollup_rows, gflow_rows)
     for status in ["doing", "todo", "blocked"]:
         if sections[status]:
             row = sections[status][0]
@@ -696,6 +710,12 @@ def create_project_board(project_name: str, *, status: str = "active", priority:
             *markdown_table_lines(PROJECT_BOARD_HEADERS, []),
             AUTO_TOPIC_ROLLUPS_MARKERS[1],
             "",
+            "## GFlow Runs",
+            "",
+            AUTO_GFLOW_RUNS_MARKERS[0],
+            *markdown_table_lines(PROJECT_BOARD_HEADERS, []),
+            AUTO_GFLOW_RUNS_MARKERS[1],
+            "",
             "## 当前任务",
             "",
             *default_current_task_lines(),
@@ -731,12 +751,18 @@ def load_project_board(project_name: str) -> dict[str, Any]:
         PROJECT_BOARD_HEADERS,
         allow_missing=True,
     )
+    gflow_rows = parse_markdown_table(
+        extract_marked_block(body, AUTO_GFLOW_RUNS_MARKERS),
+        PROJECT_BOARD_HEADERS,
+        allow_missing=True,
+    )
     return {
         "path": path,
         "frontmatter": frontmatter,
         "body": body,
         "project_rows": project_rows,
         "rollup_rows": rollup_rows,
+        "gflow_rows": gflow_rows,
     }
 
 
@@ -762,11 +788,13 @@ def save_project_board(
     body: str,
     project_rows: list[dict[str, str]],
     rollup_rows: list[dict[str, str]],
+    gflow_rows: list[dict[str, str]] | None = None,
 ) -> None:
     frontmatter["updated_at"] = dt.date.today().isoformat()
     body = replace_or_append_marked_section(body, "## Project Owned Tasks", AUTO_PROJECT_TASKS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, project_rows))
     body = replace_or_append_marked_section(body, "## Topic Rollups", AUTO_TOPIC_ROLLUPS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, rollup_rows))
-    body = replace_or_append_marked_section(body, "## 当前任务", AUTO_CURRENT_TASKS_MARKERS, build_current_task_lines(project_rows, rollup_rows))
+    body = replace_or_append_marked_section(body, "## GFlow Runs", AUTO_GFLOW_RUNS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, gflow_rows or []))
+    body = replace_or_append_marked_section(body, "## 当前任务", AUTO_CURRENT_TASKS_MARKERS, build_current_task_lines(project_rows, rollup_rows, gflow_rows))
     write_text(path, f"{render_frontmatter(frontmatter)}\n\n{body.lstrip()}")
 
 
@@ -810,6 +838,7 @@ def refresh_project_rollups(project_name: str, *, topic_path: Path | None = None
     body = project_board["body"]
     project_rows = project_board["project_rows"]
     rollup_rows = project_board["rollup_rows"]
+    gflow_rows = project_board.get("gflow_rows", [])
     new_rollups = [row for row in rollup_rows if not row.get("来源", "").startswith("topic:")]
     # Always rebuild topic rollups from every topic board of the project.
     # Incremental single-topic refresh would otherwise drop unrelated topic rows.
@@ -825,7 +854,7 @@ def refresh_project_rollups(project_name: str, *, topic_path: Path | None = None
             continue
         topic_sources_seen.add(source)
         new_rollups.extend(topic_rollup_rows(topic_board))
-    save_project_board(project_board["path"], frontmatter, body, project_rows, new_rollups)
+    save_project_board(project_board["path"], frontmatter, body, project_rows, new_rollups, gflow_rows)
     return project_board["path"]
 
 
@@ -1046,6 +1075,53 @@ def trigger_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | 
     return result
 
 
+def trigger_growth_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | None:
+    projection_script = WORKSPACE_ROOT / "ops" / "growth_feishu_projection.py"
+    if not projection_script.exists():
+        return None
+    result = subprocess.run(
+        ["python3", str(projection_script), "run-sync-once"],
+        cwd=WORKSPACE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[codex_memory] growth feishu projection sync failed: {result.stderr.strip() or result.stdout.strip()}",
+            file=sys.stderr,
+        )
+    return result
+
+
+def trigger_growth_operator_surface_report_once() -> subprocess.CompletedProcess[str] | None:
+    surface_script = WORKSPACE_ROOT / "ops" / "growth_operator_surface.py"
+    if not surface_script.exists():
+        return None
+    output_path = WORKSPACE_ROOT / "reports" / "system" / f"codex-growth-system-operator-snapshot-{dt.date.today().isoformat()}.md"
+    result = subprocess.run(
+        [
+            "python3",
+            str(surface_script),
+            "report",
+            "--project-name",
+            "增长与营销",
+            "--output",
+            str(output_path),
+        ],
+        cwd=WORKSPACE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"[codex_memory] growth operator surface report failed: {result.stderr.strip() or result.stdout.strip()}",
+            file=sys.stderr,
+        )
+    return result
+
+
 def trigger_retrieval_sync_once() -> subprocess.CompletedProcess[str] | None:
     retrieval_script = WORKSPACE_ROOT / "ops" / "codex_retrieval.py"
     if not retrieval_script.exists():
@@ -1128,7 +1204,7 @@ def record_project_writeback(
         sort_keys=True,
     )
     event["event_id"] = hashlib.sha1(identity_payload.encode("utf-8")).hexdigest()
-    for queue_name in ("retrieval_sync", "dashboard_sync", "feishu_projection_sync"):
+    for queue_name in ("retrieval_sync", "dashboard_sync", "feishu_projection_sync", "growth_feishu_projection_sync"):
         runtime_state.enqueue_runtime_event(
             queue_name=queue_name,
             event_type="project_writeback",
@@ -1142,6 +1218,7 @@ def record_project_writeback(
         dashboard_result = trigger_dashboard_sync_once()
         if dashboard_result is None or dashboard_result.returncode == 0:
             trigger_feishu_projection_sync_once()
+            trigger_growth_feishu_projection_sync_once()
     return event
 
 

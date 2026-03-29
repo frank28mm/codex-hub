@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import plistlib
 import ssl
@@ -13,10 +14,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+
+import requests
 
 try:
     import yaml
@@ -27,6 +30,11 @@ try:
     import certifi
 except ImportError:  # pragma: no cover
     certifi = None
+
+try:
+    from ops import lark_cli_backend
+except ImportError:  # pragma: no cover
+    import lark_cli_backend  # type: ignore
 
 
 DEFAULT_BASE_URL = "https://open.feishu.cn/open-apis"
@@ -269,6 +277,15 @@ def _ensure_list(payload: Any, *, code: str = "invalid_list") -> list[Any]:
     raise FeishuAgentError("payload must be a JSON array", code=code)
 
 
+def _bool_flag(payload: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_ssl_context() -> ssl.SSLContext:
     if certifi is not None:
         return ssl.create_default_context(cafile=certifi.where())
@@ -378,6 +395,45 @@ class FeishuAgent:
             raise FeishuAgentError(
                 f"request failed: {exc}",
                 code="request_failed",
+            ) from exc
+        if payload.get("code", 0) != 0:
+            raise FeishuAgentError(
+                f"API error {payload.get('code')}: {payload.get('msg')}",
+                code="api_error",
+                details={"response": payload},
+            )
+        return payload.get("data", payload)
+
+    def _http_multipart(
+        self,
+        method: str,
+        path: str,
+        *,
+        data: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, Any, str]] | None = None,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        url = self.base_url + path
+        headers: dict[str, str] = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        try:
+            response = requests.request(method, url, headers=headers, data=data, files=files, timeout=60)
+        except Exception as exc:
+            raise FeishuAgentError(f"request failed: {exc}", code="request_failed") from exc
+        body_text = response.text
+        if response.status_code >= 400:
+            raise FeishuAgentError(
+                f"HTTP {response.status_code}: {body_text[:500]}",
+                code="http_error",
+                details={"status": response.status_code, "body": body_text[:2000]},
+            )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise FeishuAgentError(
+                f"invalid JSON response: {body_text[:500]}",
+                code="invalid_json",
             ) from exc
         if payload.get("code", 0) != 0:
             raise FeishuAgentError(
@@ -535,7 +591,7 @@ class FeishuAgent:
             "task operations require FEISHU_USER_ACCESS_TOKEN after the CoCo app has been granted user-identity task scopes",
             code="missing_user_access_token",
             details={
-                "hint": "run `python3 <workspace>/ops/feishu_agent.py auth login` once, or configure FEISHU_USER_ACCESS_TOKEN for the CoCo service"
+                "hint": "run `python3 ops/feishu_agent.py auth login` once, or configure FEISHU_USER_ACCESS_TOKEN for the CoCo service"
             },
         )
 
@@ -547,6 +603,12 @@ class FeishuAgent:
         data: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        backend_domain = self._lark_cli_backend_domain_for_path(path)
+        if backend_domain and self._can_use_lark_cli_backend(backend_domain):
+            try:
+                return lark_cli_backend.api_call(method, path, params=params, data=data, identity="user")
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         return self._http(method, path, data=data, params=params, token=self._token())
 
     def user_api(
@@ -557,6 +619,12 @@ class FeishuAgent:
         data: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        backend_domain = self._lark_cli_backend_domain_for_path(path)
+        if backend_domain and self._can_use_lark_cli_backend(backend_domain):
+            try:
+                return lark_cli_backend.api_call(method, path, params=params, data=data, identity="user")
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         return self._http(method, path, data=data, params=params, token=self._user_token())
 
     # ---- registry / resource resolution ----
@@ -627,6 +695,31 @@ class FeishuAgent:
         alias_value = self._match_alias(self._aliases("chats"), target)
         if isinstance(alias_value, str) and alias_value.strip():
             return alias_value.strip()
+        if self._can_use_lark_cli_backend("im"):
+            try:
+                payload = lark_cli_backend.im_chat_search(query=target, page_size=50, identity="bot")
+                candidates = payload.get("chats", [])
+                exact = None
+                partial = None
+                lowered = target.lower()
+                for item in candidates:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or item.get("chat_name") or "").strip()
+                    chat_id = str(item.get("chat_id") or item.get("id") or "").strip()
+                    if not name or not chat_id:
+                        continue
+                    if name == target or name.lower() == lowered:
+                        exact = chat_id
+                        break
+                    if lowered in name.lower() and partial is None:
+                        partial = chat_id
+                if exact:
+                    return exact
+                if partial:
+                    return partial
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         payload = self.api("GET", "/im/v1/chats", params={"page_size": 100})
         candidates = payload.get("items", [])
         exact = None
@@ -673,9 +766,12 @@ class FeishuAgent:
             [
                 r"/folder/([A-Za-z0-9]+)",
                 r"folder_token=([A-Za-z0-9]+)",
+                r"(fld[A-Za-z0-9]+)",
             ],
         )
-        return extracted or target
+        if extracted:
+            return extracted
+        return target if target.startswith("fld") else ""
 
     def resolve_document_id(self, value: str) -> str:
         target = str(value or "").strip()
@@ -816,6 +912,44 @@ class FeishuAgent:
 
     # ---- operations ----
 
+    def _format_cli_message_content(self, item: dict[str, Any]) -> Any:
+        body = item.get("body")
+        raw = ""
+        if isinstance(body, dict):
+            raw = str(body.get("content") or "").strip()
+        elif body not in (None, ""):
+            raw = str(body).strip()
+        if not raw:
+            raw = str(item.get("content") or "").strip()
+        if not raw:
+            return ""
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+
+    def _normalize_cli_message(self, item: dict[str, Any]) -> dict[str, Any]:
+        ts_value = item.get("create_time") or item.get("update_time") or item.get("created_at") or 0
+        try:
+            ts_ms = int(str(ts_value or "0"))
+        except ValueError:
+            ts_ms = 0
+        if 0 < ts_ms < 1_000_000_000_000:
+            ts_ms *= 1000
+        sender = item.get("sender")
+        sender_id = ""
+        if isinstance(sender, dict):
+            sender_id = str(sender.get("id") or sender.get("sender_id") or sender.get("open_id") or "").strip()
+        if not sender_id:
+            sender_id = str(item.get("sender_id") or item.get("open_id") or "").strip()
+        return {
+            "id": item.get("message_id") or item.get("id"),
+            "sender": sender_id,
+            "time": datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M") if ts_ms else "",
+            "type": item.get("msg_type") or item.get("message_type") or item.get("type"),
+            "content": self._format_cli_message_content(item),
+        }
+
     def msg_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         target = ""
         receive_id_type = ""
@@ -845,18 +979,86 @@ class FeishuAgent:
                     receive_id_type = "open_id"
         else:
             raise FeishuAgentError("specify one of to/email/chat", code="missing_target")
-        text = str(payload.get("text") or "").strip()
-        if not text and payload.get("file"):
-            text = Path(str(payload["file"])).read_text(encoding="utf-8")
-        if not text:
-            raise FeishuAgentError("text or file is required", code="missing_text")
+        msg_type = str(payload.get("msg_type") or "text").strip() or "text"
+        text = ""
+        markdown = str(payload.get("markdown") or "").strip()
+        image = str(payload.get("image") or "").strip()
+        file_attachment = str(payload.get("file") or "").strip()
+        audio = str(payload.get("audio") or "").strip()
+        video = str(payload.get("video") or "").strip()
+        video_cover = str(payload.get("video_cover") or "").strip()
+        if msg_type == "interactive":
+            card_payload = payload.get("card")
+            if card_payload in (None, ""):
+                card_payload = payload.get("content")
+            if isinstance(card_payload, str):
+                try:
+                    card_payload = json.loads(card_payload)
+                except json.JSONDecodeError as exc:
+                    raise FeishuAgentError(
+                        f"invalid interactive card json: {exc}",
+                        code="invalid_card",
+                    ) from exc
+            if not isinstance(card_payload, dict):
+                raise FeishuAgentError("card is required for interactive message", code="missing_card")
+            content = json.dumps(card_payload, ensure_ascii=False)
+        else:
+            text = str(payload.get("text") or "").strip()
+            media_like = bool(markdown or image or audio or video or (msg_type in {"image", "file", "audio", "media"} and file_attachment))
+            if not text and file_attachment and not media_like:
+                text = Path(str(payload["file"])).read_text(encoding="utf-8")
+            if not text and not media_like and msg_type == "text":
+                raise FeishuAgentError("text or file is required", code="missing_text")
+            content = json.dumps({"text": text}, ensure_ascii=False)
+        if self._can_use_lark_cli_backend("im"):
+            try:
+                cli_result = lark_cli_backend.im_send(
+                    chat_id=target if receive_id_type == "chat_id" else "",
+                    user_id=target if receive_id_type == "open_id" else "",
+                    msg_type=msg_type,
+                    text=text if msg_type == "text" else "",
+                    content=content if msg_type != "text" else "",
+                    markdown=markdown,
+                    image=image,
+                    file=file_attachment if msg_type == "file" or (file_attachment and not text) else "",
+                    audio=audio,
+                    video=video,
+                    video_cover=video_cover,
+                    identity="bot",
+                )
+                return {
+                    "ok": True,
+                    "domain": "msg",
+                    "action": "send",
+                    "message_id": cli_result.get("message_id"),
+                    "target": target,
+                    "receive_id_type": receive_id_type,
+                    "msg_type": msg_type if not markdown else "post",
+                    "backend": "lark-cli",
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
+        if markdown:
+            msg_type = "post"
+            content = json.dumps({"text": markdown}, ensure_ascii=False)
+        elif image:
+            msg_type = "image"
+            content = json.dumps({"image_key": image}, ensure_ascii=False)
+        elif file_attachment and msg_type == "file":
+            content = json.dumps({"file_key": file_attachment}, ensure_ascii=False)
+        elif audio:
+            msg_type = "audio"
+            content = json.dumps({"file_key": audio}, ensure_ascii=False)
+        elif video:
+            msg_type = "media"
+            content = json.dumps({"file_key": video, "image_key": video_cover}, ensure_ascii=False)
         result = self.api(
             "POST",
             "/im/v1/messages",
             data={
                 "receive_id": target,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": content,
             },
             params={"receive_id_type": receive_id_type},
         )
@@ -867,26 +1069,107 @@ class FeishuAgent:
             "message_id": result.get("message_id"),
             "target": target,
             "receive_id_type": receive_id_type,
+            "msg_type": msg_type,
         }
 
     def msg_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
         message_id = str(payload.get("to") or payload.get("message_id") or "").strip()
         if not message_id:
             raise FeishuAgentError("message_id is required", code="missing_message_id")
-        text = str(payload.get("text") or "").strip()
-        if not text and payload.get("file"):
-            text = Path(str(payload["file"])).read_text(encoding="utf-8")
-        if not text:
-            raise FeishuAgentError("text or file is required", code="missing_text")
+        msg_type = str(payload.get("msg_type") or "text").strip() or "text"
+        markdown = str(payload.get("markdown") or "").strip()
+        image = str(payload.get("image") or "").strip()
+        file_attachment = str(payload.get("file") or "").strip()
+        audio = str(payload.get("audio") or "").strip()
+        video = str(payload.get("video") or "").strip()
+        video_cover = str(payload.get("video_cover") or "").strip()
+        if msg_type == "interactive":
+            card_payload = payload.get("card")
+            if card_payload in (None, ""):
+                card_payload = payload.get("content")
+            if isinstance(card_payload, str):
+                try:
+                    card_payload = json.loads(card_payload)
+                except json.JSONDecodeError as exc:
+                    raise FeishuAgentError(
+                        f"invalid interactive card json: {exc}",
+                        code="invalid_card",
+                    ) from exc
+            if not isinstance(card_payload, dict):
+                raise FeishuAgentError("card is required for interactive message", code="missing_card")
+            content = json.dumps(card_payload, ensure_ascii=False)
+            text = ""
+        else:
+            text = str(payload.get("text") or "").strip()
+            media_like = bool(markdown or image or audio or video or (msg_type in {"image", "file", "audio", "media"} and file_attachment))
+            if not text and file_attachment and not media_like:
+                text = Path(str(payload["file"])).read_text(encoding="utf-8")
+            if not text and not media_like and msg_type == "text":
+                raise FeishuAgentError("text or file is required", code="missing_text")
+            content = json.dumps({"text": text}, ensure_ascii=False)
+        if self._can_use_lark_cli_backend("im"):
+            try:
+                cli_result = lark_cli_backend.im_reply(
+                    message_id=message_id,
+                    msg_type=msg_type,
+                    text=text if msg_type == "text" else "",
+                    content=content if msg_type != "text" else "",
+                    markdown=markdown,
+                    image=image,
+                    file=file_attachment if msg_type == "file" or (file_attachment and not text) else "",
+                    audio=audio,
+                    video=video,
+                    video_cover=video_cover,
+                    reply_in_thread=_bool_flag(payload, "reply_in_thread"),
+                    identity="bot",
+                )
+                return {
+                    "ok": True,
+                    "domain": "msg",
+                    "action": "reply",
+                    "message_id": cli_result.get("message_id"),
+                    "msg_type": msg_type if not markdown else "post",
+                    "backend": "lark-cli",
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
+        if markdown:
+            msg_type = "post"
+            content = json.dumps({"text": markdown}, ensure_ascii=False)
+        elif image:
+            msg_type = "image"
+            content = json.dumps({"image_key": image}, ensure_ascii=False)
+        elif file_attachment and msg_type == "file":
+            content = json.dumps({"file_key": file_attachment}, ensure_ascii=False)
+        elif audio:
+            msg_type = "audio"
+            content = json.dumps({"file_key": audio}, ensure_ascii=False)
+        elif video:
+            msg_type = "media"
+            content = json.dumps({"file_key": video, "image_key": video_cover}, ensure_ascii=False)
         result = self.api(
             "POST",
             f"/im/v1/messages/{message_id}/reply",
-            data={"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
+            data={"msg_type": msg_type, "content": content},
         )
         return {"ok": True, "domain": "msg", "action": "reply", "message_id": result.get("message_id")}
 
     def msg_history(self, payload: dict[str, Any]) -> dict[str, Any]:
         chat_id = self.resolve_chat_id(str(payload.get("chat") or ""))
+        if self._can_use_lark_cli_backend("im"):
+            try:
+                result = lark_cli_backend.im_chat_messages_list(
+                    chat_id=chat_id,
+                    page_size=int(payload.get("limit") or 20),
+                    identity="bot",
+                )
+                return {
+                    "chat_id": chat_id,
+                    "messages": [self._normalize_cli_message(item) for item in result.get("messages", []) if isinstance(item, dict)],
+                    "backend": "lark-cli",
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api(
             "GET",
             "/im/v1/messages",
@@ -914,6 +1197,16 @@ class FeishuAgent:
         query = str(payload.get("query") or "").strip()
         if not query:
             raise FeishuAgentError("query is required", code="missing_query")
+        if self._can_use_lark_cli_backend("im"):
+            try:
+                result = lark_cli_backend.im_messages_search(
+                    query=query,
+                    page_size=int(payload.get("limit") or 20),
+                    identity="user",
+                )
+                return {"query": query, "messages": result.get("messages", []), "backend": "lark-cli"}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api(
             "POST",
             "/im/v1/messages/search",
@@ -923,6 +1216,26 @@ class FeishuAgent:
         return {"query": query, "messages": result.get("items", [])}
 
     def msg_chats(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._can_use_lark_cli_backend("im"):
+            try:
+                result = lark_cli_backend.im_chat_search(
+                    query=str(payload.get("query") or "").strip(),
+                    page_size=int(payload.get("limit") or 50),
+                    identity="bot",
+                )
+                chats = [
+                    {
+                        "id": item.get("chat_id") or item.get("id"),
+                        "name": item.get("name") or item.get("chat_name"),
+                        "type": item.get("chat_type") or item.get("type"),
+                        "members": item.get("member_count") or item.get("members"),
+                    }
+                    for item in result.get("chats", [])
+                    if isinstance(item, dict)
+                ]
+                return {"chats": chats, "backend": "lark-cli"}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api("GET", "/im/v1/chats", params={"page_size": int(payload.get("limit") or 50)})
         chats = [
             {
@@ -935,6 +1248,24 @@ class FeishuAgent:
         ]
         return {"chats": chats}
 
+    def msg_download_resources(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("im")
+        message_id = str(payload.get("message_id") or payload.get("id") or "").strip()
+        file_key = str(payload.get("file_key") or payload.get("key") or "").strip()
+        resource_type = str(payload.get("type") or "file").strip().lower()
+        if not message_id or not file_key:
+            raise FeishuAgentError("message_id and file_key are required", code="missing_resource_locator")
+        try:
+            return lark_cli_backend.im_download_resources(
+                message_id=message_id,
+                file_key=file_key,
+                resource_type=resource_type,
+                output=str(payload.get("output") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "msg_resource_download_failed", details=exc.details) from exc
+
     def user_get(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("email"):
             target = str(payload["email"]).strip()
@@ -946,6 +1277,11 @@ class FeishuAgent:
             )
             return {"users": result.get("user_list", [])}
         user_id = self.resolve_user_id(str(payload.get("id") or payload.get("user") or ""))
+        if self._can_use_lark_cli_backend("contact"):
+            try:
+                return lark_cli_backend.contact_get(user_id=user_id)
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api("GET", f"/contact/v3/users/{user_id}", params={"user_id_type": "open_id"})
         return {"user": result.get("user")}
 
@@ -954,7 +1290,318 @@ class FeishuAgent:
         if not query:
             raise FeishuAgentError("name is required", code="missing_name")
         limit = int(payload.get("limit") or 20)
+        if self._can_use_lark_cli_backend("contact"):
+            try:
+                result = lark_cli_backend.contact_search(query=query, page_size=limit)
+                return {"users": list(result.get("users") or [])[:limit], "backend": "lark-cli"}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         return {"users": self._search_users_locally(query, page_size=max(limit, 100))[:limit]}
+
+    def drive_upload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("drive")
+        file_path = str(payload.get("file_path") or payload.get("file") or "").strip()
+        if not file_path:
+            raise FeishuAgentError("file_path is required", code="missing_file_path")
+        folder_token = self.resolve_folder_token(str(payload.get("folder") or payload.get("folder_token") or ""))
+        try:
+            return lark_cli_backend.drive_upload(
+                file_path=file_path,
+                folder_token=folder_token,
+                name=str(payload.get("name") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "drive_upload_failed", details=exc.details) from exc
+
+    def drive_download(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("drive")
+        file_token = str(payload.get("file_token") or payload.get("token") or payload.get("id") or payload.get("doc") or "").strip()
+        if not file_token:
+            raise FeishuAgentError("file_token is required", code="missing_file_token")
+        try:
+            return lark_cli_backend.drive_download(
+                file_token=file_token,
+                output=str(payload.get("output") or "").strip(),
+                overwrite=_bool_flag(payload, "overwrite"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "drive_download_failed", details=exc.details) from exc
+
+    def drive_add_comment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("drive")
+        doc = str(payload.get("doc") or payload.get("document") or payload.get("url") or "").strip()
+        content = str(payload.get("content") or "").strip()
+        if not doc or not content:
+            raise FeishuAgentError("doc and content are required", code="missing_comment_target")
+        try:
+            return lark_cli_backend.drive_add_comment(
+                doc=doc,
+                content=content,
+                block_id=str(payload.get("block_id") or "").strip(),
+                selection_with_ellipsis=str(payload.get("selection_with_ellipsis") or "").strip(),
+                full_comment=_bool_flag(payload, "full_comment"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "drive_comment_failed", details=exc.details) from exc
+
+    def vc_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("vc")
+        try:
+            return lark_cli_backend.vc_search(
+                query=str(payload.get("query") or "").strip(),
+                start=str(payload.get("start") or "").strip(),
+                end=str(payload.get("end") or "").strip(),
+                organizer_ids=_ensure_list(payload.get("organizer_ids")) if payload.get("organizer_ids") is not None else [],
+                participant_ids=_ensure_list(payload.get("participant_ids")) if payload.get("participant_ids") is not None else [],
+                room_ids=_ensure_list(payload.get("room_ids")) if payload.get("room_ids") is not None else [],
+                page_size=int(payload.get("limit") or payload.get("page_size") or 15),
+                page_token=str(payload.get("page_token") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "vc_search_failed", details=exc.details) from exc
+
+    def vc_notes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("vc")
+        try:
+            return lark_cli_backend.vc_notes(
+                meeting_ids=_ensure_list(payload.get("meeting_ids")) if payload.get("meeting_ids") is not None else [],
+                minute_tokens=_ensure_list(payload.get("minute_tokens")) if payload.get("minute_tokens") is not None else [],
+                calendar_event_ids=_ensure_list(payload.get("calendar_event_ids")) if payload.get("calendar_event_ids") is not None else [],
+                output_dir=str(payload.get("output_dir") or "").strip(),
+                overwrite=_bool_flag(payload, "overwrite"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "vc_notes_failed", details=exc.details) from exc
+
+    def minutes_get(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("minutes")
+        minute_token = self.resolve_minutes_token(str(payload.get("minute") or payload.get("minute_token") or payload.get("url") or ""))
+        if not minute_token:
+            raise FeishuAgentError("minute_token is required", code="missing_minute_token")
+        try:
+            return lark_cli_backend.minutes_get(minute_token=minute_token, identity=str(payload.get("identity") or "user"))
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "minutes_get_failed", details=exc.details) from exc
+
+    def wiki_get_node(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("wiki")
+        token = str(payload.get("token") or payload.get("wiki_token") or payload.get("id") or "").strip()
+        if not token:
+            raise FeishuAgentError("wiki token is required", code="missing_wiki_token")
+        try:
+            return lark_cli_backend.wiki_get_node(token=token, identity=str(payload.get("identity") or "user"))
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "wiki_get_node_failed", details=exc.details) from exc
+
+    def sheet_create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("sheet")
+        title = str(payload.get("title") or payload.get("name") or "").strip()
+        if not title:
+            raise FeishuAgentError("sheet title is required", code="missing_sheet_title")
+        try:
+            return lark_cli_backend.sheet_create(
+                title=title,
+                headers=_ensure_list(payload.get("headers")) if payload.get("headers") is not None else None,
+                data=_ensure_list(payload.get("data")) if payload.get("data") is not None else None,
+                folder_token=self.resolve_folder_token(str(payload.get("folder") or payload.get("folder_token") or "")),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "sheet_create_failed", details=exc.details) from exc
+
+    def sheet_info(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("sheet")
+        try:
+            return lark_cli_backend.sheet_info(
+                spreadsheet_token=self.resolve_sheet_token(str(payload.get("spreadsheet") or payload.get("spreadsheet_token") or "")),
+                url=str(payload.get("url") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "sheet_info_failed", details=exc.details) from exc
+
+    def sheet_read(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("sheet")
+        try:
+            return lark_cli_backend.sheet_read(
+                spreadsheet_token=self.resolve_sheet_token(str(payload.get("spreadsheet") or payload.get("spreadsheet_token") or "")),
+                url=str(payload.get("url") or "").strip(),
+                sheet_id=str(payload.get("sheet_id") or "").strip(),
+                range_expr=str(payload.get("range") or "").strip(),
+                value_render_option=str(payload.get("value_render_option") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "sheet_read_failed", details=exc.details) from exc
+
+    def sheet_write(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("sheet")
+        values = _ensure_list(payload.get("values"), code="invalid_sheet_values")
+        try:
+            return lark_cli_backend.sheet_write(
+                values=values,
+                spreadsheet_token=self.resolve_sheet_token(str(payload.get("spreadsheet") or payload.get("spreadsheet_token") or "")),
+                url=str(payload.get("url") or "").strip(),
+                sheet_id=str(payload.get("sheet_id") or "").strip(),
+                range_expr=str(payload.get("range") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "sheet_write_failed", details=exc.details) from exc
+
+    def sheet_append(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("sheet")
+        values = _ensure_list(payload.get("values"), code="invalid_sheet_values")
+        try:
+            return lark_cli_backend.sheet_append(
+                values=values,
+                spreadsheet_token=self.resolve_sheet_token(str(payload.get("spreadsheet") or payload.get("spreadsheet_token") or "")),
+                url=str(payload.get("url") or "").strip(),
+                sheet_id=str(payload.get("sheet_id") or "").strip(),
+                range_expr=str(payload.get("range") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "sheet_append_failed", details=exc.details) from exc
+
+    def sheet_find(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("sheet")
+        text = str(payload.get("text") or payload.get("query") or payload.get("find") or "").strip()
+        if not text:
+            raise FeishuAgentError("find text is required", code="missing_sheet_find_text")
+        try:
+            return lark_cli_backend.sheet_find(
+                text=text,
+                spreadsheet_token=self.resolve_sheet_token(str(payload.get("spreadsheet") or payload.get("spreadsheet_token") or "")),
+                url=str(payload.get("url") or "").strip(),
+                sheet_id=str(payload.get("sheet_id") or "").strip(),
+                range_expr=str(payload.get("range") or "").strip(),
+                ignore_case=_bool_flag(payload, "ignore_case"),
+                include_formulas=_bool_flag(payload, "include_formulas"),
+                match_entire_cell=_bool_flag(payload, "match_entire_cell"),
+                search_by_regex=_bool_flag(payload, "search_by_regex"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "sheet_find_failed", details=exc.details) from exc
+
+    def mail_triage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("mail")
+        try:
+            return lark_cli_backend.mail_triage(
+                query=str(payload.get("query") or "").strip(),
+                filter_json=json.dumps(payload.get("filter"), ensure_ascii=False) if isinstance(payload.get("filter"), dict) else str(payload.get("filter") or "").strip(),
+                mailbox=str(payload.get("mailbox") or "me").strip() or "me",
+                max_count=int(payload.get("limit") or payload.get("max") or 20),
+                labels=_bool_flag(payload, "labels"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "mail_triage_failed", details=exc.details) from exc
+
+    def mail_send(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("mail")
+        to = str(payload.get("to") or "").strip()
+        subject = str(payload.get("subject") or "").strip()
+        body = str(payload.get("body") or "").strip()
+        if not to or not subject or not body:
+            raise FeishuAgentError("to, subject and body are required", code="missing_mail_fields")
+        try:
+            return lark_cli_backend.mail_send(
+                to=to,
+                subject=subject,
+                body=body,
+                cc=str(payload.get("cc") or "").strip(),
+                bcc=str(payload.get("bcc") or "").strip(),
+                sender=str(payload.get("from") or "").strip(),
+                attach=str(payload.get("attach") or "").strip(),
+                inline=str(payload.get("inline") or "").strip(),
+                confirm_send=_bool_flag(payload, "confirm_send"),
+                plain_text=_bool_flag(payload, "plain_text"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "mail_send_failed", details=exc.details) from exc
+
+    def mail_reply(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("mail")
+        message_id = str(payload.get("message_id") or payload.get("id") or "").strip()
+        body = str(payload.get("body") or "").strip()
+        if not message_id or not body:
+            raise FeishuAgentError("message_id and body are required", code="missing_mail_reply_fields")
+        try:
+            return lark_cli_backend.mail_reply(
+                message_id=message_id,
+                body=body,
+                to=str(payload.get("to") or "").strip(),
+                cc=str(payload.get("cc") or "").strip(),
+                bcc=str(payload.get("bcc") or "").strip(),
+                sender=str(payload.get("from") or "").strip(),
+                attach=str(payload.get("attach") or "").strip(),
+                inline=str(payload.get("inline") or "").strip(),
+                confirm_send=_bool_flag(payload, "confirm_send"),
+                plain_text=_bool_flag(payload, "plain_text"),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "mail_reply_failed", details=exc.details) from exc
+
+    def mail_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("mail")
+        message_id = str(payload.get("message_id") or payload.get("id") or "").strip()
+        if not message_id:
+            raise FeishuAgentError("message_id is required", code="missing_mail_message_id")
+        try:
+            return lark_cli_backend.mail_message(
+                message_id=message_id,
+                mailbox=str(payload.get("mailbox") or "me").strip() or "me",
+                html=_bool_flag(payload, "html", default=True),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "mail_message_failed", details=exc.details) from exc
+
+    def mail_thread(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("mail")
+        thread_id = str(payload.get("thread_id") or payload.get("id") or "").strip()
+        if not thread_id:
+            raise FeishuAgentError("thread_id is required", code="missing_mail_thread_id")
+        try:
+            return lark_cli_backend.mail_thread(
+                thread_id=thread_id,
+                mailbox=str(payload.get("mailbox") or "me").strip() or "me",
+                html=_bool_flag(payload, "html", default=True),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "mail_thread_failed", details=exc.details) from exc
+
+    def whiteboard_update(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_lark_cli_backend("whiteboard")
+        whiteboard_token = self.resolve_whiteboard_token(str(payload.get("whiteboard") or payload.get("whiteboard_token") or payload.get("id") or ""))
+        if not whiteboard_token:
+            raise FeishuAgentError("whiteboard token is required", code="missing_whiteboard_token")
+        dsl = str(payload.get("dsl") or payload.get("content") or "").strip()
+        if not dsl and payload.get("file"):
+            dsl = Path(str(payload["file"])).read_text(encoding="utf-8")
+        if not dsl:
+            raise FeishuAgentError("dsl/content is required", code="missing_whiteboard_dsl")
+        try:
+            return lark_cli_backend.whiteboard_update(
+                whiteboard_token=whiteboard_token,
+                dsl=dsl,
+                overwrite=_bool_flag(payload, "overwrite"),
+                yes=_bool_flag(payload, "yes"),
+                idempotent_token=str(payload.get("idempotent_token") or "").strip(),
+                identity=str(payload.get("identity") or "user"),
+            )
+        except lark_cli_backend.LarkCliBackendError as exc:
+            raise FeishuAgentError(str(exc), code=exc.code or "whiteboard_update_failed", details=exc.details) from exc
 
     def auth_status(self, _payload: dict[str, Any]) -> dict[str, Any]:
         store = self._load_user_token_store()
@@ -1113,6 +1760,45 @@ class FeishuAgent:
                 data={"children": blocks[index : index + 50], "index": index},
             )
 
+    def _create_doc_image_block(self, document_id: str, *, index: int = 0) -> dict[str, Any]:
+        result = self.api(
+            "POST",
+            f"/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+            data={"children": [{"block_type": 27, "image": {}}], "index": index},
+        )
+        children = _ensure_list(result.get("children"))
+        if not children:
+            raise FeishuAgentError("doc image block creation returned no children", code="doc_image_block_missing")
+        return _ensure_dict(children[0])
+
+    def _upload_doc_image(self, block_id: str, file_path: Path) -> str:
+        mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        with file_path.open("rb") as handle:
+            result = self._http_multipart(
+                "POST",
+                "/drive/v1/medias/upload_all",
+                token=self._token(),
+                data={
+                    "file_name": file_path.name,
+                    "parent_type": "docx_image",
+                    "parent_node": block_id,
+                    "size": str(file_path.stat().st_size),
+                },
+                files={"file": (file_path.name, handle, mime_type)},
+            )
+        file_token = str(result.get("file_token") or "").strip()
+        if not file_token:
+            raise FeishuAgentError("doc image upload missing file_token", code="doc_image_upload_failed")
+        return file_token
+
+    def _replace_doc_image(self, document_id: str, block_id: str, file_token: str) -> dict[str, Any]:
+        result = self.api(
+            "PATCH",
+            f"/docx/v1/documents/{document_id}/blocks/{block_id}",
+            data={"replace_image": {"token": file_token}},
+        )
+        return _ensure_dict(result.get("block"))
+
     def _grant_doc_permission(self, document_id: str, open_id: str) -> None:
         if not open_id:
             return
@@ -1126,22 +1812,108 @@ class FeishuAgent:
         except FeishuAgentError:
             return
 
+    def _resolved_share_target(self, share_to: str) -> str:
+        raw = str(share_to or "").strip()
+        if not raw:
+            return ""
+        try:
+            return self.resolve_user_id(raw)
+        except FeishuAgentError:
+            return raw
+
+    def _can_use_lark_cli_doc_backend(self, *, share_to: str = "") -> bool:
+        if not lark_cli_backend.doc_backend_enabled(self.env):
+            return False
+        normalized_share = self._resolved_share_target(share_to)
+        if not normalized_share:
+            return True
+        return normalized_share == self.owner_open_id
+
+    def _can_use_lark_cli_backend(self, domain: str) -> bool:
+        return lark_cli_backend.backend_enabled(domain, self.env)
+
+    def _lark_cli_backend_domain_for_path(self, path: str) -> str:
+        target = str(path or "").strip()
+        if target.startswith("/bitable/"):
+            return "table"
+        if target.startswith("/task/"):
+            return "task"
+        if target.startswith("/calendar/"):
+            return "calendar"
+        return ""
+
+    def _require_lark_cli_backend(self, domain: str) -> None:
+        if not self._can_use_lark_cli_backend(domain):
+            raise FeishuAgentError(
+                f"{domain} operations require the official lark-cli backend",
+                code=f"{domain}_backend_unavailable",
+            )
+
+    def resolve_minutes_token(self, value: str) -> str:
+        target = str(value or "").strip()
+        if not target:
+            return ""
+        extracted = _extract_by_patterns(
+            target,
+            [
+                r"/minutes/([A-Za-z0-9_-]+)",
+                r"minute[_-]?token=([A-Za-z0-9_-]+)",
+            ],
+        )
+        return extracted or target
+
+    def resolve_whiteboard_token(self, value: str) -> str:
+        target = str(value or "").strip()
+        if not target:
+            return ""
+        extracted = _extract_by_patterns(
+            target,
+            [
+                r"/whiteboard/([A-Za-z0-9_-]+)",
+                r"whiteboard[_-]?token=([A-Za-z0-9_-]+)",
+            ],
+        )
+        return extracted or target
+
+    def resolve_sheet_token(self, value: str) -> str:
+        target = str(value or "").strip()
+        if not target:
+            return ""
+        extracted = _extract_by_patterns(
+            target,
+            [
+                r"/sheets/([A-Za-z0-9_-]+)",
+                r"spreadsheet[_-]?token=([A-Za-z0-9_-]+)",
+            ],
+        )
+        return extracted or target
+
     def doc_create(self, payload: dict[str, Any]) -> dict[str, Any]:
         folder_token = self.resolve_folder_token(str(payload.get("folder") or ""))
         create_payload: dict[str, Any] = {"title": str(payload.get("title") or "新文档")}
         if folder_token:
             create_payload["folder_token"] = folder_token
-        result = self.api("POST", "/docx/v1/documents", data=create_payload)
-        document = result.get("document", {})
-        document_id = str(document.get("document_id") or "").strip()
         content = str(payload.get("content") or "").strip()
         if not content and payload.get("file"):
             content = Path(str(payload["file"])).read_text(encoding="utf-8")
+        share_to = str(payload.get("share_to") or self.owner_open_id or "").strip()
+        if self._can_use_lark_cli_doc_backend(share_to=share_to):
+            try:
+                return lark_cli_backend.doc_create(
+                    title=str(create_payload.get("title") or "新文档"),
+                    content=content,
+                    file_path=str(payload.get("file") or "").strip(),
+                    folder_token=folder_token,
+                )
+            except lark_cli_backend.LarkCliBackendError:
+                pass
+        result = self.api("POST", "/docx/v1/documents", data=create_payload)
+        document = result.get("document", {})
+        document_id = str(document.get("document_id") or "").strip()
         if content and document_id:
             blocks = self._md_to_blocks(content)
             if blocks:
                 self._write_doc_blocks(document_id, blocks)
-        share_to = str(payload.get("share_to") or self.owner_open_id or "").strip()
         if document_id and share_to:
             target_user = self.resolve_user_id(share_to)
             self._grant_doc_permission(document_id, target_user)
@@ -1153,11 +1925,28 @@ class FeishuAgent:
 
     def doc_get(self, payload: dict[str, Any]) -> dict[str, Any]:
         document_id = self.resolve_document_id(str(payload.get("id") or payload.get("document") or payload.get("url") or ""))
+        if self._can_use_lark_cli_doc_backend():
+            try:
+                return lark_cli_backend.doc_fetch(document=document_id)
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api("GET", f"/docx/v1/documents/{document_id}/raw_content", params={"lang": 0})
         return {"document_id": document_id, "content": result.get("content")}
 
     def doc_list(self, payload: dict[str, Any]) -> dict[str, Any]:
         folder_token = self.resolve_folder_token(str(payload.get("folder") or ""))
+        if self._can_use_lark_cli_doc_backend():
+            try:
+                result = lark_cli_backend.doc_list(
+                    folder_token=folder_token,
+                    page_size=int(payload.get("limit") or 50),
+                )
+                return {
+                    "files": list(result.get("files") or []),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         params: dict[str, Any] = {
             "page_size": int(payload.get("limit") or 50),
             "order_by": "EditedTime",
@@ -1168,10 +1957,94 @@ class FeishuAgent:
         result = self.api("GET", "/drive/v1/files", params=params)
         return {"files": result.get("files", [])}
 
+    def doc_search(self, payload: dict[str, Any]) -> dict[str, Any]:
+        query = str(payload.get("query") or payload.get("name") or "").strip()
+        if not query:
+            raise FeishuAgentError("query is required", code="missing_query")
+        limit = int(payload.get("limit") or 15)
+        if self._can_use_lark_cli_doc_backend():
+            try:
+                result = lark_cli_backend.doc_search(
+                    query=query,
+                    page_size=limit,
+                    page_token=str(payload.get("page_token") or "").strip(),
+                )
+                return {
+                    "files": list(result.get("files") or [])[:limit],
+                    "page_token": result.get("page_token") or "",
+                    "has_more": bool(result.get("has_more")),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
+        raise FeishuAgentError(
+            "doc search requires the official lark-cli user-auth backend",
+            code="doc_search_unavailable",
+            details={"query": query},
+        )
+
+    def doc_insert_image(self, payload: dict[str, Any]) -> dict[str, Any]:
+        document_id = self.resolve_document_id(str(payload.get("id") or payload.get("document") or payload.get("url") or ""))
+        raw_file_path = str(payload.get("file_path") or payload.get("file") or "").strip()
+        if not raw_file_path:
+            raise FeishuAgentError("file_path is required", code="missing_file_path")
+        file_path = Path(raw_file_path)
+        if not file_path.exists():
+            raise FeishuAgentError("image file does not exist", code="missing_image_file", details={"file_path": str(file_path)})
+        if self._can_use_lark_cli_doc_backend():
+            try:
+                return lark_cli_backend.doc_insert_image(document=document_id, file_path=str(file_path))
+            except lark_cli_backend.LarkCliBackendError:
+                pass
+        index = int(payload.get("index") or 0)
+        block = self._create_doc_image_block(document_id, index=index)
+        block_id = str(block.get("block_id") or "").strip()
+        if not block_id:
+            raise FeishuAgentError("doc image block missing block_id", code="doc_image_block_missing")
+        file_token = self._upload_doc_image(block_id, file_path)
+        updated = self._replace_doc_image(document_id, block_id, file_token)
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "block_id": block_id,
+            "file_token": file_token,
+            "file_path": str(file_path),
+            "url": f"https://feishu.cn/docx/{document_id}",
+            "block": updated,
+        }
+
     def table_records(self, payload: dict[str, Any]) -> dict[str, Any]:
         app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
         if not table_id:
             raise FeishuAgentError("table id is required", code="missing_table_id")
+        if self._can_use_lark_cli_backend("table") and not payload.get("filter") and not payload.get("sort"):
+            raw_offset = payload.get("offset")
+            if raw_offset is None:
+                raw_offset = payload.get("page_token")
+            try:
+                offset = int(raw_offset or 0)
+            except (TypeError, ValueError):
+                offset = 0
+            view_id = str(payload.get("view") or payload.get("view_id") or "").strip()
+            try:
+                result = lark_cli_backend.base_record_list(
+                    base_token=app_token,
+                    table_id=table_id,
+                    limit=int(payload.get("limit") or 100),
+                    offset=offset,
+                    view_id=view_id,
+                )
+                return {
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "records": list(result.get("records") or []),
+                    "total": result.get("total"),
+                    "fields": list(result.get("fields") or []),
+                    "record_id_list": list(result.get("record_id_list") or []),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         params: dict[str, Any] = {"page_size": int(payload.get("limit") or 100)}
         if payload.get("filter"):
             params["filter"] = payload["filter"]
@@ -1197,6 +2070,23 @@ class FeishuAgent:
         if raw is None and payload.get("file"):
             raw = json.loads(Path(str(payload["file"])).read_text(encoding="utf-8"))
         fields = raw if isinstance(raw, dict) else json.loads(str(raw or "{}"))
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_record_upsert(
+                    base_token=app_token,
+                    table_id=table_id,
+                    fields=fields,
+                )
+                return {
+                    "ok": True,
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "record_id": result.get("record_id"),
+                    "record": result.get("record"),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records", data={"fields": fields})
         return {"ok": True, "app_token": app_token, "table_id": table_id, "record_id": result.get("record", {}).get("record_id")}
 
@@ -1207,6 +2097,23 @@ class FeishuAgent:
             raise FeishuAgentError("table and record are required", code="missing_table_or_record")
         raw = payload.get("data")
         fields = raw if isinstance(raw, dict) else json.loads(str(raw or "{}"))
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_record_upsert(
+                    base_token=app_token,
+                    table_id=table_id,
+                    record_id=record_id,
+                    fields=fields,
+                )
+                return {
+                    "ok": True,
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "record": result.get("record"),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api("PUT", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}", data={"fields": fields})
         return {"ok": True, "record": result.get("record")}
 
@@ -1215,16 +2122,47 @@ class FeishuAgent:
         record_id = str(payload.get("record") or payload.get("record_id") or "").strip()
         if not table_id or not record_id:
             raise FeishuAgentError("table and record are required", code="missing_table_or_record")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_record_delete(
+                    base_token=app_token,
+                    table_id=table_id,
+                    record_id=record_id,
+                )
+                return {"ok": True, "record_id": record_id, "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}")
         return {"ok": True}
 
     def table_tables(self, payload: dict[str, Any]) -> dict[str, Any]:
         app_token, _table_id = self.resolve_table_refs(str(payload.get("app") or ""), "")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_table_list(
+                    base_token=app_token,
+                    limit=int(payload.get("limit") or 50),
+                    offset=int(payload.get("offset") or 0),
+                )
+                return {
+                    "app_token": app_token,
+                    "tables": list(result.get("tables") or []),
+                    "total": result.get("total"),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api("GET", f"/bitable/v1/apps/{app_token}/tables", params={"page_size": 50})
         return {"app_token": app_token, "tables": list(result.get("items") or [])}
 
     def table_get_app(self, payload: dict[str, Any]) -> dict[str, Any]:
         app_token, _table_id = self.resolve_table_refs(str(payload.get("app") or ""), "")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_get(base_token=app_token)
+                return {"app_token": app_token, "app": _ensure_dict(result.get("base")), "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api("GET", f"/bitable/v1/apps/{app_token}")
         return {"app_token": app_token, "app": _ensure_dict(result.get("app"))}
 
@@ -1232,6 +2170,12 @@ class FeishuAgent:
         app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
         if not table_id:
             raise FeishuAgentError("table id is required", code="missing_table_id")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_table_delete(base_token=app_token, table_id=table_id)
+                return {"ok": True, "app_token": app_token, "table_id": table_id, "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}")
         return {"ok": True, "app_token": app_token, "table_id": table_id}
 
@@ -1239,6 +2183,23 @@ class FeishuAgent:
         app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
         if not table_id:
             raise FeishuAgentError("table id is required", code="missing_table_id")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_field_list(
+                    base_token=app_token,
+                    table_id=table_id,
+                    limit=int(payload.get("limit") or 100),
+                    offset=int(payload.get("offset") or 0),
+                )
+                return {
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "fields": list(result.get("fields") or []),
+                    "total": result.get("total"),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api(
             "GET",
             f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
@@ -1260,6 +2221,23 @@ class FeishuAgent:
             data["description"] = str(payload.get("description") or "")
         if not data:
             raise FeishuAgentError("field update payload is empty", code="missing_field_update")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_field_update(
+                    base_token=app_token,
+                    table_id=table_id,
+                    field_id=field_id,
+                    field=data,
+                )
+                return {
+                    "ok": True,
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "field": _ensure_dict(result.get("field")),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api(
             "PUT",
             f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}",
@@ -1272,6 +2250,18 @@ class FeishuAgent:
         field_id = str(payload.get("field_id") or payload.get("field") or "").strip()
         if not table_id or not field_id:
             raise FeishuAgentError("table and field are required", code="missing_table_or_field")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_field_delete(base_token=app_token, table_id=table_id, field_id=field_id)
+                return {
+                    "ok": True,
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "field_id": field_id,
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}")
         return {"ok": True, "app_token": app_token, "table_id": table_id, "field_id": field_id}
 
@@ -1279,6 +2269,23 @@ class FeishuAgent:
         app_token, table_id = self.resolve_table_refs(str(payload.get("app") or ""), str(payload.get("table") or ""))
         if not table_id:
             raise FeishuAgentError("table id is required", code="missing_table_id")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_view_list(
+                    base_token=app_token,
+                    table_id=table_id,
+                    limit=int(payload.get("limit") or 100),
+                    offset=int(payload.get("offset") or 0),
+                )
+                return {
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "views": list(result.get("views") or []),
+                    "total": result.get("total"),
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api(
             "GET",
             f"/bitable/v1/apps/{app_token}/tables/{table_id}/views",
@@ -1291,6 +2298,12 @@ class FeishuAgent:
         view_id = str(payload.get("view") or payload.get("view_id") or "").strip()
         if not table_id or not view_id:
             raise FeishuAgentError("table and view are required", code="missing_table_or_view")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_view_get(base_token=app_token, table_id=table_id, view_id=view_id)
+                return {"app_token": app_token, "table_id": table_id, "view": _ensure_dict(result.get("view")), "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api("GET", f"/bitable/v1/apps/{app_token}/tables/{table_id}/views/{view_id}")
         return {"app_token": app_token, "table_id": table_id, "view": _ensure_dict(result.get("view"))}
 
@@ -1302,6 +2315,16 @@ class FeishuAgent:
         if not view_name:
             raise FeishuAgentError("view name is required", code="missing_view_name")
         view_type = str(payload.get("type") or payload.get("view_type") or "grid").strip() or "grid"
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_view_create(
+                    base_token=app_token,
+                    table_id=table_id,
+                    view={"view_name": view_name, "view_type": view_type},
+                )
+                return {"ok": True, "app_token": app_token, "table_id": table_id, "view": _ensure_dict(result.get("view")), "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api(
             "POST",
             f"/bitable/v1/apps/{app_token}/tables/{table_id}/views",
@@ -1323,6 +2346,17 @@ class FeishuAgent:
             data["property"] = _json_clone(payload.get("property"))
         if not data:
             raise FeishuAgentError("view update payload is empty", code="missing_view_update")
+        if self._can_use_lark_cli_backend("table") and set(data.keys()).issubset({"view_name"}):
+            try:
+                result = lark_cli_backend.base_view_update(
+                    base_token=app_token,
+                    table_id=table_id,
+                    view_id=view_id,
+                    name=str(data.get("view_name") or "").strip(),
+                )
+                return {"ok": True, "app_token": app_token, "table_id": table_id, "view": _ensure_dict(result.get("view")), "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api(
             "PATCH",
             f"/bitable/v1/apps/{app_token}/tables/{table_id}/views/{view_id}",
@@ -1335,6 +2369,12 @@ class FeishuAgent:
         view_id = str(payload.get("view") or payload.get("view_id") or "").strip()
         if not table_id or not view_id:
             raise FeishuAgentError("table and view are required", code="missing_table_or_view")
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_view_delete(base_token=app_token, table_id=table_id, view_id=view_id)
+                return {"ok": True, "app_token": app_token, "table_id": table_id, "view_id": view_id, "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.user_api("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/views/{view_id}")
         return {"ok": True, "app_token": app_token, "table_id": table_id, "view_id": view_id}
 
@@ -1349,6 +2389,32 @@ class FeishuAgent:
         folder_token = self._resolve_bitable_folder_token(payload)
         if folder_token:
             data["folder_token"] = folder_token
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_app_create(
+                    name=name,
+                    time_zone=timezone,
+                    folder_token=folder_token,
+                )
+                app = _ensure_dict(result.get("app"))
+                response: dict[str, Any] = {
+                    "ok": True,
+                    "app_token": app.get("app_token"),
+                    "default_table_id": app.get("default_table_id"),
+                    "url": app.get("url"),
+                    "app": app,
+                    "backend": result.get("backend"),
+                }
+                table_name = str(payload.get("table_name") or payload.get("table") or "").strip() or "表1"
+                response["table"] = {
+                    "table_id": app.get("default_table_id"),
+                    "name": table_name,
+                    "default_view_name": str(payload.get("default_view_name") or "").strip() or "默认视图",
+                    "fields": self._normalize_bitable_fields(payload.get("fields")) if payload.get("fields") is not None else [],
+                }
+                return response
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api("POST", "/bitable/v1/apps", data=data)
         app = _ensure_dict(result.get("app"))
         table_name = str(payload.get("table_name") or payload.get("table") or "").strip() or "表1"
@@ -1381,6 +2447,24 @@ class FeishuAgent:
             normalized_fields = self._normalize_bitable_fields(fields_spec)
             if normalized_fields:
                 table_data["fields"] = normalized_fields
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_table_create(
+                    base_token=app_token,
+                    name=name,
+                    fields=table_data.get("fields"),
+                    view={"view_name": default_view_name} if default_view_name else None,
+                )
+                table = _ensure_dict(result.get("table"))
+                return {
+                    "ok": True,
+                    "app_token": app_token,
+                    "table_id": table.get("table_id"),
+                    "table": table,
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api("POST", f"/bitable/v1/apps/{app_token}/tables", data={"table": table_data})
         table = _ensure_dict(result.get("table"))
         if not table:
@@ -1416,6 +2500,24 @@ class FeishuAgent:
         property_value = field_data.get("property")
         if property_value is None or property_value == "" or property_value == {}:
             field_data.pop("property", None)
+        if self._can_use_lark_cli_backend("table"):
+            try:
+                result = lark_cli_backend.base_field_create(
+                    base_token=app_token,
+                    table_id=table_id,
+                    field=field_data,
+                )
+                field = _ensure_dict(result.get("field"))
+                return {
+                    "ok": True,
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "field_id": field.get("field_id"),
+                    "field": field,
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.user_api("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields", data=field_data)
         field = _ensure_dict(result.get("field"))
         return {"ok": True, "app_token": app_token, "table_id": table_id, "field_id": field.get("field_id"), "field": field}
@@ -1504,7 +2606,18 @@ class FeishuAgent:
             if not vchat.get("vc_type"):
                 vchat["vc_type"] = "vc"
             event_data["vchat"] = _json_clone(vchat)
-        result = self.api("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data)
+        if self._can_use_lark_cli_backend("calendar"):
+            try:
+                result = lark_cli_backend.api_call(
+                    "POST",
+                    f"/calendar/v4/calendars/{calendar_id}/events",
+                    data=event_data,
+                    identity="bot",
+                )
+            except lark_cli_backend.LarkCliBackendError:
+                result = self._http("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data, token=self._token())
+        else:
+            result = self.api("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data)
         event = _ensure_dict(result.get("event"))
         event_id = str(event.get("event_id") or "").strip()
         attendees = self._normalize_attendees(list(payload.get("attendees") or []))
@@ -1526,13 +2639,24 @@ class FeishuAgent:
                     row["third_party_email"] = item["id"]
                 attendee_data.append(row)
             try:
-                self.api(
-                    "POST",
-                    f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
-                    data={"attendees": attendee_data, "need_notification": True},
-                    params={"user_id_type": "open_id"},
-                )
+                if self._can_use_lark_cli_backend("calendar"):
+                    lark_cli_backend.api_call(
+                        "POST",
+                        f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+                        data={"attendees": attendee_data, "need_notification": True},
+                        params={"user_id_type": "open_id"},
+                        identity="bot",
+                    )
+                else:
+                    self.api(
+                        "POST",
+                        f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+                        data={"attendees": attendee_data, "need_notification": True},
+                        params={"user_id_type": "open_id"},
+                    )
             except FeishuAgentError as exc:
+                attendee_warning = str(exc)
+            except lark_cli_backend.LarkCliBackendError as exc:
                 attendee_warning = str(exc)
         safe_event = {
             "event_id": event_id,
@@ -1551,6 +2675,37 @@ class FeishuAgent:
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
         now_ts = int(time.time())
         days = int(payload.get("days") or 7)
+        if self._can_use_lark_cli_backend("calendar"):
+            start_iso = datetime.fromtimestamp(now_ts, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            end_iso = datetime.fromtimestamp(now_ts + days * 86400, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            try:
+                result = lark_cli_backend.calendar_agenda(
+                    calendar_id=calendar_id,
+                    start=start_iso,
+                    end=end_iso,
+                    identity="bot",
+                )
+                events = []
+                for event in result.get("events", []):
+                    safe_event = _ensure_dict(event)
+                    events.append(
+                        {
+                            "id": safe_event.get("event_id") or safe_event.get("id"),
+                            "title": safe_event.get("summary") or safe_event.get("title"),
+                            "start": safe_event.get("start_time") or safe_event.get("start"),
+                            "end": safe_event.get("end_time") or safe_event.get("end"),
+                            "location": _ensure_dict(safe_event.get("location")).get("name") or safe_event.get("location"),
+                            "description": safe_event.get("description"),
+                            "vchat": safe_event.get("vchat") or {},
+                        }
+                    )
+                return {
+                    "calendar_id": result.get("calendar_id") or calendar_id,
+                    "events": events,
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         result = self.api(
             "GET",
             f"/calendar/v4/calendars/{calendar_id}/events",
@@ -1572,6 +2727,34 @@ class FeishuAgent:
         return {"calendar_id": calendar_id, "events": events}
 
     def cal_add(self, payload: dict[str, Any]) -> dict[str, Any]:
+        calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
+        if self._can_use_lark_cli_backend("calendar"):
+            timezone = str(payload.get("timezone") or DEFAULT_TIMEZONE)
+            try:
+                start = _parse_dt(str(payload.get("start") or payload.get("start_time") or ""), timezone=timezone)
+                end_value = str(payload.get("end") or payload.get("end_time") or "").strip()
+                if end_value:
+                    end = _parse_dt(end_value, timezone=timezone)
+                else:
+                    duration_minutes = int(payload.get("duration_minutes") or 60)
+                    end = {"timestamp": str(int(start["timestamp"]) + duration_minutes * 60), "timezone": timezone}
+                result = lark_cli_backend.calendar_create(
+                    summary=str(payload.get("title") or payload.get("summary") or "").strip(),
+                    start=datetime.fromtimestamp(int(start["timestamp"]), UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                    end=datetime.fromtimestamp(int(end["timestamp"]), UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                    calendar_id=calendar_id,
+                    description=str(payload.get("note") or payload.get("description") or "").strip(),
+                    attendee_ids=[],
+                    identity="bot",
+                )
+                return {
+                    "ok": True,
+                    "calendar_id": result.get("calendar_id") or calendar_id,
+                    "event": result.get("event") or {},
+                    "backend": result.get("backend"),
+                }
+            except (FeishuAgentError, lark_cli_backend.LarkCliBackendError):
+                pass
         return self._create_calendar_event(payload, with_vchat=False)
 
     def cal_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1579,10 +2762,34 @@ class FeishuAgent:
         event_id = str(payload.get("id") or payload.get("event_id") or "").strip()
         if not event_id:
             raise FeishuAgentError("event id is required", code="missing_event_id")
+        if self._can_use_lark_cli_backend("calendar"):
+            try:
+                result = lark_cli_backend.calendar_delete(
+                    calendar_id=calendar_id,
+                    event_id=event_id,
+                    identity="bot",
+                )
+                return {
+                    "ok": True,
+                    "calendar_id": calendar_id,
+                    "event_id": event_id,
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.api("DELETE", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
         return {"ok": True, "calendar_id": calendar_id, "event_id": event_id}
 
     def task_list(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._can_use_lark_cli_backend("task"):
+            try:
+                result = lark_cli_backend.task_list(
+                    query=str(payload.get("query") or "").strip(),
+                    completed=bool(payload.get("completed")),
+                )
+                return {"tasks": list(result.get("tasks") or []), "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         params: dict[str, Any] = {"page_size": int(payload.get("limit") or 50), "user_id_type": "open_id"}
         if payload.get("completed"):
             params["completed"] = "true"
@@ -1593,6 +2800,22 @@ class FeishuAgent:
         title = str(payload.get("title") or payload.get("summary") or "").strip()
         if not title:
             raise FeishuAgentError("title is required", code="missing_title")
+        if self._can_use_lark_cli_backend("task"):
+            try:
+                result = lark_cli_backend.task_create(
+                    summary=title,
+                    description=str(payload.get("note") or payload.get("description") or "").strip(),
+                    due=str(payload.get("due") or "").strip(),
+                    assignee=self.owner_open_id,
+                )
+                return {
+                    "ok": True,
+                    "task_id": result.get("task_id"),
+                    "task": result.get("task") or {},
+                    "backend": result.get("backend"),
+                }
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         data: dict[str, Any] = {"summary": title}
         due = str(payload.get("due") or "").strip()
         if due:
@@ -1609,6 +2832,12 @@ class FeishuAgent:
         task_id = str(payload.get("id") or payload.get("task_id") or "").strip()
         if not task_id:
             raise FeishuAgentError("task id is required", code="missing_task_id")
+        if self._can_use_lark_cli_backend("task"):
+            try:
+                result = lark_cli_backend.task_complete(task_id=task_id)
+                return {"ok": True, "task_id": task_id, "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.user_api(
             "PATCH",
             f"/task/v2/tasks/{task_id}",
@@ -1620,6 +2849,12 @@ class FeishuAgent:
         task_id = str(payload.get("id") or payload.get("task_id") or "").strip()
         if not task_id:
             raise FeishuAgentError("task id is required", code="missing_task_id")
+        if self._can_use_lark_cli_backend("task"):
+            try:
+                result = lark_cli_backend.task_delete(task_id=task_id)
+                return {"ok": True, "task_id": task_id, "backend": result.get("backend")}
+            except lark_cli_backend.LarkCliBackendError:
+                pass
         self.user_api("DELETE", f"/task/v2/tasks/{task_id}")
         return {"ok": True, "task_id": task_id}
 
@@ -1658,7 +2893,17 @@ class FeishuAgent:
         event_id = str(payload.get("id") or payload.get("meeting_id") or payload.get("event_id") or "").strip()
         if not event_id:
             raise FeishuAgentError("meeting id is required", code="missing_meeting_id")
-        result = self.api("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
+        if self._can_use_lark_cli_backend("calendar"):
+            try:
+                result = lark_cli_backend.calendar_get(
+                    calendar_id=calendar_id,
+                    event_id=event_id,
+                    identity="bot",
+                )
+            except lark_cli_backend.LarkCliBackendError:
+                result = {"event": self._http("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}", token=self._token()).get("event")}
+        else:
+            result = self.api("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
         return calendar_id, _ensure_dict(result.get("event"))
 
     def meeting_get(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1690,20 +2935,26 @@ class FeishuAgent:
             "msg history": self.msg_history,
             "msg search": self.msg_search,
             "msg chats": self.msg_chats,
+            "msg download-resources": self.msg_download_resources,
             "auth status": self.auth_status,
             "auth login": self.auth_login,
             "auth clear": self.auth_clear,
             "user get": self.user_get,
             "user search": self.user_search,
+            "drive upload": self.drive_upload,
+            "drive download": self.drive_download,
+            "drive add-comment": self.drive_add_comment,
             "doc create": self.doc_create,
             "doc get": self.doc_get,
+            "doc insert-image": self.doc_insert_image,
             "doc list": self.doc_list,
+            "doc search": self.doc_search,
             "table records": self.table_records,
             "table add": self.table_add,
             "table update": self.table_update,
             "table delete": self.table_delete,
-            "table tables": self.table_tables,
             "table get-app": self.table_get_app,
+            "table tables": self.table_tables,
             "table delete-table": self.table_delete_table,
             "table fields": self.table_fields,
             "table update-field": self.table_update_field,
@@ -1723,6 +2974,22 @@ class FeishuAgent:
             "task add": self.task_add,
             "task done": self.task_done,
             "task delete": self.task_delete,
+            "vc search": self.vc_search,
+            "vc notes": self.vc_notes,
+            "minutes get": self.minutes_get,
+            "wiki get-node": self.wiki_get_node,
+            "sheet create": self.sheet_create,
+            "sheet info": self.sheet_info,
+            "sheet read": self.sheet_read,
+            "sheet write": self.sheet_write,
+            "sheet append": self.sheet_append,
+            "sheet find": self.sheet_find,
+            "mail triage": self.mail_triage,
+            "mail send": self.mail_send,
+            "mail reply": self.mail_reply,
+            "mail message": self.mail_message,
+            "mail thread": self.mail_thread,
+            "whiteboard update": self.whiteboard_update,
             "meeting create": self.meeting_create,
             "meeting get": self.meeting_get,
             "meeting list": self.meeting_list,

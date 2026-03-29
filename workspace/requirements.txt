@@ -2,5 +2,8 @@ PyYAML
 python-docx
 openpyxl
 pypdf
+requests
+beautifulsoup4
 qrcode[pil]
 certifi
+requests
