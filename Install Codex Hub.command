@@ -7,12 +7,13 @@ WORKSPACE_DIR="$ROOT_DIR/workspace"
 cd "$WORKSPACE_DIR"
 
 echo "==> Bootstrapping Codex Hub..."
-python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
+python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli
 
 echo
 echo "Setup finished."
 echo "If you want Feishu chat entry as well, enable Feishu in workspace/control/site.yaml"
 echo "and then run:"
+echo "  python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app"
 echo "  python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge"
 echo
 echo "Next recommended step:"

@@ -31,7 +31,13 @@ PYTHON_DEPENDENCIES = (
     ("bs4", "beautifulsoup4"),
     ("qrcode", "qrcode[pil]"),
     ("certifi", "certifi"),
+    ("requests", "requests"),
 )
+LARK_CLI_PACKAGE = "@larksuite/cli"
+LARK_CLI_SKILLS_REPO = "https://github.com/larksuite/cli"
+LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
+LARK_CLI_SKILLS_ROOT = Path.home() / ".agents" / "skills"
+DEFAULT_FEISHU_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
 
 
 @dataclass
@@ -178,6 +184,12 @@ def command_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def lark_cli_skills_installed() -> bool:
+    if not LARK_CLI_SKILLS_ROOT.exists():
+        return False
+    return any(path.name.startswith("lark-") for path in LARK_CLI_SKILLS_ROOT.iterdir())
+
+
 def python_module_status() -> dict[str, bool]:
     return {module: importlib.util.find_spec(module) is not None for module, _ in PYTHON_DEPENDENCIES}
 
@@ -203,6 +215,14 @@ def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
     }
 
 
+def result_failed(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("skipped"):
+        return False
+    return int(result.get("returncode") or 0) != 0
+
+
 def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
     return {
         "generated_at": utc_now(),
@@ -218,7 +238,9 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "python3": command_available("python3"),
             "node": command_available("node"),
             "npm": command_available("npm"),
+            "npx": command_available("npx"),
             "codex": command_available("codex"),
+            "lark_cli": command_available("lark-cli"),
         },
         "python_modules": python_module_status(),
         "apps": {
@@ -230,6 +252,7 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "codex_config": CODEX_CONFIG_PATH.exists(),
             "feishu_resources": (site.workspace_root / "control" / "feishu_resources.yaml").exists(),
             "feishu_bridge_env_example": (site.workspace_root / "ops" / "feishu_bridge.env.example").exists(),
+            "lark_cli_config": LARK_CLI_CONFIG_PATH.exists(),
         },
         "manual_actions": [],
         "sync_results": {},
@@ -238,6 +261,11 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
         },
         "feishu_bridge": {
             "installed": False,
+        },
+        "feishu_cli": {
+            "installed": command_available("lark-cli"),
+            "configured": LARK_CLI_CONFIG_PATH.exists(),
+            "skills_installed": lark_cli_skills_installed(),
         },
     }
 
@@ -265,7 +293,8 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
             [
                 "Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.",
                 "Copy `ops/feishu_bridge.env.example` to `ops/feishu_bridge.env.local` and fill your Feishu app settings.",
-                "Complete one Feishu OAuth login with `python3 ops/feishu_agent.py auth login`.",
+                "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, install official skills, and complete user authorization.",
+                "Complete one Feishu OAuth login with `python3 ops/feishu_agent.py auth login` after the official CLI setup succeeds.",
                 "Ensure your CoCo Feishu app scopes are approved and published.",
                 "Optionally install the Feishu bridge launch agent with `python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge`.",
             ]
@@ -313,6 +342,64 @@ def install_python_dependencies(*, force: bool = False) -> dict[str, object]:
     result["requirements_path"] = str(REQUIREMENTS_PATH)
     result["python_modules_after"] = python_module_status()
     return result
+
+
+def install_feishu_cli_tooling(*, force: bool = False, install_skills: bool = True) -> dict[str, object]:
+    results: dict[str, object] = {
+        "cli": {"installed": False, "skipped": True},
+        "skills": {"installed": False, "skipped": not install_skills},
+    }
+    if force or not command_available("lark-cli"):
+        results["cli"] = run_command(["npm", "install", "-g", LARK_CLI_PACKAGE], WORKSPACE_ROOT)
+        results["cli"]["installed"] = results["cli"].get("returncode") == 0
+        results["cli"]["skipped"] = False
+    else:
+        results["cli"] = {"installed": True, "skipped": True}
+    if install_skills:
+        if force or not lark_cli_skills_installed():
+            results["skills"] = run_command(
+                ["npx", "skills", "add", LARK_CLI_SKILLS_REPO, "-y", "-g"],
+                WORKSPACE_ROOT,
+            )
+            results["skills"]["installed"] = results["skills"].get("returncode") == 0
+            results["skills"]["skipped"] = False
+        else:
+            results["skills"] = {"installed": True, "skipped": True}
+    return results
+
+
+def setup_feishu_cli(
+    *,
+    create_app: bool,
+    install: bool,
+    install_skills: bool,
+    login_user: bool = True,
+) -> dict[str, object]:
+    results: dict[str, object] = {
+        "install": {"skipped": True},
+        "config_init": {"skipped": True},
+        "auth_login": {"skipped": not login_user},
+        "doctor": {"skipped": True},
+    }
+    if install:
+        results["install"] = install_feishu_cli_tooling(force=False, install_skills=install_skills)
+        cli_result = (results["install"] or {}).get("cli", {})
+        if isinstance(cli_result, dict) and int(cli_result.get("returncode") or 0) != 0:
+            return results
+    if create_app or not LARK_CLI_CONFIG_PATH.exists():
+        config_cmd = ["lark-cli", "config", "init"]
+        if create_app:
+            config_cmd.append("--new")
+        results["config_init"] = run_command(config_cmd, WORKSPACE_ROOT)
+        if int(results["config_init"].get("returncode") or 0) != 0:
+            return results
+    if login_user:
+        auth_cmd = ["lark-cli", "auth", "login", "--domain", DEFAULT_FEISHU_CLI_DOMAINS]
+        results["auth_login"] = run_command(auth_cmd, WORKSPACE_ROOT)
+        if int(results["auth_login"].get("returncode") or 0) != 0:
+            return results
+    results["doctor"] = run_command(["lark-cli", "doctor"], WORKSPACE_ROOT)
+    return results
 
 
 def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, object]:
@@ -372,6 +459,12 @@ def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object
     payload["knowledge_base"] = maybe_bootstrap_knowledge_base(site)
     payload["sync_results"] = maybe_sync(site, skip_sync=args.skip_sync)
     payload["launchagents"] = maybe_install_launchagents(site, install=args.install_launchagents)
+    payload["feishu_cli"] = setup_feishu_cli(
+        create_app=getattr(args, "create_feishu_app", False),
+        install=getattr(args, "install_feishu_cli", False) or getattr(args, "setup_feishu_cli", False),
+        install_skills=True,
+        login_user=getattr(args, "setup_feishu_cli", False),
+    )
     payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)
     payload["manual_actions"] = build_manual_actions(site, payload)
 
@@ -416,8 +509,18 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if not args.skip_acceptance:
         acceptance_result = run_command([sys.executable, "ops/accept_product.py", "run"], site.workspace_root)
         acceptance_rc = int(acceptance_result.get("returncode") or 0)
+    feishu_cli_result = bootstrap_result.get("feishu_cli")
+    feishu_cli_ok = True
+    if isinstance(feishu_cli_result, dict):
+        install_payload = feishu_cli_result.get("install")
+        if isinstance(install_payload, dict):
+            feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("cli"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("skills"))
+        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("config_init"))
+        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("auth_login"))
+        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("doctor"))
     payload = {
-        "ok": acceptance_rc == 0 and dependency_result.get("returncode", 0) == 0,
+        "ok": acceptance_rc == 0 and dependency_result.get("returncode", 0) == 0 and feishu_cli_ok,
         "python_dependencies": dependency_result,
         "bootstrap": bootstrap_result,
         "acceptance": acceptance_result,
@@ -437,6 +540,37 @@ def cmd_status(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_feishu_cli(args: argparse.Namespace) -> int:
+    payload = install_feishu_cli_tooling(force=args.force, install_skills=not args.skip_skills)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    cli_rc = int(((payload.get("cli") or {}).get("returncode")) or 0)
+    skills_rc = int(((payload.get("skills") or {}).get("returncode")) or 0)
+    return 0 if cli_rc == 0 and skills_rc == 0 else 1
+
+
+def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
+    payload = setup_feishu_cli(
+        create_app=args.create_feishu_app,
+        install=not args.skip_install,
+        install_skills=not args.skip_skills,
+        login_user=not args.skip_login,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    for key in ("config_init", "auth_login", "doctor"):
+        result = payload.get(key)
+        if isinstance(result, dict) and not result.get("skipped"):
+            if int(result.get("returncode") or 0) != 0:
+                return 1
+    install_payload = payload.get("install")
+    if isinstance(install_payload, dict):
+        for key in ("cli", "skills"):
+            result = install_payload.get(key)
+            if isinstance(result, dict) and not result.get("skipped"):
+                if int(result.get("returncode") or 0) != 0:
+                    return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bootstrap the portable Codex Hub product workspace.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -447,6 +581,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_deps_parser.add_argument("--force", action="store_true", help="Run pip install even if the modules already exist.")
     install_deps_parser.set_defaults(func=cmd_install_python_deps)
+
+    install_feishu_cli_parser = sub.add_parser(
+        "install-feishu-cli",
+        help="Install the official Feishu CLI and official Lark skills used by the public Codex Hub build.",
+    )
+    install_feishu_cli_parser.add_argument("--force", action="store_true", help="Reinstall lark-cli even if it already exists.")
+    install_feishu_cli_parser.add_argument("--skip-skills", action="store_true", help="Skip installing the official Lark skills bundle.")
+    install_feishu_cli_parser.set_defaults(func=cmd_install_feishu_cli)
+
+    setup_feishu_cli_parser = sub.add_parser(
+        "setup-feishu-cli",
+        help="Install lark-cli, create/configure the Feishu app, and complete user authorization in one flow.",
+    )
+    setup_feishu_cli_parser.add_argument("--create-feishu-app", action="store_true", help="Create a new Feishu app in the browser before login.")
+    setup_feishu_cli_parser.add_argument("--skip-install", action="store_true", help="Skip the lark-cli and official skills installation stage.")
+    setup_feishu_cli_parser.add_argument("--skip-skills", action="store_true", help="Skip installing the official Lark skills bundle.")
+    setup_feishu_cli_parser.add_argument("--skip-login", action="store_true", help="Skip the user authorization step after configuration.")
+    setup_feishu_cli_parser.set_defaults(func=cmd_setup_feishu_cli)
 
     init_parser = sub.add_parser("init", help="Initialize runtime folders, generated config, and optional launchagents.")
     init_parser.add_argument(
@@ -463,6 +615,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--install-feishu-bridge",
         action="store_true",
         help="Run npm install for Electron and install the Feishu bridge launch agent.",
+    )
+    init_parser.add_argument(
+        "--install-feishu-cli",
+        action="store_true",
+        help="Install the official Feishu CLI and official Lark skills during bootstrap.",
+    )
+    init_parser.add_argument(
+        "--setup-feishu-cli",
+        action="store_true",
+        help="Install and configure the official Feishu CLI during bootstrap, including user authorization.",
+    )
+    init_parser.add_argument(
+        "--create-feishu-app",
+        action="store_true",
+        help="When setting up the official Feishu CLI, create a new app in the browser first.",
     )
     init_parser.set_defaults(func=cmd_init)
 
@@ -494,6 +661,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--install-feishu-bridge",
         action="store_true",
         help="Run npm install for Electron and install the Feishu bridge launch agent.",
+    )
+    setup_parser.add_argument(
+        "--install-feishu-cli",
+        action="store_true",
+        help="Install the official Feishu CLI and official Lark skills during setup.",
+    )
+    setup_parser.add_argument(
+        "--setup-feishu-cli",
+        action="store_true",
+        help="Install and configure the official Feishu CLI during setup, including user authorization.",
+    )
+    setup_parser.add_argument(
+        "--create-feishu-app",
+        action="store_true",
+        help="When setting up the official Feishu CLI, create a new app in the browser first.",
     )
     setup_parser.add_argument(
         "--skip-acceptance",

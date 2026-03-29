@@ -100,6 +100,9 @@ def test_setup_runs_acceptance_after_bootstrap(monkeypatch, capsys) -> None:
         skip_sync=False,
         install_launchagents=True,
         install_feishu_bridge=False,
+        install_feishu_cli=False,
+        setup_feishu_cli=False,
+        create_feishu_app=False,
         skip_acceptance=False,
     )
     rc = bootstrap.cmd_setup(args)
@@ -107,3 +110,33 @@ def test_setup_runs_acceptance_after_bootstrap(monkeypatch, capsys) -> None:
 
     assert rc == 0
     assert '"ok": true' in payload.lower()
+
+
+def test_setup_feishu_cli_calls_install_config_login(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    observed: list[list[str]] = []
+
+    def fake_run_command(cmd, cwd):
+        observed.append(list(cmd))
+        return {"returncode": 0, "stdout": "ok", "stderr": ""}
+
+    monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
+    monkeypatch.setattr(bootstrap, "command_available", lambda name: False if name == "lark-cli" else True)
+    monkeypatch.setattr(bootstrap, "lark_cli_skills_installed", lambda: False)
+    monkeypatch.setattr(bootstrap, "LARK_CLI_CONFIG_PATH", Path("/tmp/nonexistent-lark-config.json"))
+
+    payload = bootstrap.setup_feishu_cli(
+        create_app=True,
+        install=True,
+        install_skills=True,
+        login_user=True,
+    )
+
+    assert payload["install"]["cli"]["installed"] is True
+    assert observed[0] == ["npm", "install", "-g", bootstrap.LARK_CLI_PACKAGE]
+    assert observed[1] == ["npx", "skills", "add", bootstrap.LARK_CLI_SKILLS_REPO, "-y", "-g"]
+    assert observed[2] == ["lark-cli", "config", "init", "--new"]
+    assert observed[3] == ["lark-cli", "auth", "login", "--domain", bootstrap.DEFAULT_FEISHU_CLI_DOMAINS]
+    assert observed[4] == ["lark-cli", "doctor"]

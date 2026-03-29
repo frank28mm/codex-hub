@@ -69,9 +69,9 @@
 > 如果你暂时先不走 Feishu，只想把公开版**快速手工跑起来**，当前最短路径已经收成两步：
 >
 > 1. `codex login`
-> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents`
+> 2. `cd codex-hub/workspace && python3 ops/bootstrap_workspace_hub.py setup --install-launchagents --install-feishu-cli`
 >
-> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance。
+> 这个 `setup` 会自动安装公开版当前需要的 Python 依赖、执行 bootstrap、安装后台任务，并跑一轮 acceptance；如果你加上 `--install-feishu-cli`，它还会把官方 `lark-cli` 和官方 `lark-*` skills 一起装好。
 
 > [!TIP]
 > 真正驱动系统运行的协议文件在：
@@ -149,7 +149,7 @@
 - 建一个多维表格
 - 继续处理某个项目
 
-这时 `Codex Hub` 会把远程聊天入口当成工作入口，而不是第二套系统。
+这时 `Codex Hub` 会把远程聊天入口当成工作入口，而不是第二套系统。公开版当前也默认保留 `CoCo` 入口语义：人类继续通过私聊 `CoCo` 或在项目群里 `@CoCo` 发起工作，底层则优先吃官方 `Feishu CLI / lark-cli` 的 transport 与对象能力。
 
 适合：
 
@@ -442,7 +442,23 @@ python3 ops/accept_product.py run
 - 常用表格别名
 - 只读投影表格资源
 
-### 第 11 步：完成一次 Feishu OAuth
+### 第 11 步：完成官方 Feishu CLI 配置与 OAuth
+
+如果你想尽量一键化地完成 Feishu 接入，先执行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
+```
+
+这一步会尽量把下面几件事串起来：
+
+- 安装官方 `lark-cli`
+- 安装官方 `lark-*` skills
+- 打开 Feishu 应用创建/配置
+- 引导完成一次 OAuth 授权
+- 最后跑一轮 `lark-cli doctor`
+
+如果你后面还需要单独补一次 OAuth，可以再执行：
 
 在 `workspace/` 里执行：
 
@@ -481,8 +497,8 @@ python3 ops/feishu_agent.py auth login
 
 当前最简便的正式方式是：
 
-1. 一个 Feishu 应用
-2. 一次 OAuth 登录
+1. 一个你自己创建的 Feishu 应用
+2. 一条官方 `lark-cli` 配置与登录链
 3. 公开版仓库自带的 Feishu 长连接 bridge runtime
 4. 可选的只读 Bitable 投影
 
