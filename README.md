@@ -493,10 +493,11 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 - 安装官方 `lark-cli`
 - 安装官方 `lark-*` skills
 - 打开 Feishu 应用创建/配置
-- 引导完成一次 OAuth 授权
-- 最后跑一轮 `lark-cli doctor`
+- 不再默认触发原生 `lark-cli auth login`
+- 不再默认跑 `lark-cli doctor`
+- 公开版默认不把系统钥匙串验证当成登录前置步骤
 
-如果你后面还需要单独补一次 OAuth，可以再执行：
+公开版默认的登录主路径是：
 
 在 `workspace/` 里执行：
 
@@ -508,6 +509,13 @@ python3 ops/feishu_agent.py auth login
 
 - 完成一次用户身份授权
 - 后续由系统自动续期
+
+如果你明确要排查原生 `lark-cli` 身份，再手动执行：
+
+```bash
+lark-cli auth login --domain open.feishu.cn
+lark-cli doctor
+```
 
 所以正常情况下，不需要每次重新授权。
 

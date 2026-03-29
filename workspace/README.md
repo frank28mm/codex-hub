@@ -424,8 +424,9 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 - 安装官方 `lark-cli`
 - 安装官方 `lark-*` skills
 - 拉起 Feishu 应用创建/配置
-- 引导一次用户 OAuth 授权
-- 最后跑一轮 `lark-cli doctor`
+- 不再默认触发原生 `lark-cli auth login`
+- 不再默认跑 `lark-cli doctor`
+- 公开版默认不把系统钥匙串验证当成登录前置步骤
 
 3. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
 4. 填入你的：
@@ -434,10 +435,19 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
    - 文档目录
    - 表格别名
    - 只读投影资源
-5. 如果你需要单独补一次 OAuth，也可以再执行：
+5. 然后执行一次公开版自己的 OAuth 登录：
 
 ```bash
 python3 ops/feishu_agent.py auth login
+```
+
+如果你只是想让公开版正常工作，到这里就够了。
+
+只有在你明确要排查原生 `lark-cli` 身份时，才再额外执行：
+
+```bash
+lark-cli auth login --domain open.feishu.cn
+lark-cli doctor
 ```
 
 6. 确保你的 Feishu 应用 scope 已经通过审核并发布
