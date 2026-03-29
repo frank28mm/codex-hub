@@ -246,6 +246,10 @@ def write_report(results: dict[str, object]) -> None:
         if isinstance(feishu_auth, dict):
             status = feishu_auth.get("status") or {}
             if isinstance(status, dict):
+                if status.get("phase"):
+                    lines.append(
+                        f"- {'OK' if status.get('full_ready') else 'INFO'} Feishu 当前阶段：phase=`{status.get('phase')}`"
+                    )
                 lines.append(
                     f"- {'OK' if status.get('object_ops_ready') else 'FAIL'} Feishu 对象能力登录：object_ops_ready=`{status.get('object_ops_ready')}`"
                 )
@@ -255,6 +259,8 @@ def write_report(results: dict[str, object]) -> None:
                 lines.append(
                     f"- {'OK' if status.get('full_ready') else 'FAIL'} Feishu 完整可用：full_ready=`{status.get('full_ready')}`"
                 )
+                if status.get("prompt"):
+                    lines.append(f"- INFO 下一步：{status.get('prompt')}")
     REPORT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

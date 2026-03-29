@@ -153,20 +153,29 @@ def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> Non
     from ops import bootstrap_workspace_hub as bootstrap_module
 
     bootstrap = importlib.reload(bootstrap_module)
-    observed: list[list[str]] = []
-
-    def fake_run_command(cmd, cwd):
-        observed.append(list(cmd))
-        return {"returncode": 0, "stdout": "ok", "stderr": ""}
-
-    monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
-    monkeypatch.setattr(bootstrap, "command_available", lambda name: False if name == "lark-cli" else True)
-    monkeypatch.setattr(bootstrap, "lark_cli_skills_installed", lambda: False)
+    monkeypatch.setattr(
+        bootstrap,
+        "install_feishu_cli_tooling",
+        lambda force=False, install_skills=True: {
+            "cli": {"installed": True, "skipped": False, "returncode": 0},
+            "skills": {"installed": True, "skipped": False, "returncode": 0},
+        },
+    )
     monkeypatch.setattr(bootstrap, "LARK_CLI_CONFIG_PATH", Path("/tmp/nonexistent-lark-config.json"))
     monkeypatch.setattr(
         bootstrap,
+        "_run_lark_cli_config_init_guided",
+        lambda create_app: {
+            "returncode": 0,
+            "stdout": "created cli_test",
+            "stderr": "",
+            "browser_url": "https://open.feishu.cn/app/cli_test/baseinfo",
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
         "_sync_feishu_bridge_credentials",
-        lambda config_init_result=None: {
+        lambda config_init_result=None, app_secret_override="": {
             "env_path": "/tmp/feishu_bridge.env.local",
             "app_id": "cli_test",
             "app_id_synced": True,
@@ -177,9 +186,20 @@ def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> Non
     )
     monkeypatch.setattr(
         bootstrap,
+        "_run_lark_cli_auth_login_guided",
+        lambda: {
+            "start": {"returncode": 0},
+            "complete": {"returncode": 0},
+            "verification_url": "https://accounts.feishu.cn/oauth/v1/device/verify?flow_id=test&user_code=TEST",
+            "browser": {"opened": True, "url": "https://accounts.feishu.cn/oauth/v1/device/verify?flow_id=test&user_code=TEST"},
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
         "_run_feishu_auth_status",
         lambda: {"status": {"object_ops_ready": True, "coco_bridge_ready": True, "full_ready": True}},
     )
+    monkeypatch.setattr(bootstrap, "_write_feishu_setup_state", lambda payload: None)
 
     payload = bootstrap.setup_feishu_cli(
         create_app=True,
@@ -188,13 +208,9 @@ def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> Non
     )
 
     assert payload["install"]["cli"]["installed"] is True
-    assert observed[0] == ["npm", "install", "-g", bootstrap.LARK_CLI_PACKAGE]
-    assert observed[1] == ["npx", "skills", "add", bootstrap.LARK_CLI_SKILLS_REPO, "-y", "-g"]
-    assert observed[2] == ["lark-cli", "config", "init", "--new"]
-    assert observed[3] == [bootstrap.sys.executable, "ops/feishu_agent.py", "auth", "login"]
-    assert len(observed) == 4
+    assert payload["config_init"]["browser_url"] == "https://open.feishu.cn/app/cli_test/baseinfo"
     assert payload["credentials_sync"]["bridge_credentials_ready"] is True
-    assert payload["auth_login"]["returncode"] == 0
+    assert payload["auth_login"]["complete"]["returncode"] == 0
     assert payload["summary"]["full_ready"] is True
     assert payload["doctor"]["skipped"] is True
 
@@ -226,6 +242,64 @@ def test_install_feishu_cli_only_does_not_trigger_config_or_login(monkeypatch) -
     ]
     assert payload["config_init"]["skipped"] is True
     assert payload["credentials_sync"]["skipped"] is True
+    assert payload["auth_login"]["skipped"] is True
+
+
+def test_setup_feishu_cli_guides_app_secret_sync_without_attempting_login(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(
+        bootstrap,
+        "install_feishu_cli_tooling",
+        lambda force=False, install_skills=True: {
+            "cli": {"installed": True, "skipped": True, "returncode": 0},
+            "skills": {"installed": True, "skipped": True, "returncode": 0},
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_current_lark_cli_config",
+        lambda: {"available": True, "configured": True, "app_id": "cli_test", "brand": "feishu"},
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_sync_feishu_bridge_credentials",
+        lambda config_init_result=None, app_secret_override="": {
+            "env_path": "/tmp/feishu_bridge.env.local",
+            "app_id": "cli_test",
+            "app_id_synced": True,
+            "app_secret_synced": bool(app_secret_override),
+            "bridge_credentials_ready": bool(app_secret_override),
+            "changed": bool(app_secret_override),
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_prompt_for_app_secret",
+        lambda app_id: {
+            "provided": False,
+            "skipped": True,
+            "browser_url": f"https://open.feishu.cn/app/{app_id}/baseinfo",
+            "prompt": "copy the secret once",
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_feishu_auth_status",
+        lambda: {"status": {"object_ops_ready": False, "coco_bridge_ready": False, "full_ready": False}},
+    )
+    monkeypatch.setattr(bootstrap, "_write_feishu_setup_state", lambda payload: None)
+
+    payload = bootstrap.setup_feishu_cli(
+        create_app=False,
+        install=False,
+        install_skills=False,
+    )
+
+    assert payload["summary"]["phase"] == "awaiting_app_secret"
+    assert payload["summary"]["needs_user_action"] is True
+    assert payload["summary"]["browser_url"] == "https://open.feishu.cn/app/cli_test/baseinfo"
     assert payload["auth_login"]["skipped"] is True
 
 
@@ -265,12 +339,12 @@ def test_setup_feishu_cli_can_skip_login_and_optionally_run_doctor(monkeypatch) 
     monkeypatch.setattr(
         bootstrap,
         "_sync_feishu_bridge_credentials",
-        lambda config_init_result=None: {
+        lambda config_init_result=None, app_secret_override="": {
             "env_path": "/tmp/feishu_bridge.env.local",
             "app_id": "cli_test",
             "app_id_synced": True,
-            "app_secret_synced": False,
-            "bridge_credentials_ready": False,
+            "app_secret_synced": True,
+            "bridge_credentials_ready": True,
             "changed": True,
         },
     )
@@ -382,6 +456,32 @@ def test_build_manual_actions_guides_future_feishu_setup(monkeypatch) -> None:
     assert any("setup-feishu-cli --create-feishu-app" in action for action in actions)
 
 
+def test_bootstrap_status_ignores_stale_feishu_guide_when_app_id_changes(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    state_path = tmp_path / "feishu-setup-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "phase": "awaiting_app_secret",
+                "browser_url": "https://open.feishu.cn/app/cli_old/baseinfo",
+                "app_id": "cli_old",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "FEISHU_SETUP_STATE_PATH", state_path)
+    monkeypatch.setattr(bootstrap, "_current_lark_cli_config", lambda: {"available": True, "configured": True, "app_id": "cli_new"})
+    monkeypatch.setattr(bootstrap, "_run_feishu_auth_status", lambda: {"status": {}})
+    site = bootstrap.replace(bootstrap.default_site_config(), feishu_enabled=True)
+
+    payload = bootstrap.bootstrap_status_payload(site)
+
+    assert payload["feishu_guide"] == {}
+
+
 def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
@@ -414,7 +514,15 @@ def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
             "auth_login": {"skipped": True},
             "auth_status": {"status": {"object_ops_ready": True, "coco_bridge_ready": False, "full_ready": False}},
             "doctor": {"skipped": True},
-            "summary": {"object_ops_ready": True, "coco_bridge_ready": False, "full_ready": False},
+            "summary": {
+                "object_ops_ready": True,
+                "coco_bridge_ready": False,
+                "full_ready": False,
+                "needs_user_action": True,
+                "phase": "awaiting_app_secret",
+                "browser_url": "https://open.feishu.cn/app/cli_test/baseinfo",
+                "prompt": "copy the secret once",
+            },
         },
     )
     args = argparse.Namespace(
@@ -428,4 +536,4 @@ def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
 
     rc = bootstrap.cmd_setup_feishu_cli(args)
 
-    assert rc == 1
+    assert rc == 0

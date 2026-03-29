@@ -1210,6 +1210,53 @@ def test_auth_login_falls_back_to_lark_cli_when_bridge_credentials_missing(sampl
     assert payload["status"]["object_ops_ready"] is True
 
 
+def test_auth_status_reports_guided_phase_when_bridge_secret_missing(sample_env, monkeypatch) -> None:
+    setup_state = sample_env["runtime_root"] / "feishu-setup-state.json"
+    setup_state.write_text(
+        json.dumps(
+            {
+                "phase": "awaiting_app_secret",
+                "needs_user_action": True,
+                "user_action_kind": "browser_copy_secret",
+                "browser_url": "https://open.feishu.cn/app/cli_test/baseinfo",
+                "prompt": "copy the secret once",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    agent = feishu_agent.FeishuAgent(
+        env={
+            "WORKSPACE_HUB_CONTROL_ROOT": str(sample_env["control_root"]),
+            "WORKSPACE_HUB_RUNTIME_ROOT": str(sample_env["runtime_root"]),
+        }
+    )
+    monkeypatch.setattr(
+        agent,
+        "_lark_cli_config_status",
+        lambda: {"available": True, "configured": True, "app_id": "cli_test", "brand": "feishu"},
+    )
+    monkeypatch.setattr(
+        agent,
+        "_lark_cli_auth_status",
+        lambda: {
+            "available": True,
+            "logged_in": True,
+            "identity": "user",
+            "user_name": "Frank",
+            "user_open_id": "ou_test",
+            "token_status": "valid",
+        },
+    )
+
+    payload = agent.auth_status({})
+
+    assert payload["phase"] == "awaiting_app_secret"
+    assert payload["needs_user_action"] is True
+    assert payload["browser_url"] == "https://open.feishu.cn/app/cli_test/baseinfo"
+    assert payload["prompt"] == "copy the secret once"
+
+
 def test_user_token_auto_refresh_uses_oidc_and_preserves_refresh_token(sample_env) -> None:
     token_store = sample_env["runtime_root"] / "feishu_user_token.json"
     token_store.write_text(
