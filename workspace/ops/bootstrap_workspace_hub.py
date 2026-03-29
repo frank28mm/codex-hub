@@ -653,6 +653,22 @@ def setup_feishu_cli(
     return results
 
 
+def install_feishu_cli_only(*, install_skills: bool) -> dict[str, object]:
+    results: dict[str, object] = {
+        "install": install_feishu_cli_tooling(force=False, install_skills=install_skills),
+        "config_init": {"skipped": True},
+        "credentials_sync": {"skipped": True},
+        "auth_login": {"skipped": True},
+        "auth_status": {"skipped": True},
+        "doctor": {"skipped": True},
+    }
+    status = _run_feishu_auth_status()
+    results["auth_status"] = status
+    auth_payload = status.get("status") if isinstance(status, dict) else {}
+    results["summary"] = auth_payload if isinstance(auth_payload, dict) else {}
+    return results
+
+
 def maybe_install_launchagents(site: SiteConfig, install: bool) -> dict[str, object]:
     if not install:
         return {"installed": False, "skipped": True}
@@ -732,18 +748,39 @@ def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object
     payload["launchagents"] = maybe_install_launchagents(site, install=args.install_launchagents)
     payload["setup_phase"] = "launchagent_install_complete"
     _write_bootstrap_status(payload)
-    payload["feishu_cli"] = setup_feishu_cli(
-        create_app=getattr(args, "create_feishu_app", False),
-        install=getattr(args, "install_feishu_cli", False) or getattr(args, "setup_feishu_cli", False),
-        install_skills=True,
-        login_user=getattr(args, "setup_feishu_cli", False),
-    )
-    payload["feishu_ready"] = bool(
-        isinstance(payload.get("feishu_cli"), dict)
-        and isinstance(payload["feishu_cli"].get("summary"), dict)
-        and payload["feishu_cli"]["summary"].get("full_ready")
-    )
-    payload["setup_phase"] = "feishu_setup_complete" if feishu_requested else "local_runtime_ready"
+    if bool(getattr(args, "setup_feishu_cli", False) or getattr(args, "create_feishu_app", False)):
+        payload["feishu_cli"] = setup_feishu_cli(
+            create_app=getattr(args, "create_feishu_app", False),
+            install=True,
+            install_skills=True,
+            login_user=True,
+        )
+        payload["feishu_ready"] = bool(
+            isinstance(payload.get("feishu_cli"), dict)
+            and isinstance(payload["feishu_cli"].get("summary"), dict)
+            and payload["feishu_cli"]["summary"].get("full_ready")
+        )
+        payload["setup_phase"] = "feishu_setup_complete"
+    elif bool(getattr(args, "install_feishu_cli", False)):
+        payload["feishu_cli"] = install_feishu_cli_only(install_skills=True)
+        payload["feishu_ready"] = bool(
+            isinstance(payload.get("feishu_cli"), dict)
+            and isinstance(payload["feishu_cli"].get("summary"), dict)
+            and payload["feishu_cli"]["summary"].get("full_ready")
+        )
+        payload["setup_phase"] = "feishu_tooling_install_complete"
+    else:
+        payload["feishu_cli"] = {
+            "install": {"skipped": True},
+            "config_init": {"skipped": True},
+            "credentials_sync": {"skipped": True},
+            "auth_login": {"skipped": True},
+            "auth_status": {"skipped": True},
+            "doctor": {"skipped": True},
+            "summary": {},
+        }
+        payload["feishu_ready"] = False
+        payload["setup_phase"] = "local_runtime_ready"
     _write_bootstrap_status(payload)
     payload["feishu_bridge"] = maybe_install_feishu_bridge(site, install=args.install_feishu_bridge)
     payload["setup_phase"] = "complete"
@@ -792,13 +829,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if isinstance(install_payload, dict):
             feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("cli"))
             feishu_cli_ok = feishu_cli_ok and not result_failed(install_payload.get("skills"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("config_init"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("credentials_sync"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("auth_login"))
-        feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("doctor"))
-        summary = feishu_cli_result.get("summary")
-        if isinstance(summary, dict):
-            feishu_cli_ok = feishu_cli_ok and bool(summary.get("full_ready"))
+        if bool(getattr(args, "setup_feishu_cli", False) or getattr(args, "create_feishu_app", False)):
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("config_init"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("credentials_sync"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("auth_login"))
+            feishu_cli_ok = feishu_cli_ok and not result_failed(feishu_cli_result.get("doctor"))
+            summary = feishu_cli_result.get("summary")
+            if isinstance(summary, dict):
+                feishu_cli_ok = feishu_cli_ok and bool(summary.get("full_ready"))
     payload = {
         "ok": acceptance_rc == 0 and dependency_result.get("returncode", 0) == 0 and feishu_cli_ok,
         "python_dependencies": dependency_result,
@@ -936,7 +974,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--install-feishu-cli",
         action="store_true",
-        help="Install the official Feishu CLI and official Lark skills during bootstrap.",
+        help="Install the official Feishu CLI and official Lark skills during bootstrap without configuring or logging into Feishu.",
     )
     init_parser.add_argument(
         "--setup-feishu-cli",
@@ -982,7 +1020,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--install-feishu-cli",
         action="store_true",
-        help="Install the official Feishu CLI and official Lark skills during setup.",
+        help="Install the official Feishu CLI and official Lark skills during setup without configuring or logging into Feishu.",
     )
     setup_parser.add_argument(
         "--setup-feishu-cli",
