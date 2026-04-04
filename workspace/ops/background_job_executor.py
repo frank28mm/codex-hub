@@ -2886,7 +2886,7 @@ def _build_gate_card_payload(
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "CoCo 授权确认"},
+            "title": {"tag": "plain_text", "content": f"{assistant_name()} 授权确认"},
             "template": "orange",
         },
         "body": {
@@ -5369,3 +5369,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+from ops.assistant_branding import assistant_name

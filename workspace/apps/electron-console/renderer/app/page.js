@@ -18,6 +18,7 @@ const ACTIVE_CODEX_THREAD_STORAGE_KEY = "workspace-hub-electron-console-active-c
 const CODEX_ACCESS_MODE_STORAGE_KEY = "workspace-hub-electron-console-codex-access-mode";
 const CODEX_MODEL_STORAGE_KEY = "workspace-hub-electron-console-codex-model";
 const AUTO_REFRESH_INTERVAL_MS = 15_000;
+const DEFAULT_ASSISTANT_NAME = "CoCo";
 const PRIMARY_VIEWS = [
   { id: "projects", icon: "projects", label: "项目看板", subtitle: "工作区项目总览与跟进" },
   { id: "codex", icon: "codex", label: "Codex 交互", subtitle: "桌面主入口与会话控制" },
@@ -105,9 +106,9 @@ function isWorkspaceAdminThread(row) {
   return Boolean(row && row.chat_type === "p2p" && !String(row.project_name || "").trim());
 }
 
-function formatThreadLabel(row) {
+function formatThreadLabel(row, assistantName = DEFAULT_ASSISTANT_NAME) {
   if (!row) return "未命名线程";
-  if (isWorkspaceAdminThread(row)) return "CoCo 私聊管理线程";
+  if (isWorkspaceAdminThread(row)) return `${assistantName} 私聊管理线程`;
   return row.thread_label || row.binding_label || row.project_name || row.chat_ref || "未命名线程";
 }
 
@@ -365,6 +366,16 @@ export default function HomePage() {
   const [commandRunning, setCommandRunning] = useState(false);
   const [commandStatus, setCommandStatus] = useState("");
   const [showCodexAdvanced, setShowCodexAdvanced] = useState(false);
+  const assistantName = String(metadata?.assistant_name || DEFAULT_ASSISTANT_NAME).trim() || DEFAULT_ASSISTANT_NAME;
+  const assistantPrivateThreadLabel =
+    String(metadata?.assistant_private_thread_label || `${assistantName} 私聊`).trim() || `${assistantName} 私聊`;
+  const assistantServiceLabel =
+    String(metadata?.assistant_service_label || `${assistantName} 服务`).trim() || `${assistantName} 服务`;
+  const assistantCustomizationHint =
+    String(
+      metadata?.assistant_customization_hint ||
+        `默认机器人昵称是 ${assistantName}。如需自定义，可设置环境变量 WORKSPACE_HUB_ASSISTANT_NAME。`,
+    ).trim();
   const [showCodexInspector, setShowCodexInspector] = useState(false);
   const [showFeishuInspector, setShowFeishuInspector] = useState(false);
   const [codexModelDefaults, setCodexModelDefaults] = useState({
@@ -643,11 +654,11 @@ export default function HomePage() {
       default:
         return liveConversationRows;
     }
-  }, [liveConversationRows, staleConversationRows, conversationFilter]).filter((row) => {
+  }, [assistantName, liveConversationRows, staleConversationRows, conversationFilter]).filter((row) => {
     const query = String(feishuSearch || codexThreadSearch || "").trim().toLowerCase();
     if (!query) return true;
     return [
-      formatThreadLabel(row),
+      formatThreadLabel(row, assistantName),
       row.project_name,
       row.topic_name,
       row.last_user_request,
@@ -675,7 +686,7 @@ export default function HomePage() {
     if (!serviceStatus?.installed || !serviceStatus?.loaded) {
       return {
         tone: "warning",
-        title: "CoCo 服务需要关注",
+        title: `${assistantServiceLabel}需要关注`,
         body: "LaunchAgent 尚未完全激活，飞书线程可能会在修复或重启前停止回复。",
       };
     }
@@ -683,7 +694,7 @@ export default function HomePage() {
       return {
         tone: "warning",
         title: "确认已发出，但结果仍未送达",
-        body: "CoCo 已向飞书发出短确认，但这条线程后续结果迟迟没有送达。优先检查最近送达阶段、确认等待秒数和服务日志。",
+        body: `${assistantName} 已向飞书发出短确认，但这条线程后续结果迟迟没有送达。优先检查最近送达阶段、确认等待秒数和服务日志。`,
       };
     }
     if (bridgeStatus?.stale) {
@@ -691,8 +702,8 @@ export default function HomePage() {
         tone: "warning",
         title: bridgeStatus?.event_stalled ? "事件流暂时停滞" : "心跳数据过期",
         body: bridgeStatus?.event_stalled
-          ? "LaunchAgent 依旧在运行，但飞书最近没有新事件。请先让 CoCo 重连再处理待定线程。"
-          : "CoCo 仍保留 runtime 状态，但心跳数据过期，请重启服务再继续信任正在运行的线程。",
+          ? `LaunchAgent 依旧在运行，但飞书最近没有新事件。请先让 ${assistantName} 重连再处理待定线程。`
+          : `${assistantName} 仍保留 runtime 状态，但心跳数据过期，请重启服务再继续信任正在运行的线程。`,
       };
     }
     if (bridgeStatus?.connection_status && bridgeStatus.connection_status !== "connected") {
@@ -710,7 +721,7 @@ export default function HomePage() {
       };
     }
     return null;
-  }, [bridgeStatus, serviceState, serviceStatus]);
+  }, [assistantName, assistantServiceLabel, bridgeStatus, serviceState, serviceStatus]);
   const recoverySummary = useMemo(() => {
     if (!serviceState?.last_recovery_at) return null;
     const mismatchCount = Array.isArray(serviceState.last_recovery_mismatches)
@@ -740,13 +751,13 @@ export default function HomePage() {
   }, [serviceState]);
   const operatorNextAction = useMemo(() => {
     if (!serviceStatus?.installed || !serviceStatus?.loaded) {
-      return "请先修复 CoCo LaunchAgent，再继续处理飞书线程。";
+      return `请先修复 ${assistantName} LaunchAgent，再继续处理飞书线程。`;
     }
     if (serviceState?.ack_stalled) {
       return "先检查最近送达阶段和确认等待秒数，确认哪条线程已经 ack 但没有继续产出结果。";
     }
     if (bridgeStatus?.stale || bridgeStatus?.event_stalled) {
-      return "等待 CoCo 重新连接并确认事件流后再派发工作。";
+      return `等待 ${assistantName} 重新连接并确认事件流后再派发工作。`;
     }
     if (conversationBuckets.approval) {
       return "先处理待授权线程，让高风险动作可以继续。";
@@ -757,8 +768,8 @@ export default function HomePage() {
     if (conversationBuckets.running) {
       return "关注运行中线程直到它们产出报告。";
     }
-    return "CoCo 状态良好。群聊会按消息内容自动路由到项目上下文，私聊继续承担工作区级协调和授权。";
-  }, [bridgeStatus, conversationBuckets, serviceState, serviceStatus]);
+    return `${assistantName} 状态良好。群聊会按消息内容自动路由到项目上下文，私聊继续承担工作区级协调和授权。`;
+  }, [assistantName, bridgeStatus, conversationBuckets, serviceState, serviceStatus]);
   const projectConversationMap = useMemo(() => {
     const mapping = new Map();
     for (const row of liveConversationRows) {
@@ -915,7 +926,7 @@ export default function HomePage() {
     setCommandProject(row.project_name || "");
     setCommandSessionId(row.session_id || "");
     setShowCodexAdvanced(false);
-    setCommandStatus(`已切换到 ${formatThreadLabel(row)}。`);
+    setCommandStatus(`已切换到 ${formatThreadLabel(row, assistantName)}。`);
     setActiveView("codex");
   }
 
@@ -1150,7 +1161,7 @@ export default function HomePage() {
       const groupKey =
         item.source === "feishu"
           ? isWorkspaceAdminThread(item.data)
-            ? "CoCo 私聊总控"
+            ? `${assistantPrivateThreadLabel}总控`
             : item.data.project_name || "飞书来源"
           : item.data.project_name || "工作区对话";
       const existing = groups.get(groupKey);
@@ -1169,7 +1180,7 @@ export default function HomePage() {
       });
     });
     return Array.from(groups.values()).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  }, [codexUnifiedThreads]);
+  }, [assistantPrivateThreadLabel, codexUnifiedThreads]);
   const codexShellFilter = useMemo(() => {
     if (conversationFilter === "approval") return "approval";
     if (conversationFilter === "history") return "history";
@@ -1219,7 +1230,7 @@ export default function HomePage() {
               <p className="thread-list-item-kicker">
                 <span className="thread-origin-pill">飞书</span> {formatChatTypeLabel(row.chat_type)}
               </p>
-              <h3>{formatThreadLabel(row)}</h3>
+              <h3>{formatThreadLabel(row, assistantName)}</h3>
             </div>
             <div className="thread-list-item-side">
               {row.last_message_at ? <span className="thread-list-item-time">{formatRelativeTimestamp(row.last_message_at)}</span> : null}
@@ -1351,7 +1362,7 @@ export default function HomePage() {
   async function handleProfileSave() {
     const trimmedName = String(preferredNameInput || "").trim();
     if (!trimmedName) {
-      setProfileMessage("请先告诉 CoCo 希望它如何称呼你。");
+      setProfileMessage("请先填写你希望被如何称呼。");
       return;
     }
     if (typeof window?.workspaceHubAPI?.saveUserProfile !== "function") {
@@ -1369,7 +1380,7 @@ export default function HomePage() {
         const profile = response.data?.profile || {};
         setUserProfile(profile);
         setProfileStatus("ready");
-          setProfileMessage("CoCo 之后会用这个称呼与你沟通。");
+        setProfileMessage(`${assistantName} 之后会用这个称呼与你沟通。`);
         if (typeof window !== "undefined") {
           window.localStorage?.setItem(ONBOARDING_STORAGE_KEY, "1");
         }
@@ -1391,7 +1402,7 @@ export default function HomePage() {
     }
     setOnboardingSkipped(true);
     setOnboardingVisible(false);
-      setProfileMessage("你之后随时都可以再修改这个称呼。");
+    setProfileMessage("你之后随时都可以再修改这个称呼。");
   }
 
   useEffect(() => {
@@ -1476,7 +1487,7 @@ export default function HomePage() {
       messageRows.map((row) => ({
         id: `${row.direction}-${row.message_id}`,
         timestamp: row.created_at || row.updated_at || "",
-        sender: row.direction === "outbound" ? "CoCo" : operatorDisplayName,
+        sender: row.direction === "outbound" ? assistantName : operatorDisplayName,
         text: row.text || "",
         phase: renderPhaseLabel(row),
         sessionId: row.session_id,
@@ -1484,7 +1495,7 @@ export default function HomePage() {
         sourceId: row.source_message_id,
         direction: row.direction,
       })),
-    [messageRows, operatorDisplayName],
+    [assistantName, messageRows, operatorDisplayName],
   );
 
   const codexTimelineEntries = useMemo(
@@ -1621,7 +1632,7 @@ export default function HomePage() {
         {
           label: "项目路由",
           value: bindingSummary?.workspaceAdmin
-            ? "CoCo 工作区管理员"
+            ? `${assistantName} 工作区管理员`
             : bindingSummary?.bound
             ? bindingSummary.projectName
             : "自动项目路由",
@@ -1674,7 +1685,7 @@ export default function HomePage() {
       return {
         kind: "feishu",
         eyebrow: "飞书来源线程",
-        title: formatThreadLabel(activeConversation),
+        title: formatThreadLabel(activeConversation, assistantName),
         subtitle: `${formatChatSubtitle(activeConversation)} · 这条线程会继续把结果发回飞书客户端。`,
         primaryChip: {
           tone: bindingSummary?.workspaceAdmin || activeConversation.project_name ? "tone-info" : "tone-warning",
@@ -1704,7 +1715,7 @@ export default function HomePage() {
         emptyState: {
           mark: "飞",
           title: "暂无聊天时间线。",
-          copy: "飞书里的消息和 CoCo 的回复，会继续在这里展开，不再跳到另一套页面。",
+          copy: `飞书里的消息和 ${assistantName} 的回复，会继续在这里展开，不再跳到另一套页面。`,
         },
         contextRows,
       };
@@ -1792,6 +1803,7 @@ export default function HomePage() {
   }, [
     activeConversation,
     activeCodexThread,
+    assistantName,
     bindingSummary,
     codexChatMode,
     codexTimelineEntries,
@@ -1916,7 +1928,7 @@ export default function HomePage() {
                 飞书桥接 {bridgeStatus?.connection_status || "加载中"}
               </span>
               <span className={`status-pill ${(serviceStatus?.installed && serviceStatus?.loaded) ? "tone-primary" : "tone-warning"}`}>
-                {(serviceStatus?.installed && serviceStatus?.loaded) ? "CoCo 服务在线" : "CoCo 服务需处理"}
+                {(serviceStatus?.installed && serviceStatus?.loaded) ? `${assistantServiceLabel}在线` : `${assistantServiceLabel}需处理`}
               </span>
               <span className={`status-pill ${conversationBuckets.approval ? "tone-warning" : "tone-subtle"}`}>
                 待授权 {conversationBuckets.approval}
@@ -2110,7 +2122,7 @@ export default function HomePage() {
                           </article>
                           <article className="summary-card detail-card">
                             <p className="eyebrow">项目线程</p>
-                            <strong>{activeProjectConversationState?.active ? formatThreadLabel(activeProjectConversationState.active) : "尚未建立线程"}</strong>
+                            <strong>{activeProjectConversationState?.active ? formatThreadLabel(activeProjectConversationState.active, assistantName) : "尚未建立线程"}</strong>
                             <p className="summary-note">
                               {activeProjectConversationState?.active
                                 ? activeProjectConversationState.active.last_user_request || activeProjectConversationState.active.last_report || "线程已建立，等待下一条消息。"
@@ -2161,7 +2173,7 @@ export default function HomePage() {
                           <div className="detail-stack">
                             <article className="summary-card detail-card">
                               <p className="eyebrow">当前线程</p>
-                              <strong>{formatThreadLabel(activeProjectConversationState.active)}</strong>
+                              <strong>{formatThreadLabel(activeProjectConversationState.active, assistantName)}</strong>
                               <p className="summary-note">{formatChatSubtitle(activeProjectConversationState.active)}</p>
                             </article>
                             <article className="summary-card detail-card">
@@ -2335,7 +2347,7 @@ export default function HomePage() {
                   <strong>{bridgeAlert.title}</strong>
                   <p>{bridgeAlert.body}</p>
                   <div className="inline-actions compact-actions">
-                    <button type="button" onClick={() => runServiceAction("restart")}>重启 CoCo</button>
+                    <button type="button" onClick={() => runServiceAction("restart")}>重启{assistantName}</button>
                     <button type="button" onClick={() => reloadBridgeState()}>刷新状态</button>
                   </div>
                 </div>
@@ -2576,7 +2588,7 @@ export default function HomePage() {
               </article>
 
               <article className="panel">
-                <h2>CoCo 服务</h2>
+                <h2>{assistantServiceLabel}</h2>
                 <div className="service-status">
                   <span className={`status-pill ${(serviceStatus?.installed && serviceStatus?.loaded) ? "tone-primary" : "tone-warning"}`}>
                     {(serviceStatus?.installed && serviceStatus?.loaded) ? "常驻服务就绪" : "服务需要关注"}
@@ -2640,7 +2652,7 @@ export default function HomePage() {
                       </button>
                     ) : null}
                   </div>
-                  <p className="hint">{serviceActionState || "CoCo 需要作为本地常驻服务持续运行。"}</p>
+                  <p className="hint">{serviceActionState || `${assistantServiceLabel}需要作为本地常驻服务持续运行。`}</p>
                   {recoverySummary ? (
                     <div className="summary-card">
                       <p className="eyebrow">最近自动恢复</p>
@@ -2749,7 +2761,7 @@ export default function HomePage() {
                       checked={Boolean(bridgeSettings.require_mention)}
                       onChange={(event) => setBridgeSettings((prev) => ({ ...prev, require_mention: event.target.checked }))}
                     />
-                    <span>群聊中必须 @CoCo</span>
+                    <span>群聊中必须 @{assistantName}</span>
                   </label>
                   <label className="textarea-field">
                     <span>允许用户（每行一个 Open ID）</span>
@@ -2781,7 +2793,7 @@ export default function HomePage() {
                   >
                     打开工作台指南
                   </button>
-                  <span className="hint">{saveState || "设置会通过主干 runtime broker 持久化保存。"}</span>
+                  <span className="hint">{saveState || `设置会通过主干 runtime broker 持久化保存。${assistantCustomizationHint}`}</span>
                 </div>
               </article>
             </section>
@@ -2793,7 +2805,7 @@ export default function HomePage() {
           <section className="panel onboarding-modal">
             <h3>希望如何称呼你？</h3>
             <p className="hint">
-              CoCo 会在消息和执行报告中使用这个称呼，让协作更自然。
+              {assistantCustomizationHint} 你的称呼会用于消息和执行报告里的对话表达。
             </p>
             <label>
               <span>希望的称呼</span>
@@ -2803,7 +2815,7 @@ export default function HomePage() {
                   setPreferredNameInput(event.target.value);
                   setProfileMessage("");
                 }}
-                placeholder="例如 Frank"
+                placeholder="例如 操作者"
               />
             </label>
             <div className="inline-actions">

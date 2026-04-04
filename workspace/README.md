@@ -11,6 +11,8 @@
 - 通过 `Electron` 提供本地控制台
 - 通过自动化脚本维护 dashboard、watcher、只读 Bitable 看板
 
+默认机器人昵称是 `CoCo`。如果你想换成自己的名字，可以通过环境变量 `WORKSPACE_HUB_ASSISTANT_NAME` 自定义；本文里出现的 `CoCo` 都应理解为“默认昵称示例”，不是必须写死的产品名。
+
 如果你把整个仓库当成一个产品来看：
 
 - `workspace/` 是“代码和运行层”
@@ -123,7 +125,7 @@
 - 新建或更新多维表格
 - 继续某个项目工作
 
-这时 Feishu 只是入口，底层仍然是同一套 `Codex Hub`。公开版当前也已经把官方 `Feishu CLI / lark-cli` 接入到底层 transport 与对象 backend，尽量复现私有版里“CoCo 继续像现在一样用”的体验。
+这时 Feishu 只是入口，底层仍然是同一套 `Codex Hub`。公开版当前也已经把官方 `Feishu CLI / lark-cli` 接入到底层 transport 与对象 backend，尽量复现私有版里“默认助手昵称继续像现在一样用”的体验。
 
 公开版当前已经进一步包含：
 
@@ -168,7 +170,7 @@
 
 如果你从旗舰版视角来理解，公开版现在的边界可以收成一句话：
 
-- 保留 `CoCo` 入口语义
+- 保留默认助手昵称入口语义，并允许部署者改名
 - 保留 `Codex Hub Core`
 - 公开掉足够多的 workflow / wake / bridge / execution 机制
 - 同时去掉个人项目、个人路径和敏感配置

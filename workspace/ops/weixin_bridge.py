@@ -73,8 +73,8 @@ WEIXIN_WORKER_NAME = "weixin_bridge_worker"
 WEIXIN_QUEUE_LEASE_SECONDS = 300
 WEIXIN_QUEUE_LEASE_RENEW_INTERVAL_SECONDS = 90
 WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
-WEIXIN_DM_THREAD_NAME = "CoCo 私聊"
-WEIXIN_DM_THREAD_LABEL = "CoCo 私聊"
+WEIXIN_DM_THREAD_NAME = assistant_private_thread_label()
+WEIXIN_DM_THREAD_LABEL = assistant_private_thread_label()
 WEIXIN_TEXT_CHUNK_LIMIT = 900
 CONTINUE_SESSION_PATTERNS = [
     re.compile(r"^\s*继续"),
@@ -1388,7 +1388,10 @@ def _route_normalized_message(
             "deliveries": deliveries,
         }
     if _should_block_high_risk(text):
-        blocked_text = "微信私聊桥接第一版暂不执行高风险或系统级动作。请改走 Feishu 私聊 CoCo 完成授权后再执行。"
+        blocked_text = (
+            "微信私聊桥接第一版暂不执行高风险或系统级动作。"
+            f"请改走 Feishu 私聊 {assistant_name()} 完成授权后再执行。"
+        )
         deliveries: list[dict[str, Any]] = []
         if send_reply and normalized["context_token"]:
             deliveries = _deliver_reply_text(
@@ -2131,3 +2134,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+from ops.assistant_branding import assistant_name, assistant_private_thread_label

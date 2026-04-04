@@ -64,7 +64,7 @@ fs.writeFileSync(
 );
 process.env.WORKSPACE_HUB_VAULT_ROOT = TEST_VAULT_ROOT;
 const ACK_TEXT_PATTERN =
-  /^Frank，(?:好的，我先处理。|收到，我马上跟进。|知道了，我先看一下。|明白，我这就开始处理。|收到，我先帮你过一遍。)$/;
+  /^Operator，(?:好的，我先处理。|收到，我马上跟进。|知道了，我先看一下。|明白，我这就开始处理。|收到，我先帮你过一遍。)$/;
 const {
   ACK_PENDING_EVENT_IDLE_GRACE_SECONDS,
   ACTIVE_EXECUTION_EVENT_IDLE_SECONDS,
@@ -353,7 +353,7 @@ async function testAttachmentMessagesDoNotRouteIntoCodex() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           return { ok: true, binding: null };
@@ -516,7 +516,7 @@ async function testSkillInstallRoutesWithLocalExtensionProfile() {
           return { ok: true, record: { created_at: "2026-03-20T01:00:00Z", updated_at: "2026-03-20T01:00:00Z" } };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           return { ok: true, binding: { project_name: "Codex Hub", binding_scope: "project" } };
@@ -560,7 +560,7 @@ async function testSkillInstallRoutesWithLocalExtensionProfile() {
   const execCall = brokerCalls.find((item) => item.command === "codex-exec");
   assert.ok(execCall);
   assert.equal(execCall.payload.execution_profile, "feishu-local-extend");
-  assert.equal(result.replyPreview, "Frank，已完成 skill 安装。");
+  assert.equal(result.replyPreview, "Operator，已完成 skill 安装。");
 }
 
 async function testHighRiskRequestDetectsChineseGitHubPushPhrasing() {
@@ -586,7 +586,7 @@ async function testHandleMessageEventAcceptsTextMentionAlias() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -662,7 +662,7 @@ async function testBindingDeclarationResetsSessionAndReportsBindingPhase() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -720,7 +720,7 @@ async function testBindingDeclarationRequiresExplicitProjectForNewChat() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -775,7 +775,7 @@ async function testProjectReplyIncludesMaterialSuggestionsFromBroker() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -926,7 +926,7 @@ async function testServiceConnectAndRoute() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -1026,7 +1026,7 @@ async function testServiceConnectAndRoute() {
   assert.equal(execCall.payload.execution_profile, "feishu");
   assert.equal(execCall.payload.thread_name, "CoCo 私聊");
   assert.equal(execCall.payload.thread_label, "CoCo 私聊");
-  assert.equal(result.replyPreview, "Frank，这是第一轮回答。");
+  assert.equal(result.replyPreview, "Operator，这是第一轮回答。");
   assert.equal(runtimeCalls.some((item) => item.kind === "status"), true);
   const status = service.getStatus();
   assert.equal(status.sdk_loaded, true);
@@ -1050,7 +1050,7 @@ async function testServiceConnectAndRoute() {
   assert.equal(replies.length, 1);
   assert.equal(replies[0].data.msg_type, "interactive");
   assert.equal(replies[0].params.receive_id_type, "open_id");
-  assert.match(parseReplyText(replies[0]), /Frank，这是续接后的回答。/);
+  assert.match(parseReplyText(replies[0]), /Operator，这是续接后的回答。/);
   const handledStatus = service.getStatus();
   assert.equal(handledStatus.recent_message_count, 2);
   assert.equal(handledStatus.recent_reply_count, 1);
@@ -1121,7 +1121,7 @@ async function testConnectPatchesWsClientForCardCallbacks() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -1199,7 +1199,7 @@ async function testFastBackgroundTasksDoNotSendAck() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -1253,7 +1253,7 @@ async function testFastBackgroundTasksDoNotSendAck() {
   assert.equal(finalStatus.event_idle_after_seconds, EVENT_IDLE_AFTER_SECONDS_IDLE);
   assert.equal(finalStatus.pending_ack_at, "");
   assert.equal(replies.length, 1);
-  assert.match(replies[0], /Frank，全部完成。/);
+  assert.match(replies[0], /Operator，全部完成。/);
 }
 
 async function testSameChatBackgroundTasksSerialize() {
@@ -1276,7 +1276,7 @@ async function testSameChatBackgroundTasksSerialize() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -1384,7 +1384,7 @@ async function testDifferentChatsBackgroundTasksRunInParallel() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -1494,7 +1494,7 @@ async function testSessionLaneMismatchForcesFreshExecPerChat() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           const chatRef = String(payload.chat_ref || "");
@@ -1583,7 +1583,7 @@ async function testTimedOutResumeClearsBindingAndAllowsFreshFollowup() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           const chatRef = String(payload.chat_ref || "");
@@ -1703,7 +1703,7 @@ async function testProgressStalledRunningLeaseForcesFreshExecWithoutResume() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           const chatRef = String(payload.chat_ref || "");
@@ -1813,7 +1813,7 @@ async function testMissingLeaseForcesFreshExecWithoutResume() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           const chatRef = String(payload.chat_ref || "");
@@ -1910,7 +1910,7 @@ async function testNonRunningLeaseForcesFreshExecWithoutResume() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           const chatRef = String(payload.chat_ref || "");
@@ -2004,7 +2004,7 @@ async function testHandleMessageEventPrefersFinalizeLaunchReplyText() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           return { ok: true, binding: null };
@@ -2071,7 +2071,7 @@ async function testNestedPostContentRoutesWithoutEmptyTextFailure() {
           };
         }
         if (command === "user-profile") {
-          return { ok: true, profile: { preferred_name: "Frank", relationship: "workspace owner" } };
+          return { ok: true, profile: { preferred_name: "Operator", relationship: "workspace owner" } };
         }
         if (command === "bridge-chat-binding") {
           return { ok: true, binding: null };
@@ -2188,7 +2188,7 @@ async function testLongBackgroundTasksStaySilentUntilFinalReply() {
           if (command === "user-profile") {
             return {
               ok: true,
-              profile: { preferred_name: "Frank", relationship: "workspace owner" },
+              profile: { preferred_name: "Operator", relationship: "workspace owner" },
             };
           }
           if (command === "bridge-chat-binding") {
@@ -2234,7 +2234,7 @@ async function testLongBackgroundTasksStaySilentUntilFinalReply() {
     assert.equal(result.reason, "background_started");
     await new Promise((resolve) => originalSetTimeout(resolve, 200));
     assert.equal(replies.length, 1);
-    assert.match(replies[0], /Frank，全部完成。/);
+    assert.match(replies[0], /Operator，全部完成。/);
     const runningStatus = statuses.find((entry) => entry.last_execution_state === "running");
     assert.ok(runningStatus);
     assert.equal(runningStatus.pending_ack_at, "");
@@ -2262,7 +2262,7 @@ async function testFeishuObjectOperationRunsDirectlyWithoutBackgroundAck() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -2372,7 +2372,7 @@ async function testConnectRecoversPendingConversationWithRecoveryNotice() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -2451,7 +2451,7 @@ async function testReconnectNotifiesRecentActiveConversationAfterOutage() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -2595,7 +2595,7 @@ async function testReconnectSkipsRecentConversationWithoutOpenWork() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -2709,7 +2709,7 @@ async function testReconnectBackfillsMissedMessagesAfterCliEventExit() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         throw new Error(`unexpected command ${command}`);
@@ -2878,7 +2878,7 @@ async function testPeriodicReconciliationBackfillsMissedMessagesWhileIngressStay
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3024,7 +3024,7 @@ async function testPeriodicReconciliationBackfillsCliPostHistoryShape() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3182,7 +3182,7 @@ async function testPeriodicReconciliationMarksBackfillDegradedWhenHistoryPermiss
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3307,7 +3307,7 @@ async function testReconnectWhilePreviouslyConnectedSkipsRecentRecoveryNotice() 
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3393,7 +3393,7 @@ async function testConnectPreservesLastEventClockAfterLongIdleGap() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3500,7 +3500,7 @@ async function testColdConnectLoadsPersistedBridgeStatusForRecoveryNotice() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3601,7 +3601,7 @@ async function testColdConnectSkipsRecentRecoveryNoticeWhenPersistedStatusWasCon
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return { ok: true };
@@ -3649,7 +3649,7 @@ async function testOnlyRuntimeQueriesStayDirect() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -3830,7 +3830,7 @@ async function testNaturalLanguageLongTaskIntentRoutesDirectly() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -3936,7 +3936,7 @@ async function testTopLevelHandlerSendsFallbackReplyOnUnexpectedFailure() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4006,7 +4006,7 @@ async function testServiceCanSendManualReport() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         throw new Error(`unexpected command ${command}`);
@@ -4064,7 +4064,7 @@ async function testServiceCanSendManualReport() {
   assert.equal(replies.length, 1);
   assert.equal(replies[0].params.receive_id_type, "chat_id");
   assert.equal(replies[0].data.msg_type, "interactive");
-  assert.match(parseReplyText(replies[0]), /Frank，当前阶段已完成 Feishu 稳定化修复。/);
+  assert.match(parseReplyText(replies[0]), /Operator，当前阶段已完成 Feishu 稳定化修复。/);
   const outbound = brokerCalls.find(
     (item) => item.command === "record-bridge-message" && item.payload.direction === "outbound",
   );
@@ -4097,7 +4097,7 @@ async function testLongManualReportMirrorsToDocAndKeepsCardReply() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "feishu-callback-executor") {
@@ -4209,7 +4209,7 @@ async function testStatusMessageUsesMetricDigestCard() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         throw new Error(`unexpected command ${command}`);
@@ -4288,7 +4288,7 @@ async function testDelayedReplyNotice() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "panel") {
@@ -4349,7 +4349,7 @@ async function testChatBindingDeclarationRoutesWithProjectContext() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4468,7 +4468,7 @@ async function testChatBindingDeclarationHandlesNaturalProjectPhrase() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4545,7 +4545,7 @@ async function testChatBindingDeclarationCapturesTopicHint() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4636,7 +4636,7 @@ async function testChatBindingDeclarationReportsBrokerValidationFailure() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4701,7 +4701,7 @@ async function testPausedProjectReturnsPauseSummary() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4779,7 +4779,7 @@ async function testUnboundGroupPromptsForBinding() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4851,7 +4851,7 @@ async function testUnboundGroupPromptsForBinding() {
   assert.equal(result.reason, "background_started");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(brokerCalls.some((item) => item.command === "codex-exec"));
-  assert.equal(replies.some((item) => /Frank，测试文件已创建。/.test(item)), true);
+  assert.equal(replies.some((item) => /Operator，测试文件已创建。/.test(item)), true);
 }
 
 async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
@@ -4873,7 +4873,7 @@ async function testUnboundGroupAutoRoutesByProjectAliasAndPersistsContext() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -4997,7 +4997,7 @@ async function testLongRepliesAreSplitIntoMultipleMessages() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return {
@@ -5092,7 +5092,7 @@ async function testFeishuReplyCompactsLinksAndPaths() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         return {
@@ -5159,7 +5159,7 @@ async function testHighRiskRequestReturnsApprovalTokenPrompt() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -5228,7 +5228,7 @@ async function testGitCommitRequestReturnsApprovalTokenPrompt() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -5327,7 +5327,7 @@ async function testHighRiskRequestEventHandlerSendsInteractiveApprovalCard() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -5401,7 +5401,7 @@ async function testLocalSystemApprovalPromptStoresScopedApprovedProfile() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -5513,7 +5513,7 @@ async function testApproveCommandExecutesWithApprovedProfile() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -5574,7 +5574,7 @@ async function testApproveCommandExecutesWithApprovedProfile() {
   assert.equal(result.ok, true);
   assert.match(replies[0], /已记录授权，开始执行。/);
   assert.match(replies[0], /当前线程：Codex Hub/);
-  assert.equal(result.replyPreview, "Frank，已完成 git push。");
+  assert.equal(result.replyPreview, "Operator，已完成 git push。");
   const execCall = brokerCalls.find((item) => item.command === "codex-exec");
   assert.ok(execCall);
   assert.equal(execCall.payload.execution_profile, "feishu-approved");
@@ -5617,7 +5617,7 @@ async function testApproveCommandExecutesWithLocalSystemApprovedProfile() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -5749,7 +5749,7 @@ async function testCardActionTriggerApprovesViaInteractiveCard() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -5823,7 +5823,7 @@ async function testCardActionTriggerApprovesViaInteractiveCard() {
   assert.equal(execCall.payload.prompt, "请帮我 git push 当前分支");
   assert.match(replies[0], /已记录授权，开始执行。/);
   assert.match(replies[0], /当前线程：Codex Hub/);
-  assert.match(replies[1], /Frank，已完成 git push。/);
+  assert.match(replies[1], /Operator，已完成 git push。/);
 }
 
 async function testCardActionFallsBackToEmbeddedChatContext() {
@@ -5864,7 +5864,7 @@ async function testCardActionFallsBackToEmbeddedChatContext() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -5969,7 +5969,7 @@ async function testLegacyCardActionSourceMessageFallbackStillApproves() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -6097,7 +6097,7 @@ async function testCardActionTriggerResumesBackgroundJobDelivery() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -6214,7 +6214,7 @@ async function testApproveCommandRejectsWrongThread() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -6289,7 +6289,7 @@ async function testApproveCommandRejectsExpiredToken() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "approval-token") {
@@ -6393,7 +6393,7 @@ async function testApproveShorthandUsesPendingThreadToken() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-conversations") {
@@ -6469,7 +6469,7 @@ async function testApproveShorthandUsesPendingThreadToken() {
   assert.equal(result.ok, true);
   assert.match(replies[0], /已记录授权，开始执行。/);
   assert.match(replies[0], /当前线程：Codex Hub/);
-  assert.equal(result.replyPreview, "Frank，已完成 electron 分支推送。");
+  assert.equal(result.replyPreview, "Operator，已完成 electron 分支推送。");
   const execCall = brokerCalls.find((item) => item.command === "codex-exec");
   assert.ok(execCall);
   assert.equal(execCall.payload.execution_profile, "feishu-approved");
@@ -6495,7 +6495,7 @@ async function testHandleMessageEventWritesExecutionLeaseForRunningRoute() {
         if (command === "user-profile") {
           return {
             ok: true,
-            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+            profile: { preferred_name: "Operator", relationship: "workspace owner" },
           };
         }
         if (command === "bridge-chat-binding") {
@@ -6570,7 +6570,7 @@ async function testExecutionLeaseHeartbeatDoesNotInventProgress() {
           if (command === "user-profile") {
             return {
               ok: true,
-              profile: { preferred_name: "Frank", relationship: "workspace owner" },
+              profile: { preferred_name: "Operator", relationship: "workspace owner" },
             };
           }
           if (command === "bridge-chat-binding") {

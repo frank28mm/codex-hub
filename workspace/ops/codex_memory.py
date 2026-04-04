@@ -537,7 +537,7 @@ def save_user_profile(
         lines.append(f"- alternate_names: {', '.join(f'`{item}`' for item in aliases)}")
     else:
         lines.append("- alternate_names: none")
-    lines.extend(["", "## Notes", "", note.strip() or "This note records how CoCo and the workspace should address the primary user."])
+    lines.extend(["", "## Notes", "", note.strip() or "This note records how the workspace assistant and the workspace should address the primary user."])
     write_text(path, "\n".join(lines).strip() + "\n")
     profile = load_user_profile()
     profile["relationship"] = relationship.strip() or "workspace owner"

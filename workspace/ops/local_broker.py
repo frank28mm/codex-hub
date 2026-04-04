@@ -18,8 +18,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from ops import background_job_executor, codex_memory, codex_models, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
+    from ops import assistant_branding, background_job_executor, codex_memory, codex_models, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
 except ImportError:  # pragma: no cover
+    import assistant_branding  # type: ignore
     import background_job_executor  # type: ignore
     import codex_memory  # type: ignore
     import codex_models  # type: ignore
@@ -2050,7 +2051,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
                 {"label": "Pending Reviews", "value": str(len(review_items))},
                 {"label": "Open Coordination", "value": str(len(coordination_items))},
                 {"label": "Health Alerts", "value": str(health_payload.get("open_alert_count", 0))},
-                {"label": "CoCo Threads", "value": str(bridge_summary["thread_count"])},
+                {"label": f"{assistant_branding.assistant_name()} Threads", "value": str(bridge_summary["thread_count"])},
                 {"label": "Bound Threads", "value": str(bridge_summary["bound_thread_count"])},
                 {"label": "Running Threads", "value": str(bridge_summary["running_thread_count"])},
                 {"label": "Threads Needing Attention", "value": str(bridge_summary["attention_thread_count"])},

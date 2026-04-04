@@ -4,6 +4,10 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const {
+  assistantName,
+  assistantPrivateThreadLabel,
+} = require("../../assistant-branding");
+const {
   FeishuGateway,
   createCliMessageClient,
   listChatMessagesViaLarkCli,
@@ -37,7 +41,7 @@ const TEXT_MENTION_PATTERNS = [
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const STALE_AFTER_SECONDS = 90;
 // "event idle" drives `event_stalled` detection downstream. Keep it low when actively handling a request,
-// but much higher when idle to avoid false reconnect loops when nobody is talking to CoCo.
+// but much higher when idle to avoid false reconnect loops when nobody is talking to the assistant.
 const EVENT_IDLE_AFTER_SECONDS = 5 * 60;
 const EVENT_IDLE_AFTER_SECONDS_IDLE = 30 * 60;
 const ACTIVE_EXECUTION_EVENT_IDLE_SECONDS = 30 * 60;
@@ -436,7 +440,7 @@ function resolveSourceThreadIdentity(normalized, routeContext, existingBinding, 
   } else if (projectName) {
     threadLabel = projectName;
   } else if (String(normalized?.chat_type || "").trim() === "p2p") {
-    threadLabel = "CoCo 私聊";
+    threadLabel = assistantPrivateThreadLabel();
   } else {
     threadLabel = String(conversationKey || "").trim() || "Feishu 线程";
   }
@@ -2038,7 +2042,7 @@ function createFeishuLongConnectionService({
       header: {
         title: {
           tag: "plain_text",
-          content: "CoCo 授权确认",
+          content: `${assistantName()} 授权确认`,
         },
         template: "orange",
       },
@@ -2149,7 +2153,7 @@ function createFeishuLongConnectionService({
           header: {
             title: {
               tag: "plain_text",
-              content: "CoCo 授权状态",
+              content: `${assistantName()} 授权状态`,
             },
             template: headerTemplate,
           },

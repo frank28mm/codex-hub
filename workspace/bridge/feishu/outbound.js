@@ -1,5 +1,7 @@
 "use strict";
 
+const { assistantName } = require("../../assistant-branding");
+
 function trimText(value, limit = 0) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (!limit || text.length <= limit) {
@@ -29,23 +31,24 @@ function summarizeText(text, limit = 180) {
 
 function phaseCardMeta(phase = "") {
   const key = String(phase || "").trim();
+  const name = assistantName();
   const table = {
-    ack: { title: "CoCo 已收到", template: "wathet", statusLabel: "已收到" },
-    progress: { title: "CoCo 正在处理", template: "wathet", statusLabel: "处理中" },
-    final: { title: "CoCo 处理结果", template: "green", statusLabel: "已完成" },
-    reply: { title: "CoCo 处理结果", template: "green", statusLabel: "已完成" },
-    report: { title: "CoCo 汇报摘要", template: "blue", statusLabel: "摘要" },
-    status: { title: "CoCo 状态摘要", template: "blue", statusLabel: "状态" },
-    thread_status: { title: "CoCo 线程状态", template: "blue", statusLabel: "状态" },
-    approval_status: { title: "CoCo 授权状态", template: "orange", statusLabel: "待确认" },
-    approval_confirmed: { title: "CoCo 已记录授权", template: "green", statusLabel: "已批准" },
-    approval_prompt: { title: "CoCo 授权请求", template: "orange", statusLabel: "待确认" },
-    binding_prompt: { title: "CoCo 需要项目声明", template: "orange", statusLabel: "待确认" },
-    binding_bound: { title: "CoCo 绑定成功", template: "green", statusLabel: "已完成" },
-    binding_error: { title: "CoCo 绑定失败", template: "red", statusLabel: "需处理" },
-    error: { title: "CoCo 执行异常", template: "red", statusLabel: "失败" },
+    ack: { title: `${name} 已收到`, template: "wathet", statusLabel: "已收到" },
+    progress: { title: `${name} 正在处理`, template: "wathet", statusLabel: "处理中" },
+    final: { title: `${name} 处理结果`, template: "green", statusLabel: "已完成" },
+    reply: { title: `${name} 处理结果`, template: "green", statusLabel: "已完成" },
+    report: { title: `${name} 汇报摘要`, template: "blue", statusLabel: "摘要" },
+    status: { title: `${name} 状态摘要`, template: "blue", statusLabel: "状态" },
+    thread_status: { title: `${name} 线程状态`, template: "blue", statusLabel: "状态" },
+    approval_status: { title: `${name} 授权状态`, template: "orange", statusLabel: "待确认" },
+    approval_confirmed: { title: `${name} 已记录授权`, template: "green", statusLabel: "已批准" },
+    approval_prompt: { title: `${name} 授权请求`, template: "orange", statusLabel: "待确认" },
+    binding_prompt: { title: `${name} 需要项目声明`, template: "orange", statusLabel: "待确认" },
+    binding_bound: { title: `${name} 绑定成功`, template: "green", statusLabel: "已完成" },
+    binding_error: { title: `${name} 绑定失败`, template: "red", statusLabel: "需处理" },
+    error: { title: `${name} 执行异常`, template: "red", statusLabel: "失败" },
   };
-  return table[key] || { title: "CoCo 消息", template: "wathet", statusLabel: "消息" };
+  return table[key] || { title: `${name} 消息`, template: "wathet", statusLabel: "消息" };
 }
 
 function extractMetricPairs(text, limit = 6) {
@@ -155,7 +158,7 @@ function buildReplyCardPayload({
     header: {
       title: {
         tag: "plain_text",
-        content: trimText(title || meta.title, 60) || "CoCo 消息",
+        content: trimText(title || meta.title, 60) || `${assistantName()} 消息`,
       },
       template: meta.template,
     },
@@ -166,7 +169,7 @@ function buildReplyCardPayload({
 }
 
 function buildMetricDigestCardPayload({
-  title = "CoCo 摘要",
+  title = `${assistantName()} 摘要`,
   summary = "",
   metrics = [],
   footer = "",
@@ -213,7 +216,7 @@ function buildMetricDigestCardPayload({
     header: {
       title: {
         tag: "plain_text",
-        content: trimText(title, 60) || "CoCo 摘要",
+        content: trimText(title, 60) || `${assistantName()} 摘要`,
       },
       template: "blue",
     },

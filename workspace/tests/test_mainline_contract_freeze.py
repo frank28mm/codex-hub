@@ -90,7 +90,7 @@ def seed_console_state(codex_memory, review_plane, coordination_plane) -> None:
         ],
     )
     codex_memory.refresh_project_rollups("SampleProj")
-    review_plane.submit_review("SampleProj", "TP-1", deliverable_ref="/tmp/output.md", reviewer="Frank")
+    review_plane.submit_review("SampleProj", "TP-1", deliverable_ref="/tmp/output.md", reviewer="Operator")
     coordination_plane.create_coordination(
         coordination_id="CO-1",
         from_project="SampleProj",
@@ -340,10 +340,10 @@ def test_local_broker_freezes_status_panel_and_command_contract(sample_env, monk
         },
     )
     _codex_memory.save_user_profile(
-        preferred_name="Frank",
+        preferred_name="Operator",
         alternate_names=["吉祥"],
         relationship="workspace owner",
-        note="Use Frank when talking to the primary workspace user.",
+        note="Use Operator when talking to the primary workspace user.",
     )
     runtime_state.upsert_bridge_connection(
         "feishu",
@@ -786,10 +786,10 @@ def test_bridge_connection_update_preserves_latest_runtime_timestamps(sample_env
         },
     )
     _codex_memory.save_user_profile(
-        preferred_name="Frank",
+        preferred_name="Operator",
         alternate_names=["吉祥"],
         relationship="workspace owner",
-        note="Use Frank when talking to the primary workspace user.",
+        note="Use Operator when talking to the primary workspace user.",
     )
     runtime_state.upsert_bridge_connection(
         "feishu",
@@ -1038,7 +1038,7 @@ def test_bridge_connection_update_preserves_latest_runtime_timestamps(sample_env
     assert local_broker.cmd_user_profile(argparse.Namespace(profile_json="")) == 0
     user_profile_payload = read_payload(capsys)
     assert user_profile_payload["ok"] is True
-    assert user_profile_payload["profile"]["preferred_name"] == "Frank"
+    assert user_profile_payload["profile"]["preferred_name"] == "Operator"
 
     assert (
         local_broker.cmd_user_profile(
@@ -1046,7 +1046,7 @@ def test_bridge_connection_update_preserves_latest_runtime_timestamps(sample_env
                 profile_json=json.dumps(
                     {
                         "preferred_name": "吉祥",
-                        "alternate_names": ["Frank"],
+                        "alternate_names": ["Operator"],
                         "relationship": "workspace owner",
                         "note": "Prefer 吉祥 in future conversations.",
                     }
@@ -1071,7 +1071,7 @@ def test_bridge_connection_update_preserves_latest_runtime_timestamps(sample_env
                         "topic_name": "demand",
                         "binding_scope": "topic",
                         "session_id": "sess-bridge-1",
-                        "metadata": {"declared_by": "Frank"},
+                        "metadata": {"declared_by": "Operator"},
                     }
                 ),
             )
@@ -1292,7 +1292,7 @@ def test_bridge_status_prefers_latest_message_activity(sample_env) -> None:
         status="sent",
         payload={
             "chat_id": "oc_test",
-            "text": "Frank，已收到。",
+            "text": "Operator，已收到。",
             "phase": "reply",
         },
         project_name="Codex Hub",

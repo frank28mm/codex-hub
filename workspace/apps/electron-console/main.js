@@ -2,6 +2,12 @@ const fs = require("node:fs");
 const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const {
+  assistantCustomizationHint,
+  assistantName,
+  assistantPrivateThreadLabel,
+  assistantServiceLabel,
+} = require("../../assistant-branding");
 const { createBridgeHost } = require("./bridge-host");
 
 const APP_ROOT = __dirname;
@@ -276,6 +282,10 @@ ipcMain.handle("app:metadata", async () => {
   const codexModelSettings = modelResponse.ok ? safeJsonParse(modelResponse.stdout) : null;
   return {
     app_name: "workspace-hub-electron-console",
+    assistant_name: assistantName(),
+    assistant_private_thread_label: assistantPrivateThreadLabel(),
+    assistant_service_label: assistantServiceLabel(),
+    assistant_customization_hint: assistantCustomizationHint(),
     workspace_root: CONSOLE_WORKSPACE_ROOT,
     broker_workspace_root: SHARED_WORKSPACE_ROOT,
     broker_path: BROKER_PATH,

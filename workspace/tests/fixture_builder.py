@@ -40,7 +40,7 @@ def write_sample_feishu_resources(control_root: Path) -> None:
             "  chats:\n"
             "    产品群: \"oc_group_123\"\n"
             "  users:\n"
-            "    Frank:\n"
+            "    Operator:\n"
             "      open_id: \"ou_owner\"\n"
             "      email: \"operator@example.com\"\n"
             "  calendars:\n"

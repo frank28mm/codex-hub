@@ -26,8 +26,8 @@ class FakeAgent(feishu_agent.FeishuAgent):
                 "items": [
                     {
                         "name": "叮爸吉祥",
-                        "nickname": "Frank",
-                        "en_name": "Frank",
+                        "nickname": "Operator",
+                        "en_name": "Operator",
                         "email": "operator@example.com",
                         "open_id": "ou_search",
                     }
@@ -427,7 +427,7 @@ def test_msg_media_and_resource_download_prefer_lark_cli_backend(sample_env, mon
 def test_user_get_and_search(sample_env) -> None:
     agent = build_agent(sample_env)
     get_payload = agent.user_get({"email": "operator@example.com"})
-    search_payload = agent.user_search({"name": "Frank"})
+    search_payload = agent.user_search({"name": "Operator"})
     assert get_payload["users"][0]["user_id"] == "ou_lookup"
     assert search_payload["users"][0]["open_id"] == "ou_search"
 
@@ -459,7 +459,7 @@ def test_user_search_prefers_lark_cli_backend(sample_env, monkeypatch) -> None:
         },
     )
 
-    payload = agent.user_search({"name": "Frank", "limit": 5})
+    payload = agent.user_search({"name": "Operator", "limit": 5})
 
     assert payload["users"][0]["open_id"] == "ou_cli_search"
     assert payload["backend"] == "lark-cli"
@@ -1141,7 +1141,7 @@ def test_auth_status_reads_token_store(sample_env) -> None:
                 "refresh_token_expire_at": "2026-03-24T12:00:00",
                 "redirect_uri": "http://127.0.0.1:14589/feishu-auth/callback",
                 "auth_method": "oidc_v1",
-                "profile": {"name": "Frank"},
+                "profile": {"name": "Operator"},
             },
             ensure_ascii=False,
         ),
@@ -1160,7 +1160,7 @@ def test_auth_status_reads_token_store(sample_env) -> None:
     assert payload["has_refresh_token"] is True
     assert payload["auto_refresh_ready"] is True
     assert payload["auth_method"] == "oidc_v1"
-    assert payload["profile"]["name"] == "Frank"
+    assert payload["profile"]["name"] == "Operator"
 
 
 def test_auth_status_reports_lark_cli_readiness(sample_env, monkeypatch) -> None:
@@ -1182,7 +1182,7 @@ def test_auth_status_reports_lark_cli_readiness(sample_env, monkeypatch) -> None
             "available": True,
             "logged_in": True,
             "identity": "user",
-            "user_name": "Frank",
+            "user_name": "Operator",
             "user_open_id": "ou_test",
             "token_status": "needs_refresh",
         },
@@ -1210,7 +1210,7 @@ def test_auth_login_falls_back_to_lark_cli_when_bridge_credentials_missing(sampl
         "_lark_cli_auth_login",
         lambda payload: {
             "identity": "user",
-            "user_name": "Frank",
+            "user_name": "Operator",
             "user_open_id": "ou_cli",
         },
     )

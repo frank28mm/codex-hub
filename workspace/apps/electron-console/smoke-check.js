@@ -197,7 +197,8 @@ function main() {
   ensureIncludes(nextPage, "Feishu", "renderer/app/page.js");
   ensureIncludes(nextPage, "会话", "renderer/app/page.js");
   ensureIncludes(nextPage, "时间线", "renderer/app/page.js");
-  ensureIncludes(nextPage, "CoCo 服务", "renderer/app/page.js");
+  ensureIncludes(nextPage, "assistantCustomizationHint", "renderer/app/page.js");
+  ensureIncludes(nextPage, "WORKSPACE_HUB_ASSISTANT_NAME", "renderer/app/page.js");
   ensureIncludes(nextPage, "工作台", "renderer/app/page.js");
   ensureIncludes(nextPage, "workspace-rail", "renderer/app/page.js");
   ensureIncludes(nextPage, "rail-brand", "renderer/app/page.js");

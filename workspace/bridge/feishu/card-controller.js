@@ -1,5 +1,6 @@
 "use strict";
 
+const { assistantName } = require("../../assistant-branding");
 const { buildReplyCardPayload, optimizeMarkdown } = require("./outbound");
 
 function formatElapsed(ms) {
@@ -31,7 +32,7 @@ class FeishuCardStreamController {
     const cardBody = buildReplyCardPayload({
       phase: "progress",
       text: initialText || "处理中...",
-      title: "CoCo 正在处理",
+      title: `${assistantName()} 正在处理`,
     });
     cardBody.config = {
       ...(cardBody.config || {}),

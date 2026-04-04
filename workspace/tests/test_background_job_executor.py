@@ -1186,7 +1186,7 @@ def test_background_job_executor_requests_gate_and_writes_board(sample_env, monk
             "kind": "interactive_card",
             "message_id": "om_gate_card",
             "receive_id_type": "open_id",
-            "target": "ou_frank",
+            "target": "ou_operator",
             "msg_type": kwargs.get("msg_type", "text"),
         },
     )
@@ -1205,7 +1205,7 @@ def test_background_job_executor_requests_gate_and_writes_board(sample_env, monk
     assert sent_gate_cards[0]["kwargs"]["card"]["header"]["title"]["content"] == "CoCo 授权确认"
     token_item = runtime_state.fetch_approval_token(payload["gate_state"]["token"])
     assert token_item["metadata"]["approval_message_id"] == "om_gate_card"
-    assert token_item["metadata"]["open_id"] == "ou_frank"
+    assert token_item["metadata"]["open_id"] == "ou_operator"
     board = codex_memory.load_project_board("SampleProj")
     row = board["project_rows"][0]
     assert row["状态"] == "doing"

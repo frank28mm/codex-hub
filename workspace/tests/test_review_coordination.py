@@ -62,7 +62,7 @@ def test_review_plane_rebuilds_inbox_and_runtime(sample_env) -> None:
     codex_memory, review_plane, _coordination_plane, _local_broker = reload_ops_modules()
     seed_project_and_topic_rows(codex_memory)
 
-    row = review_plane.submit_review("SampleProj", "TP-1", deliverable_ref="/tmp/output.md", reviewer="Frank")
+    row = review_plane.submit_review("SampleProj", "TP-1", deliverable_ref="/tmp/output.md", reviewer="Operator")
     assert row["审核状态"] == "pending_review"
 
     items = review_plane.review_items(project_name="SampleProj")

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_FEISHU_PRIVATE_TARGET = str(os.environ.get("WORKSPACE_HUB_FEISHU_PRIVATE_TARGET", "")).strip()
 
 
 def _run_feishu_operation(domain: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -65,7 +67,7 @@ def resolve_send_target(target: str) -> str:
     raw = str(target or "").strip()
     spec = raw.split(":", 1)[1] if ":" in raw else raw
     if spec == "coco-private":
-        return "frank"
+        return DEFAULT_FEISHU_PRIVATE_TARGET
     if spec.startswith("user:"):
         return spec.split(":", 1)[1]
     if spec.startswith("chat:"):

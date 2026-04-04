@@ -572,13 +572,13 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
             )
         if feishu_setup.get("object_ops_ready") and not feishu_setup.get("coco_bridge_ready"):
             actions.append(
-                "Feishu object operations are ready, but CoCo bridge credentials are still incomplete. Finish the bridge app secret sync before enabling the live Feishu bridge."
+                "Feishu object operations are ready, but the assistant bridge credentials are still incomplete. Finish the bridge app secret sync before enabling the live Feishu bridge."
             )
         elif not feishu_setup.get("object_ops_ready"):
             actions.append("Complete the Feishu login flow until `object_ops_ready=true`.")
         actions.extend(
             [
-                "Ensure your CoCo Feishu app scopes are approved and published.",
+                "Ensure your workspace assistant Feishu app scopes are approved and published.",
                 "Optionally install the Feishu bridge launch agent with `python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge` after Feishu reports `full_ready=true`.",
             ]
         )

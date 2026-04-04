@@ -5,6 +5,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const {
+  assistantCustomizationHint,
+  assistantName,
+  assistantServiceLabel,
+} = require("../../assistant-branding");
 const { createBridgeHost } = require("./bridge-host");
 
 const AGENT_NAME = process.env.WORKSPACE_HUB_FEISHU_AGENT_NAME || "com.codexhub.coco-feishu-bridge";
@@ -345,7 +350,7 @@ function buildHealthSummary(state = {}) {
     return {
       health_summary_status: "unknown",
       health_summary_label: "健康探针尚未完成",
-      health_summary_detail: "CoCo 服务刚启动或还未完成第一轮健康探针。",
+      health_summary_detail: `${assistantServiceLabel()}刚启动或还未完成第一轮健康探针。`,
       health_next_action: "先刷新服务状态，确认 heartbeat、最近事件和线程快照已经生成。",
     };
   }
@@ -380,8 +385,8 @@ function buildHealthSummary(state = {}) {
       health_summary_detail: `${threadSummary} · 连续异常 ${Number(state.consecutive_unhealthy_checks || 0)} 次`,
       health_next_action:
         reason === "event_stalled" || reason === "stale"
-          ? "等待或触发 CoCo 重连，然后确认最近恢复结果和线程复核是否通过。"
-          : "先检查最近异常原因、最近恢复结果与服务日志，再决定是否重启 CoCo 服务。",
+          ? `等待或触发${assistantName()}重连，然后确认最近恢复结果和线程复核是否通过。`
+          : `先检查最近异常原因、最近恢复结果与服务日志，再决定是否重启${assistantServiceLabel()}。`,
     };
   }
   if (state.last_persistence_check_at && !state.last_persistence_ok) {
@@ -412,7 +417,7 @@ function buildHealthSummary(state = {}) {
     health_summary_status: "healthy",
     health_summary_label: "服务健康",
     health_summary_detail: threadSummary,
-    health_next_action: "当前可以继续把 CoCo 当成工作区远程协作入口使用。",
+    health_next_action: `当前可以继续把${assistantName()}当成工作区远程协作入口使用。`,
   };
 }
 
@@ -424,6 +429,9 @@ function decorateServiceState(state = {}) {
   const healthSummary = buildHealthSummary(state);
   return {
     ...state,
+    assistant_name: assistantName(),
+    assistant_service_label: assistantServiceLabel(),
+    assistant_customization_hint: assistantCustomizationHint(),
     thread_snapshot_summary: threadSnapshotSummary,
     latest_anomaly_summary: latestAnomalySummary,
     last_recovery_summary: recoverySummary,

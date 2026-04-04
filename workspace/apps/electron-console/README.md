@@ -2,6 +2,8 @@
 
 `apps/electron-console` 是 `v1.0.6` 集成发布的人类操作工作台，承载 Electron shell 与 Next.js 渲染器。
 
+默认机器人昵称是 `CoCo`。如果部署者希望改成别的名字，可以设置环境变量 `WORKSPACE_HUB_ASSISTANT_NAME`；本页出现的 `CoCo` 都只是默认昵称示例。
+
 ## 产品定位
 
 - 这个控制台既是 Codex 的桌面主入口，也是 Feishu 桥接的桌面宿主。
@@ -20,7 +22,7 @@
 - Electron 的 `Codex 交互` 现在支持两档执行权限：
   - `默认权限`：沿用工作区默认档（`workspace-write + on-request + network_access=true`）
   - `完全访问`：通过 `electron-full-access` 执行档拉起 `start-codex`，等价于 `danger-full-access`
-- `CoCo` 本地守护由 LaunchAgent 管理，Electron 通过 `bridge-host` 读取运行态和授权状态。
+- 默认助手昵称对应的本地守护由 LaunchAgent 管理，Electron 通过 `bridge-host` 读取运行态和授权状态。
 - `bridge-status` 聚合的 Feishu bridge status 数据会被 renderer 读出，用于状态卡和错误提示。
 
 ## 中文 Operator Workbench 说明
