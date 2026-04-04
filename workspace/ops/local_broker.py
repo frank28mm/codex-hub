@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from ops import background_job_executor, codex_memory, codex_models, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project
+    from ops import background_job_executor, codex_memory, codex_models, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
 except ImportError:  # pragma: no cover
     import background_job_executor  # type: ignore
     import codex_memory  # type: ignore
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover
     import runtime_ingestion  # type: ignore
     import runtime_state  # type: ignore
     import workspace_hub_project  # type: ignore
+    import workspace_job_schema  # type: ignore
 
 
 def workspace_root() -> Path:
@@ -115,6 +117,10 @@ def _feishu_local_system_writable_roots() -> list[Path]:
         seen.add(key)
         unique.append(path)
     return unique
+
+
+def _background_job_writable_roots() -> list[Path]:
+    return _feishu_writable_roots()
 
 
 APPROVED_PROFILE_SCOPE_MAP = {
@@ -324,6 +330,99 @@ def _response(broker_action: str, *, ok: bool, **payload: Any) -> dict[str, Any]
     return {"ok": ok, "broker_action": broker_action, **payload}
 
 
+def _action_registry_entry(
+    broker_action: str,
+    *,
+    operation_key: str,
+    target_ref: str = "",
+    gate_policy: str = "none",
+    execution_profile: str = "",
+    retry_semantics: str = "caller_defined",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return workspace_job_schema.ActionRegistryEntry(
+        action_id=f"{broker_action}:{operation_key}",
+        broker_action=broker_action,
+        operation_key=operation_key,
+        target_ref=target_ref,
+        gate_policy=gate_policy,
+        execution_profile=execution_profile,
+        retry_semantics=retry_semantics,
+        metadata=metadata or {},
+    ).to_dict()
+
+
+def _principal_policy(
+    *,
+    principal_ref: str,
+    project_name: str = "",
+    source: str = "",
+    approval_token: str = "",
+    principal_kind: str = "workspace_operator",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return workspace_job_schema.PrincipalPolicy(
+        actor_id="local_broker",
+        actor_surface="local_broker",
+        principal_kind=principal_kind,
+        principal_ref=principal_ref,
+        source=source,
+        project_name=project_name,
+        approval_token=approval_token,
+        metadata=metadata or {},
+    ).to_dict()
+
+
+def _execution_boundary(
+    boundary_id: str,
+    *,
+    sandbox_mode: str,
+    network_access: str,
+    writable_roots: list[Path] | None = None,
+    requires_approval: bool = False,
+    expected_scope: str = "",
+    execution_profile: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return workspace_job_schema.ExecutionBoundary(
+        boundary_id=boundary_id,
+        sandbox_mode=sandbox_mode,
+        network_access=network_access,
+        writable_roots=[str(path) for path in (writable_roots or [])],
+        requires_approval=requires_approval,
+        expected_scope=expected_scope,
+        monitor_mode="runtime_state",
+        metadata={"execution_profile": execution_profile, **(metadata or {})},
+    ).to_dict()
+
+
+def _background_job_operation_policy(job: dict[str, Any], *, payload: dict[str, Any] | None = None, blocked_reason: str = "") -> dict[str, Any]:
+    program: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        direct_program = payload.get("program_spec")
+        nested_job = payload.get("job")
+        nested_program = nested_job.get("program_spec") if isinstance(nested_job, dict) else None
+        if isinstance(direct_program, dict):
+            program = dict(direct_program)
+        elif isinstance(nested_program, dict):
+            program = dict(nested_program)
+    if not program and isinstance(job.get("program_spec"), dict):
+        program = dict(job.get("program_spec", {}))
+    scope_type = str(program.get("scope_type") or job.get("source_type") or "project").strip().lower()
+    approval_required = bool(program.get("approval_required", False))
+    approval_state = str(program.get("approval_state") or "not-required").strip().lower()
+    mode = "approval_required" if approval_required and approval_state != "approved" else "auto"
+    return workspace_job_schema.OperationPolicy(
+        mode=mode,
+        risk="workspace_execution" if scope_type == "workspace" else "project_execution",
+        reason="background job execution is mediated by the harness program spec and may require an approval gate for broader workspace scope",
+        expected_scope="workspace_execution" if mode == "approval_required" else "",
+        retryable=True,
+        blocked_reason=str(blocked_reason or "").strip(),
+        metadata={"scope_type": scope_type, "approval_state": approval_state},
+    ).to_dict()
+
+
 def _stream_text(value: Any) -> str:
     if value is None:
         return ""
@@ -359,6 +458,69 @@ def _pause_block_response(action: str, *, project_name: str) -> dict[str, Any] |
         project_name=canonical_project,
         pause=pause_payload,
     )
+
+
+LONG_TASK_CREATE_RE = re.compile(r"(?:新建|创建|建立|开(?:一个|个)?)长任务", re.UNICODE)
+LONG_TASK_CONTINUE_RE = re.compile(r"(?:继续|接着|恢复|重新开始|启动)长任务", re.UNICODE)
+LONG_TASK_PAUSE_RE = re.compile(r"(?:暂停|挂起|先暂停)长任务", re.UNICODE)
+TASK_ID_TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+\b")
+
+
+def _strip_trigger_body(text: str, match: re.Match[str] | None) -> str:
+    if not match:
+        return ""
+    return str(text[match.end():]).strip().lstrip("：:，,。.；; ")
+
+
+def _parse_background_job_intent(text: str) -> dict[str, str]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return {"kind": "empty", "task_item": "", "task_id": ""}
+    create_match = LONG_TASK_CREATE_RE.search(normalized)
+    if create_match:
+        return {
+            "kind": "create",
+            "task_item": _strip_trigger_body(normalized, create_match),
+            "task_id": "",
+        }
+    continue_match = LONG_TASK_CONTINUE_RE.search(normalized)
+    if continue_match:
+        task_id_match = TASK_ID_TOKEN_RE.search(normalized)
+        return {
+            "kind": "continue",
+            "task_item": "",
+            "task_id": task_id_match.group(0) if task_id_match else "",
+        }
+    pause_match = LONG_TASK_PAUSE_RE.search(normalized)
+    if pause_match:
+        task_id_match = TASK_ID_TOKEN_RE.search(normalized)
+        return {
+            "kind": "pause",
+            "task_item": "",
+            "task_id": task_id_match.group(0) if task_id_match else "",
+        }
+    return {"kind": "none", "task_item": "", "task_id": ""}
+
+
+def _job_binding_payload(job: dict[str, Any], *, last_active_at: str = "") -> dict[str, str]:
+    return {
+        "project_name": job["project_name"],
+        "binding_scope": "topic" if job.get("source_type") == "topic" else "project",
+        "binding_board_path": job["source_path"] if job.get("source_type") == "topic" else job["project_board_path"],
+        "topic_name": str(job.get("scope", "")).strip() if job.get("source_type") == "topic" else "",
+        "rollup_target": job["project_board_path"],
+        "last_active_at": last_active_at or background_job_executor.iso_now_local(),
+    }
+
+
+def _resolve_task_id_for_intent(project_name: str, task_id: str = "") -> str:
+    explicit = str(task_id or "").strip()
+    if explicit:
+        return explicit
+    jobs = background_job_executor.board_job_projector.list_projectable_jobs(project_name)
+    if not jobs:
+        return ""
+    return str(jobs[0].get("task_id", "")).strip()
 
 
 def _remote_command_timeout_seconds(*, execution_profile: str = "", source: str = "") -> int | None:
@@ -601,6 +763,19 @@ def _codex_exec_command(
                 include_local_extensions=execution_profile == "feishu-local-extend"
             )
         for root in roots:
+            command.extend(["--add-dir", str(root)])
+    if execution_profile == "background-job":
+        command.extend(
+            [
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                'approval_policy="never"',
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ]
+        )
+        for root in _background_job_writable_roots():
             command.extend(["--add-dir", str(root)])
     if execution_profile == "feishu-approved":
         command.extend(
@@ -1272,6 +1447,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "feishu-callback-executor",
             "opencli-op",
             "background-job",
+            "background-job-intent",
             "panel",
             "command-center",
             "record-bridge-message",
@@ -1531,14 +1707,65 @@ def cmd_opencli_op(args: argparse.Namespace) -> int:
 
 
 def cmd_background_job(args: argparse.Namespace) -> int:
+    action_registry = _action_registry_entry(
+        "background_job",
+        operation_key=f"background_job:{args.project_name}:{args.task_id}",
+        target_ref="",
+        gate_policy="program_spec",
+        execution_profile="background-job",
+        retry_semantics="wake_or_retry",
+        metadata={"project_name": args.project_name, "task_id": args.task_id},
+    )
+    principal_policy = _principal_policy(
+        principal_ref=args.task_id,
+        project_name=args.project_name,
+        approval_token=args.approval_token,
+        principal_kind="background_program",
+        metadata={},
+    )
+    job = {
+        "project_name": args.project_name,
+        "task_id": args.task_id,
+        "task_pointer": "",
+        "job_id": "",
+        "source_type": "project",
+    }
     try:
+        job = background_job_executor.board_job_projector.project_background_job(args.project_name, args.task_id)
+        action_registry = _action_registry_entry(
+            "background_job",
+            operation_key=f"background_job:{job['project_name']}:{job['task_id']}",
+            target_ref=job["task_pointer"],
+            gate_policy="program_spec",
+            execution_profile="background-job",
+            retry_semantics="wake_or_retry",
+            metadata={"project_name": job["project_name"], "task_id": job["task_id"]},
+        )
+        principal_policy = _principal_policy(
+            principal_ref=job["task_id"],
+            project_name=job["project_name"],
+            approval_token=args.approval_token,
+            principal_kind="background_program",
+            metadata={"job_id": job["job_id"]},
+        )
         payload = background_job_executor.execute_projected_job(
-            background_job_executor.board_job_projector.project_background_job(args.project_name, args.task_id),
+            job,
             trigger_source=args.trigger_source or "broker_background_job",
             approval_token=args.approval_token,
             dry_run=bool(args.dry_run),
         )
     except Exception as exc:
+        operation_policy = _background_job_operation_policy(job, blocked_reason=type(exc).__name__)
+        execution_boundary = _execution_boundary(
+            "background-job",
+            sandbox_mode="workspace-write",
+            network_access="enabled",
+            writable_roots=[workspace_root()],
+            requires_approval=operation_policy["mode"] == "approval_required",
+            expected_scope=operation_policy.get("expected_scope", ""),
+            execution_profile="background-job",
+            metadata={"project_name": job["project_name"], "task_id": job["task_id"]},
+        )
         return _print(
             _response(
                 "background_job",
@@ -1548,8 +1775,23 @@ def cmd_background_job(args: argparse.Namespace) -> int:
                 error_type=type(exc).__name__,
                 project_name=args.project_name,
                 task_id=args.task_id,
+                action_registry=action_registry,
+                principal_policy=principal_policy,
+                operation_policy=operation_policy,
+                execution_boundary=execution_boundary,
             )
         )
+    operation_policy = _background_job_operation_policy(job, payload=payload)
+    execution_boundary = _execution_boundary(
+        "background-job",
+        sandbox_mode="workspace-write",
+        network_access="enabled",
+        writable_roots=[workspace_root()],
+        requires_approval=operation_policy["mode"] == "approval_required",
+        expected_scope=operation_policy.get("expected_scope", ""),
+        execution_profile="background-job",
+        metadata={"project_name": job["project_name"], "task_id": job["task_id"]},
+    )
     return _print(
         _response(
             "background_job",
@@ -1558,6 +1800,216 @@ def cmd_background_job(args: argparse.Namespace) -> int:
             project_name=args.project_name,
             task_id=args.task_id,
             result=payload,
+            action_registry=action_registry,
+            principal_policy=principal_policy,
+            operation_policy=operation_policy,
+            execution_boundary=execution_boundary,
+        )
+    )
+
+
+def cmd_background_job_intent(args: argparse.Namespace) -> int:
+    project_name = codex_memory.canonical_project_name(str(args.project_name or "").strip())
+    if not project_name:
+        return _print(
+            _response(
+                "background_job_intent",
+                ok=False,
+                result_status="error",
+                error="project_name_required",
+            )
+        )
+    intent = _parse_background_job_intent(getattr(args, "text", ""))
+    if intent["kind"] in {"empty", "none"}:
+        return _print(
+            _response(
+                "background_job_intent",
+                ok=False,
+                result_status="error",
+                error="unsupported_long_task_intent",
+                project_name=project_name,
+            )
+        )
+    if intent["kind"] != "pause":
+        blocked = _pause_block_response("background_job_intent", project_name=project_name)
+        if blocked:
+            return _print(blocked)
+    topic_name = str(getattr(args, "topic_name", "") or "").strip()
+    trigger_source = str(getattr(args, "trigger_source", "") or "").strip() or "natural_language"
+    dry_run = bool(getattr(args, "dry_run", False))
+    if intent["kind"] == "create":
+        task_item = str(intent.get("task_item", "")).strip()
+        if not task_item:
+            return _print(
+                _response(
+                    "background_job_intent",
+                    ok=False,
+                    result_status="error",
+                    error="task_item_required",
+                    project_name=project_name,
+                    intent_kind="create",
+                )
+            )
+        if dry_run:
+            board = codex_memory.load_project_board(project_name)
+            binding = codex_memory.resolve_board_binding(project_name, topic_name or "")
+            preview_task_id = codex_memory.allocate_task_id(
+                project_name,
+                [*board["project_rows"], *board["rollup_rows"]],
+            )
+            return _print(
+                _response(
+                    "background_job_intent",
+                    ok=True,
+                    result_status="dry-run",
+                    project_name=project_name,
+                    topic_name=topic_name,
+                    intent_kind="create",
+                    task_id=preview_task_id,
+                    preview_task={
+                        "project_name": project_name,
+                        "task_id": preview_task_id,
+                        "task_item": task_item,
+                        "task_status": "doing",
+                        "binding_scope": str(binding.get("binding_scope", "project")),
+                        "binding_board_path": str(binding.get("binding_board_path", "") or board["path"]),
+                        "topic_name": str(binding.get("topic_name", "") or topic_name),
+                        "rollup_target": str(binding.get("rollup_target", "") or board["path"]),
+                    },
+                    wake={"accepted": False, "reason": "dry-run"},
+                    result={"executed": False, "reason": "dry-run"},
+                )
+            )
+        created = codex_memory.create_harness_task(
+            project_name,
+            task_item,
+            topic_name=topic_name,
+            requested_at=background_job_executor.iso_now_local(),
+        )
+        wake = background_job_executor.request_task_wake(
+            project_name,
+            created["task_id"],
+            reason="manual_wake",
+            trigger_source=trigger_source,
+            metadata={"intent_kind": "create", "requested_text": getattr(args, "text", "")},
+        )
+        executed = background_job_executor.run_requested_task(project_name, created["task_id"], dry_run=dry_run)
+        ok = bool(executed.get("executed")) and bool(executed.get("payload", {}).get("ok", True))
+        return _print(
+            _response(
+                "background_job_intent",
+                ok=ok,
+                result_status="success" if ok else "error",
+                project_name=project_name,
+                topic_name=topic_name,
+                intent_kind="create",
+                task_id=created["task_id"],
+                created_task=created,
+                wake=wake,
+                result=executed,
+            )
+        )
+    if intent["kind"] == "continue":
+        task_id = _resolve_task_id_for_intent(project_name, intent.get("task_id", ""))
+        if task_id:
+            if dry_run:
+                return _print(
+                    _response(
+                        "background_job_intent",
+                        ok=True,
+                        result_status="dry-run",
+                        project_name=project_name,
+                        topic_name=topic_name,
+                        intent_kind="continue",
+                        task_id=task_id,
+                        wake={"accepted": False, "reason": "dry-run"},
+                        result={"executed": False, "reason": "dry-run"},
+                    )
+                )
+            wake = background_job_executor.request_task_wake(
+                project_name,
+                task_id,
+                reason="manual_wake",
+                trigger_source=trigger_source,
+                metadata={"intent_kind": "continue", "requested_text": getattr(args, "text", "")},
+            )
+            executed = background_job_executor.run_requested_task(project_name, task_id, dry_run=dry_run)
+            ok = bool(executed.get("executed")) and bool(executed.get("payload", {}).get("ok", True))
+            return _print(
+                _response(
+                    "background_job_intent",
+                    ok=ok,
+                    result_status="success" if ok else "error",
+                    project_name=project_name,
+                    topic_name=topic_name,
+                    intent_kind="continue",
+                    task_id=task_id,
+                    wake=wake,
+                    result=executed,
+                )
+            )
+        executed = background_job_executor.run_requested_project_wake(
+            project_name,
+            reason="manual_wake",
+            trigger_source=trigger_source,
+            dry_run=dry_run,
+        )
+        ok = bool(executed.get("executed"))
+        return _print(
+            _response(
+                "background_job_intent",
+                ok=ok,
+                result_status="success" if ok else "error",
+                project_name=project_name,
+                topic_name=topic_name,
+                intent_kind="continue",
+                task_id=str(executed.get("selected_task_id", "")).strip(),
+                result=executed,
+            )
+        )
+    task_id = _resolve_task_id_for_intent(project_name, intent.get("task_id", ""))
+    if not task_id:
+        return _print(
+            _response(
+                "background_job_intent",
+                ok=False,
+                result_status="error",
+                error="no_runnable_long_task",
+                project_name=project_name,
+                intent_kind="pause",
+            )
+        )
+    job = background_job_executor.board_job_projector.project_background_job(project_name, task_id)
+    binding = _job_binding_payload(job)
+    changed_targets = codex_memory.sync_project_layers(
+        binding,
+        task_updates=[
+            {
+                "task_id": task_id,
+                "status": "blocked",
+                "next_action": "等待显式继续长任务。",
+                "updated_at": background_job_executor.iso_now_local(),
+            }
+        ],
+    )
+    codex_memory.record_project_writeback(
+        binding,
+        source="background_job_intent",
+        changed_targets=changed_targets,
+        trigger_dashboard_sync=False,
+    )
+    cancel_payload = background_job_executor.workspace_wake_broker.cancel_wake(job["job_id"])
+    return _print(
+        _response(
+            "background_job_intent",
+            ok=True,
+            result_status="success",
+            project_name=project_name,
+            topic_name=topic_name,
+            intent_kind="pause",
+            task_id=task_id,
+            changed_targets=changed_targets,
+            cancel_payload=cancel_payload,
         )
     )
 
@@ -1948,6 +2400,14 @@ def build_parser() -> argparse.ArgumentParser:
     background_job.add_argument("--trigger-source", default="")
     background_job.add_argument("--dry-run", action="store_true")
     background_job.set_defaults(func=cmd_background_job)
+
+    background_job_intent = subparsers.add_parser("background-job-intent")
+    background_job_intent.add_argument("--project-name", required=True)
+    background_job_intent.add_argument("--text", required=True)
+    background_job_intent.add_argument("--topic-name", default="")
+    background_job_intent.add_argument("--trigger-source", default="")
+    background_job_intent.add_argument("--dry-run", action="store_true")
+    background_job_intent.set_defaults(func=cmd_background_job_intent)
 
     feishu_callback_executor_parser = subparsers.add_parser("feishu-callback-executor")
     feishu_callback_executor_parser.add_argument("--action", required=True)

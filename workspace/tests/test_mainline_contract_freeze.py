@@ -102,6 +102,36 @@ def seed_console_state(codex_memory, review_plane, coordination_plane) -> None:
     )
 
 
+def seed_sample_harness_board(codex_memory, *, status: str = "doing") -> None:
+    board = codex_memory.load_project_board("SampleProj")
+    project_rows = [
+        {
+            "ID": "SP-EXEC-01",
+            "父ID": "",
+            "来源": "project",
+            "范围": "automation",
+            "事项": "Run Sample background job",
+            "状态": status,
+            "交付物": "sample brief",
+            "审核状态": "",
+            "审核人": "",
+            "审核结论": "",
+            "审核时间": "",
+            "下一步": "collect sources and prepare a brief",
+            "更新时间": "2026-03-30T10:00:00+08:00",
+            "指向": str(board["path"]),
+        }
+    ]
+    codex_memory.save_project_board(
+        board["path"],
+        board["frontmatter"],
+        board["body"],
+        project_rows,
+        board["rollup_rows"],
+        board.get("gflow_rows", []),
+    )
+
+
 def read_payload(capsys) -> dict:
     return json.loads(capsys.readouterr().out.strip())
 
@@ -377,6 +407,227 @@ def test_local_broker_material_suggest_returns_route_payload(sample_env, capsys)
     assert payload["retrieval_protocol"]["steps"] == ["search", "timeline", "detail"]
     assert payload["retrieval_protocol"]["next_step"] in {"timeline", "detail"}
     assert payload["retrieval_protocol"]["timeline_candidate_count"] >= 1
+
+
+def test_background_job_intent_create_adds_board_task_and_auto_projects_job(sample_env, monkeypatch, capsys) -> None:
+    from ops import board_job_projector as projector_module
+
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    seed_sample_harness_board(_codex_memory, status="doing")
+    wake_calls: list[tuple[str, str]] = []
+    run_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "request_task_wake",
+        lambda project_name, task_id, **kwargs: wake_calls.append((project_name, task_id)) or {"accepted": True, "wake_id": "wake-create"},
+    )
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "run_requested_task",
+        lambda project_name, task_id, **kwargs: run_calls.append((project_name, task_id))
+        or {
+            "executed": True,
+            "payload": {"ok": True},
+        },
+    )
+
+    assert (
+        local_broker.cmd_background_job_intent(
+            argparse.Namespace(
+                project_name="SampleProj",
+                text="新建长任务 补齐 harness 自动注册",
+                topic_name="",
+                trigger_source="test_contract",
+                dry_run=False,
+            )
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+
+    assert payload["ok"] is True
+    assert payload["intent_kind"] == "create"
+    assert payload["task_id"] == "SP-EXEC-02"
+    assert wake_calls == [("SampleProj", "SP-EXEC-02")]
+    assert run_calls == [("SampleProj", "SP-EXEC-02")]
+
+    board = _codex_memory.load_project_board("SampleProj")
+    assert board["project_rows"][0]["ID"] == "SP-EXEC-02"
+    assert board["project_rows"][0]["事项"] == "补齐 harness 自动注册"
+
+    board_job_projector = importlib.reload(projector_module)
+    projected_ids = [job["task_id"] for job in board_job_projector.list_projectable_jobs("SampleProj")]
+    assert "SP-EXEC-02" in projected_ids
+
+
+def test_background_job_intent_continue_routes_existing_task(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    seed_sample_harness_board(_codex_memory, status="doing")
+    wake_calls: list[tuple[str, str]] = []
+    run_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "request_task_wake",
+        lambda project_name, task_id, **kwargs: wake_calls.append((project_name, task_id)) or {"accepted": True, "wake_id": "wake-continue"},
+    )
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "run_requested_task",
+        lambda project_name, task_id, **kwargs: run_calls.append((project_name, task_id))
+        or {
+            "executed": True,
+            "payload": {"ok": True},
+        },
+    )
+
+    assert (
+        local_broker.cmd_background_job_intent(
+            argparse.Namespace(
+                project_name="SampleProj",
+                text="继续长任务 SP-EXEC-01",
+                topic_name="",
+                trigger_source="test_contract",
+                dry_run=False,
+            )
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+
+    assert payload["ok"] is True
+    assert payload["intent_kind"] == "continue"
+    assert payload["task_id"] == "SP-EXEC-01"
+    assert wake_calls == [("SampleProj", "SP-EXEC-01")]
+    assert run_calls == [("SampleProj", "SP-EXEC-01")]
+
+
+def test_background_job_intent_create_dry_run_does_not_write_board_or_schedule(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    seed_sample_harness_board(codex_memory, status="doing")
+    board_before = codex_memory.load_project_board("SampleProj")
+    board_row_count_before = len(board_before["project_rows"])
+    wake_calls: list[tuple[str, str]] = []
+    run_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "request_task_wake",
+        lambda project_name, task_id, **kwargs: wake_calls.append((project_name, task_id)) or {"accepted": True},
+    )
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "run_requested_task",
+        lambda project_name, task_id, **kwargs: run_calls.append((project_name, task_id)) or {"executed": True, "payload": {"ok": True}},
+    )
+
+    assert (
+        local_broker.cmd_background_job_intent(
+            argparse.Namespace(
+                project_name="SampleProj",
+                text="新建长任务 补齐 harness dry-run 守卫",
+                topic_name="",
+                trigger_source="test_contract",
+                dry_run=True,
+            )
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+    board_after = codex_memory.load_project_board("SampleProj")
+
+    assert payload["ok"] is True
+    assert payload["result_status"] == "dry-run"
+    assert payload["intent_kind"] == "create"
+    assert payload["task_id"] == "SP-EXEC-02"
+    assert payload["preview_task"]["task_item"] == "补齐 harness dry-run 守卫"
+    assert wake_calls == []
+    assert run_calls == []
+    assert len(board_after["project_rows"]) == board_row_count_before
+    assert [row["ID"] for row in board_after["project_rows"]] == [row["ID"] for row in board_before["project_rows"]]
+
+
+def test_background_job_intent_continue_dry_run_does_not_schedule(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    seed_sample_harness_board(codex_memory, status="doing")
+    wake_calls: list[tuple[str, str]] = []
+    run_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "request_task_wake",
+        lambda project_name, task_id, **kwargs: wake_calls.append((project_name, task_id)) or {"accepted": True},
+    )
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "run_requested_task",
+        lambda project_name, task_id, **kwargs: run_calls.append((project_name, task_id)) or {"executed": True, "payload": {"ok": True}},
+    )
+
+    assert (
+        local_broker.cmd_background_job_intent(
+            argparse.Namespace(
+                project_name="SampleProj",
+                text="继续长任务 SP-EXEC-01",
+                topic_name="",
+                trigger_source="test_contract",
+                dry_run=True,
+            )
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+
+    assert payload["ok"] is True
+    assert payload["result_status"] == "dry-run"
+    assert payload["intent_kind"] == "continue"
+    assert payload["task_id"] == "SP-EXEC-01"
+    assert wake_calls == []
+    assert run_calls == []
+
+
+def test_background_job_intent_create_dry_run_respects_topic_binding(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    seed_sample_harness_board(codex_memory, status="doing")
+    topic_path = write_topic_board(
+        codex_memory,
+        project_name="SampleProj",
+        topic_name="需求",
+        topic_key="demand",
+        rows=[],
+    )
+    codex_memory.refresh_project_rollups("SampleProj", topic_path=topic_path)
+
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "request_task_wake",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run should not request wake")),
+    )
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "run_requested_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run should not execute task")),
+    )
+
+    assert (
+        local_broker.cmd_background_job_intent(
+            argparse.Namespace(
+                project_name="SampleProj",
+                text="新建长任务 输出需求补充清单",
+                topic_name="需求",
+                trigger_source="test_contract",
+                dry_run=True,
+            )
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+
+    assert payload["result_status"] == "dry-run"
+    assert payload["preview_task"]["binding_scope"] == "topic"
+    assert payload["preview_task"]["binding_board_path"] == str(topic_path)
+    assert payload["preview_task"]["topic_name"] == "需求"
 
 
 def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsys) -> None:
@@ -1457,6 +1708,94 @@ def test_electron_full_access_profile_routes_through_start_codex(sample_env, mon
         "--prompt",
         "继续 Electron 完全访问任务",
     ]
+
+
+def test_background_job_returns_phase2_action_permission_contract(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    job = {
+        "project_name": "SampleProj",
+        "task_id": "SP-EXEC-01",
+        "job_id": "board-job.sampleproj.sp-exec-01.sample-background-job",
+        "task_pointer": "/tmp/SampleProj-项目板.md",
+    }
+    monkeypatch.setattr(local_broker.background_job_executor.board_job_projector, "project_background_job", lambda project_name, task_id: job)
+    monkeypatch.setattr(
+        local_broker.background_job_executor,
+        "execute_projected_job",
+        lambda selected_job, **kwargs: {
+            "ok": True,
+            "job": {
+                **selected_job,
+                "program_spec": {
+                    "scope_type": "workspace",
+                    "approval_required": True,
+                    "approval_state": "pending",
+                },
+            },
+        },
+    )
+
+    assert (
+        local_broker.cmd_background_job(
+            argparse.Namespace(project_name="SampleProj", task_id="SP-EXEC-01", approval_token="", trigger_source="", dry_run=False)
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+    assert payload["ok"] is True
+    assert payload["action_registry"]["operation_key"] == "background_job:SampleProj:SP-EXEC-01"
+    assert payload["principal_policy"]["principal_kind"] == "background_program"
+    assert payload["operation_policy"]["mode"] == "approval_required"
+    assert payload["operation_policy"]["risk"] == "workspace_execution"
+    assert payload["execution_boundary"]["boundary_id"] == "background-job"
+    assert payload["execution_boundary"]["requires_approval"] is True
+
+
+def test_background_job_policy_uses_job_program_spec_fallback_for_blocked_path(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    policy = local_broker._background_job_operation_policy(
+        {
+            "project_name": "SampleProj",
+            "task_id": "SP-EXEC-01",
+            "source_type": "project",
+            "program_spec": {
+                "scope_type": "workspace",
+                "approval_required": True,
+                "approval_state": "pending",
+            },
+        },
+        blocked_reason="ValueError",
+    )
+
+    assert policy["mode"] == "approval_required"
+    assert policy["risk"] == "workspace_execution"
+    assert policy["metadata"]["approval_state"] == "pending"
+
+
+def test_background_job_returns_structured_error_when_projection_fails(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    monkeypatch.setattr(
+        local_broker.background_job_executor.board_job_projector,
+        "project_background_job",
+        lambda project_name, task_id: (_ for _ in ()).throw(KeyError("unknown task id")),
+    )
+
+    assert (
+        local_broker.cmd_background_job(
+            argparse.Namespace(project_name="SampleProj", task_id="SP-MISSING-01", approval_token="", trigger_source="", dry_run=False)
+        )
+        == 0
+    )
+    payload = read_payload(capsys)
+
+    assert payload["ok"] is False
+    assert payload["broker_action"] == "background_job"
+    assert payload["error_type"] == "KeyError"
+    assert payload["project_name"] == "SampleProj"
+    assert payload["task_id"] == "SP-MISSING-01"
+    assert payload["action_registry"]["operation_key"] == "background_job:SampleProj:SP-MISSING-01"
+    assert payload["principal_policy"]["principal_kind"] == "background_program"
+    assert payload["operation_policy"]["risk"] == "project_execution"
 
 
 def test_local_system_approved_profile_routes_through_start_codex(sample_env, monkeypatch, capsys) -> None:
