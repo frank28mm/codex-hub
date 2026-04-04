@@ -16,6 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from ops import workspace_job_schema
+
 try:
     from ops import workspace_hub_project
 except ImportError:  # pragma: no cover
@@ -2219,6 +2221,66 @@ def fetch_bridge_connection(bridge: str = "feishu") -> dict[str, Any]:
         "metadata": json.loads(payload["metadata_json"]),
         "updated_at": payload["updated_at"],
     }
+
+
+def _prefer_latest_iso(current: str, candidate: str) -> str:
+    current_dt = parse_iso_timestamp(str(current or "").strip())
+    candidate_dt = parse_iso_timestamp(str(candidate or "").strip())
+    if current_dt is None:
+        return str(candidate or "").strip()
+    if candidate_dt is None:
+        return str(current or "").strip()
+    return str(candidate if candidate_dt >= current_dt else current).strip()
+
+
+def bridge_runtime_snapshot(*, bridge: str = "feishu") -> dict[str, Any]:
+    connection = fetch_bridge_connection(bridge)
+    activity = fetch_bridge_message_activity(bridge)
+    continuity = fetch_bridge_continuity_status(bridge=bridge, limit=20)
+    inbound = dict(activity.get("inbound", {}) or {})
+    outbound = dict(activity.get("outbound", {}) or {})
+    metadata = dict(connection.get("metadata", {}) or {})
+    metadata.update(
+        {
+            "host_mode": str(connection.get("host_mode", "")).strip(),
+            "updated_at": str(connection.get("updated_at", "")).strip(),
+            "continuity_ok": bool(continuity.get("ok", False)),
+            "shared_session_count": int(continuity.get("shared_session_count", 0) or 0),
+            "response_delayed_count": int(continuity.get("response_delayed_count", 0) or 0),
+            "progress_stalled_count": int(continuity.get("progress_stalled_count", 0) or 0),
+        }
+    )
+    last_event_at = _prefer_latest_iso(
+        str(connection.get("last_event_at", "")).strip(),
+        str(inbound.get("activity_at") or inbound.get("cursor_at") or "").strip(),
+    )
+    if last_event_at == str(inbound.get("activity_at") or inbound.get("cursor_at") or "").strip():
+        metadata["last_message_preview"] = str(inbound.get("text") or metadata.get("last_message_preview") or "").strip()
+        metadata["last_sender_ref"] = str(inbound.get("sender_ref") or metadata.get("last_sender_ref") or "").strip()
+    metadata["last_delivery_at"] = _prefer_latest_iso(
+        str(metadata.get("last_delivery_at") or "").strip(),
+        str(outbound.get("activity_at") or outbound.get("cursor_at") or "").strip(),
+    )
+    if metadata["last_delivery_at"] == str(outbound.get("activity_at") or outbound.get("cursor_at") or "").strip():
+        metadata["last_delivery_phase"] = str(outbound.get("phase") or metadata.get("last_delivery_phase") or "").strip()
+    return workspace_job_schema.BridgeRuntimeSnapshot(
+        bridge=bridge,
+        status=str(connection.get("status", "")).strip(),
+        transport=str(connection.get("transport", "")).strip(),
+        last_event_at=last_event_at,
+        last_error=str(connection.get("last_error", "")).strip(),
+        inbound_message_id=str(inbound.get("message_id", "")).strip(),
+        inbound_cursor_at=str(inbound.get("cursor_at", "")).strip(),
+        outbound_message_id=str(outbound.get("message_id", "")).strip(),
+        outbound_cursor_at=str(outbound.get("cursor_at", "")).strip(),
+        continuity_issue_count=int(continuity.get("issue_count", 0) or 0),
+        metadata=metadata,
+    ).to_dict()
+
+
+def bridge_status_surface(*, bridge: str = "feishu", settings_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    snapshot = bridge_runtime_snapshot(bridge=bridge)
+    return workspace_job_schema.bridge_status_surface(snapshot, settings_summary=settings_summary)
 
 
 def upsert_bridge_connection(
