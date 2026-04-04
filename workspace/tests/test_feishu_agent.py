@@ -985,6 +985,28 @@ def test_calendar_default_alias_uses_default_calendar(sample_env) -> None:
     assert payload["events"][0]["id"] == "evt_123"
 
 
+def test_calendar_event_creation_can_default_to_invite_meeting_route(sample_env) -> None:
+    agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_create_default_route"] = "invite_meeting"
+    payload = agent.cal_add({"title": "找袁工要拓扑图", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00"})
+    assert payload["route"] == "invite_meeting"
+    assert payload["calendar_id"] == "cal_meeting"
+    assert payload["event"]["event_id"] == "evt_123"
+    assert payload["event"]["vchat"]["vc_type"] == "vc"
+    assert any(item["type"] == "user" and item["id"] == "ou_owner" for item in payload["attendees"])
+
+
+def test_calendar_event_creation_explicit_calendar_bypasses_invite_default(sample_env) -> None:
+    agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_create_default_route"] = "invite_meeting"
+    payload = agent.cal_add(
+        {"title": "个人提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00", "calendar_id": "cal_default"}
+    )
+    assert payload["calendar_id"] == "cal_default"
+    assert payload["event"]["event_id"] == "evt_123"
+    assert "route" not in payload
+
+
 def test_calendar_operations_prefer_lark_cli_backend(sample_env, monkeypatch) -> None:
     agent = build_agent(sample_env)
     monkeypatch.setattr(feishu_agent.lark_cli_backend, "backend_enabled", lambda domain, env=None: domain == "calendar")

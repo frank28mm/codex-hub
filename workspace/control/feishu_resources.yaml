@@ -2,6 +2,7 @@ version: 1
 defaults:
   owner_open_id: ""
   calendar_id: ""
+  calendar_create_default_route: invite_meeting
   doc_folder_token: ""
   doc_access_scope: folder-root
   doc_access_note: Configure a folder root or explicitly switch to full_account after deployment.
@@ -67,4 +68,3 @@ projection:
         type: grid
       - name: 最近更新任务
         type: grid
-

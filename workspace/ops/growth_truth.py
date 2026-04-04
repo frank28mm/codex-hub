@@ -156,15 +156,25 @@ def render_object_file(object_name: str, rows: list[dict[str, str]], *, frontmat
 
 def ensure_object_file(object_name: str) -> Path:
     path = object_path(object_name)
+    return ensure_object_file_at(object_name, path)
+
+
+def ensure_object_file_at(object_name: str, path: Path, *, project_name: str = "") -> Path:
     if path.exists():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_object_file(object_name, []), encoding="utf-8")
+    frontmatter = {"project_name": project_name} if _text(project_name) else None
+    path.write_text(render_object_file(object_name, [], frontmatter=frontmatter), encoding="utf-8")
     return path
 
 
 def load_rows(object_name: str) -> list[dict[str, str]]:
     path = ensure_object_file(object_name)
+    return load_rows_at(object_name, path)
+
+
+def load_rows_at(object_name: str, path: Path, *, project_name: str = "") -> list[dict[str, str]]:
+    path = ensure_object_file_at(object_name, path, project_name=project_name)
     text = codex_memory.read_text(path)
     _frontmatter, body = codex_memory.parse_frontmatter(text)
     return codex_memory.parse_markdown_table(body, object_headers(object_name), allow_missing=True)
@@ -172,16 +182,27 @@ def load_rows(object_name: str) -> list[dict[str, str]]:
 
 def save_rows(object_name: str, rows: list[dict[str, str]]) -> Path:
     path = ensure_object_file(object_name)
+    return save_rows_at(object_name, path, rows)
+
+
+def save_rows_at(object_name: str, path: Path, rows: list[dict[str, str]], *, project_name: str = "") -> Path:
+    path = ensure_object_file_at(object_name, path, project_name=project_name)
     text = codex_memory.read_text(path)
     frontmatter, _body = codex_memory.parse_frontmatter(text)
+    if _text(project_name) and not _text(frontmatter.get("project_name")):
+        frontmatter["project_name"] = _text(project_name)
     normalized_rows = [{header: _text(row.get(header, "")) for header in object_headers(object_name)} for row in rows]
     codex_memory.write_text(path, render_object_file(object_name, normalized_rows, frontmatter=frontmatter))
     return path
 
 
 def upsert_rows(object_name: str, rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return upsert_rows_at(object_name, object_path(object_name), rows)
+
+
+def upsert_rows_at(object_name: str, path: Path, rows: list[dict[str, Any]], *, project_name: str = "") -> list[dict[str, str]]:
     key_field = object_key_field(object_name)
-    existing = load_rows(object_name)
+    existing = load_rows_at(object_name, path, project_name=project_name)
     by_key = {_text(row.get(key_field)): dict(row) for row in existing if _text(row.get(key_field))}
     for candidate in rows:
         key = _text(candidate.get(key_field))
@@ -194,7 +215,7 @@ def upsert_rows(object_name: str, rows: list[dict[str, Any]]) -> list[dict[str, 
         by_key[key] = row
     merged = list(by_key.values())
     merged.sort(key=lambda item: _text(item.get(key_field)))
-    save_rows(object_name, merged)
+    save_rows_at(object_name, path, merged, project_name=project_name)
     return merged
 
 

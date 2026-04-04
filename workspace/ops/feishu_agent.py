@@ -967,6 +967,9 @@ class FeishuAgent:
         defaults = self._defaults().get("meeting", {})
         return defaults if isinstance(defaults, dict) else {}
 
+    def _default_calendar_create_route(self) -> str:
+        return str(self._defaults().get("calendar_create_default_route") or "").strip().lower()
+
     def list_calendars(self) -> list[dict[str, Any]]:
         if self._calendar_cache is None:
             result = self.api("GET", "/calendar/v4/calendars")
@@ -2868,6 +2871,34 @@ class FeishuAgent:
         return {"calendar_id": calendar_id, "events": events}
 
     def cal_add(self, payload: dict[str, Any]) -> dict[str, Any]:
+        explicit_calendar = str(payload.get("calendar") or payload.get("calendar_id") or "").strip()
+        if not explicit_calendar and self._default_calendar_create_route() in {
+            "invite",
+            "meeting",
+            "invite_meeting",
+            "meeting_invite",
+        }:
+            merged = dict(payload)
+            defaults = self._default_meeting_settings()
+            if not merged.get("calendar") and defaults.get("calendar_id"):
+                merged["calendar"] = defaults.get("calendar_id")
+            if not merged.get("timezone") and defaults.get("timezone"):
+                merged["timezone"] = defaults.get("timezone")
+            if merged.get("attendee_ability") is None and defaults.get("attendee_ability"):
+                merged["attendee_ability"] = defaults.get("attendee_ability")
+            if merged.get("visibility") is None and defaults.get("visibility"):
+                merged["visibility"] = defaults.get("visibility")
+            result = self._create_calendar_event(merged, with_vchat=True)
+            response = {
+                "ok": True,
+                "calendar_id": result.get("calendar_id"),
+                "event": result.get("event", {}),
+                "attendees": result.get("attendees", []),
+                "route": "invite_meeting",
+            }
+            if result.get("warning"):
+                response["warning"] = result["warning"]
+            return response
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
         if self._can_use_lark_cli_backend("calendar"):
             timezone = str(payload.get("timezone") or DEFAULT_TIMEZONE)
