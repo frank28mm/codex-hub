@@ -56,6 +56,55 @@ function safeJsonParse(text) {
   }
 }
 
+function parseIsoTimestamp(value) {
+  const parsed = Date.parse(String(value || "").trim());
+  return Number.isNaN(parsed) ? Number.NaN : parsed;
+}
+
+function preferLatestIso(currentValue, nextValue) {
+  const currentText = String(currentValue || "").trim();
+  const nextText = String(nextValue || "").trim();
+  if (!currentText) return nextText;
+  if (!nextText) return currentText;
+  const currentTs = parseIsoTimestamp(currentText);
+  const nextTs = parseIsoTimestamp(nextText);
+  if (!Number.isFinite(currentTs)) return nextText;
+  if (!Number.isFinite(nextTs)) return currentText;
+  return nextTs >= currentTs ? nextText : currentText;
+}
+
+function deriveLiveFreshness(statusPayload = {}) {
+  const connectionStatus = String(statusPayload.connection_status || "").trim();
+  if (connectionStatus !== "connected") {
+    return {
+      stale: false,
+      event_stalled: false,
+    };
+  }
+  const now = Date.now();
+  const staleAfterSeconds = Math.max(0, Number(statusPayload.stale_after_seconds || 90));
+  const eventIdleAfterSeconds = Math.max(0, Number(statusPayload.event_idle_after_seconds || 0));
+  const heartbeatAt = parseIsoTimestamp(statusPayload.heartbeat_at || statusPayload.updated_at);
+  const eventCandidates = [
+    parseIsoTimestamp(statusPayload.last_event_at),
+    parseIsoTimestamp(statusPayload.connected_at),
+    parseIsoTimestamp(statusPayload.updated_at),
+  ].filter((value) => Number.isFinite(value));
+  const eventAt = eventCandidates.length ? Math.max(...eventCandidates) : Number.NaN;
+  const stale =
+    Number.isFinite(heartbeatAt) && staleAfterSeconds > 0
+      ? (now - heartbeatAt) / 1000 > staleAfterSeconds
+      : false;
+  const eventStalled =
+    Number.isFinite(eventAt) && eventIdleAfterSeconds > 0
+      ? (now - eventAt) / 1000 > eventIdleAfterSeconds
+      : false;
+  return {
+    stale: stale || eventStalled,
+    event_stalled: eventStalled,
+  };
+}
+
 function parseEnvFile(text) {
   const env = {};
   for (const raw of String(text || "").split(/\r?\n/)) {
@@ -288,11 +337,25 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
   }
 
   async function saveBridgeStatus(statusPayload) {
-    lastBridgeStatus = {
+    const mergedStatus = {
       ...lastBridgeStatus,
       ...statusPayload,
       bridge: "feishu",
       updated_at: new Date().toISOString(),
+    };
+    lastBridgeStatus = {
+      ...mergedStatus,
+      connected_at: preferLatestIso(lastBridgeStatus.connected_at, mergedStatus.connected_at),
+      last_event_at: preferLatestIso(lastBridgeStatus.last_event_at, mergedStatus.last_event_at),
+      heartbeat_at: preferLatestIso(lastBridgeStatus.heartbeat_at, mergedStatus.heartbeat_at),
+      recent_message_count: Math.max(
+        Number(lastBridgeStatus.recent_message_count || 0),
+        Number(mergedStatus.recent_message_count || 0),
+      ),
+      recent_reply_count: Math.max(
+        Number(lastBridgeStatus.recent_reply_count || 0),
+        Number(mergedStatus.recent_reply_count || 0),
+      ),
     };
     await brokerCall("bridge-connection", {
       connection: {
@@ -311,6 +374,10 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
           heartbeat_at: lastBridgeStatus.heartbeat_at || "",
           stale_after_seconds: Number(lastBridgeStatus.stale_after_seconds || 90),
           event_idle_after_seconds: Number(lastBridgeStatus.event_idle_after_seconds || 300),
+          backfill_degraded: Boolean(lastBridgeStatus.backfill_degraded),
+          backfill_degraded_count: Number(lastBridgeStatus.backfill_degraded_count || 0),
+          last_backfill_error: lastBridgeStatus.last_backfill_error || "",
+          last_backfill_error_at: lastBridgeStatus.last_backfill_error_at || "",
           bridge_root: moduleRef.bridgeRoot,
           module_path: moduleRef.modulePath,
         },
@@ -379,6 +446,12 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
       ...brokerStatus,
       ...liveServiceStatus,
     };
+    if (liveServiceStatus && Object.keys(liveServiceStatus).length) {
+      lastBridgeStatus = {
+        ...lastBridgeStatus,
+        ...deriveLiveFreshness(lastBridgeStatus),
+      };
+    }
     if (bootstrapSource && !lastBridgeStatus.bootstrap_source) {
       lastBridgeStatus.bootstrap_source = bootstrapSource;
     }
@@ -438,18 +511,6 @@ function createBridgeHost({ appRoot, workspaceRoot, runBroker, logger = console,
 
   async function sendMessage({ chatRef = "", openId = "", text = "", phase = "report" } = {}) {
     const serviceInstance = await ensureService();
-    const currentStatus = await getStatus();
-    if (currentStatus?.data?.connection_status !== "connected") {
-      const connectResult = await serviceInstance.connect();
-      if (!connectResult?.ok) {
-        return {
-          ok: false,
-          data: currentStatus?.data || {},
-          result: connectResult || { ok: false, reason: "bridge_connect_failed" },
-          bridge_root: moduleRef.bridgeRoot,
-        };
-      }
-    }
     const result = await serviceInstance.sendMessage({
       chatId: String(chatRef || "").trim(),
       openId: String(openId || "").trim(),

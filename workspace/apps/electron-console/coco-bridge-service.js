@@ -236,11 +236,12 @@ function shouldAutoReconnectBridge(state = {}) {
 }
 
 function shouldDeferIdleReconnect(state = {}, serviceState = {}, nowMs = Date.now()) {
-  const hasLiveWork =
+  const hasUrgentWork =
     Number(state.running_threads || 0) > 0 ||
     Number(state.approval_pending_threads || 0) > 0 ||
-    Number(state.attention_threads || 0) > 0;
-  if (hasLiveWork || Boolean(state.ack_stalled) || (!Boolean(state.stale) && !Boolean(state.event_stalled))) {
+    Number(state.response_delayed_threads || 0) > 0;
+  // Old attention threads should not keep an otherwise idle CLI event bridge in a reconnect loop.
+  if (hasUrgentWork || Boolean(state.ack_stalled) || (!Boolean(state.stale) && !Boolean(state.event_stalled))) {
     return false;
   }
   const lastAttemptAt = parseTimestamp(serviceState.last_reconnect_attempt_at);

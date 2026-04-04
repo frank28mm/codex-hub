@@ -199,6 +199,25 @@ function testIdleReconnectCooldownAllowsRetryAfterWindow() {
   assert.equal(shouldDeferIdleReconnect(bridgeState, serviceState, now), false);
 }
 
+function testIdleAttentionThreadDoesNotForceImmediateReconnect() {
+  const now = Date.now();
+  const bridgeState = {
+    connection_status: "connected",
+    stale: false,
+    event_stalled: true,
+    ack_stalled: false,
+    running_threads: 0,
+    approval_pending_threads: 0,
+    attention_threads: 1,
+    response_delayed_threads: 0,
+    event_idle_after_seconds: 1800,
+  };
+  const serviceState = {
+    last_reconnect_attempt_at: new Date(now - 5 * 60_000).toISOString(),
+  };
+  assert.equal(shouldDeferIdleReconnect(bridgeState, serviceState, now), true);
+}
+
 function testSourceFingerprintDetectsCodeChanges() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "coco-bridge-service-test-"));
   const filePath = path.join(tempRoot, "watched.js");
@@ -219,6 +238,7 @@ function main() {
   testIdleStaleTriggersReconnectEligibility();
   testIdleReconnectCooldownDefersFreshRetry();
   testIdleReconnectCooldownAllowsRetryAfterWindow();
+  testIdleAttentionThreadDoesNotForceImmediateReconnect();
   testSourceFingerprintDetectsCodeChanges();
   console.log("ok");
 }
