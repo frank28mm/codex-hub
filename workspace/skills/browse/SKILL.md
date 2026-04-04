@@ -59,7 +59,7 @@ For front-end or page-flow work, `browse` is normally the first half of a `brows
 
 Return in this order:
 
-1. Current stage
+1. Status
 2. What I checked
 3. Verified behavior and failures
 4. Evidence collected

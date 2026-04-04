@@ -16,3 +16,9 @@ reports/ops/workspace-hub-health/health-*.md
 reports/ops/workspace-hub-health/latest.md
 reports/ops/workspace-hub-health/history.ndjson
 reports/ops/workspace-hub-health/alerts.ndjson
+reports/ops/public-promotion-delivery/
+reports/ops/background-jobs/
+
+# Generated system report assets
+reports/system/assets/*.png
+reports/system/assets/previews/
