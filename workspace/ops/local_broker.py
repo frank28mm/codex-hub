@@ -18,12 +18,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from ops import assistant_branding, background_job_executor, codex_memory, codex_models, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
+    from ops import assistant_branding, background_job_executor, codex_memory, codex_models, engine_adapter, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
 except ImportError:  # pragma: no cover
     import assistant_branding  # type: ignore
     import background_job_executor  # type: ignore
     import codex_memory  # type: ignore
     import codex_models  # type: ignore
+    import engine_adapter  # type: ignore
     import feishu_agent  # type: ignore
     import feishu_callback_executor  # type: ignore
     import material_router  # type: ignore
@@ -127,6 +128,7 @@ def _background_job_writable_roots() -> list[Path]:
 APPROVED_PROFILE_SCOPE_MAP = {
     "feishu-approved": "feishu_high_risk_execution",
     "feishu-local-system-approved": "feishu_local_system_execution",
+    "claude-hub-approved": "claude_hub_high_risk_execution",
 }
 
 
@@ -609,6 +611,7 @@ def _command_result(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     ok = payload.get("returncode", 1) == 0
     launch_context = _extract_prefixed_json(payload.get("stderr", ""), "WORKSPACE_HUB_LAUNCH_CONTEXT=")
     finalize_payload = _extract_prefixed_json(payload.get("stderr", ""), "WORKSPACE_HUB_FINALIZE_LAUNCH=")
+    engine_lease = _extract_prefixed_json(payload.get("stderr", ""), "WORKSPACE_HUB_ENGINE_LEASE=")
     timed_out = bool(payload.get("timed_out"))
     return _response(
         action,
@@ -617,6 +620,7 @@ def _command_result(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         result_status="success" if ok else ("timeout" if timed_out else "error"),
         launch_context=launch_context,
         finalize_launch=finalize_payload,
+        engine_lease=engine_lease,
         **payload,
     )
 
@@ -865,6 +869,64 @@ def _start_codex_command(
         "attachment_path": attachment_path,
         "attachment_type": attachment_type,
         "voice_transcript": voice_transcript,
+    }
+    for key, option in runtime_ingestion.start_codex_forward_options():
+        value = str(forward_values.get(key, "") or "").strip()
+        if value:
+            command.extend([option, value])
+    if prompt:
+        command.extend(["--prompt", prompt])
+    return command
+
+
+def _start_claude_hub_path() -> str:
+    return str(workspace_root() / "ops" / "start-claude-hub")
+
+
+def _start_claude_hub_command(
+    *,
+    prompt: str,
+    engine_name: str = "claude",
+    project_name: str = "",
+    session_id: str = "",
+    no_auto_resume: bool = False,
+    execution_profile: str = "",
+    model: str = "",
+    reasoning_effort: str = "",
+    source: str = "",
+    chat_ref: str = "",
+    thread_name: str = "",
+    thread_label: str = "",
+    source_message_id: str = "",
+    approval_token: str = "",
+    entry_surface: str = "",
+) -> list[str]:
+    normalized_engine = engine_adapter.normalize_engine_name(engine_name)
+    normalized_surface = engine_adapter.normalize_entry_surface(
+        entry_surface or ("codepilot" if str(source or "").strip() == "codepilot" else ""),
+        engine_name=normalized_engine,
+    )
+    command = [_start_claude_hub_path(), "--engine-name", normalized_engine, "--entry-surface", normalized_surface]
+    if execution_profile:
+        command.extend(["--execution-profile", execution_profile])
+    if model:
+        command.extend(["--model", model])
+    if reasoning_effort:
+        command.extend(["--reasoning-effort", reasoning_effort])
+    if approval_token:
+        command.extend(["--approval-token", approval_token])
+    if project_name:
+        command.extend(["--project", project_name])
+    if session_id:
+        command.extend(["--resume-session-id", session_id])
+    if no_auto_resume:
+        command.append("--no-auto-resume")
+    forward_values = {
+        "source": source,
+        "chat_ref": chat_ref,
+        "thread_name": thread_name,
+        "thread_label": thread_label,
+        "source_message_id": source_message_id,
     }
     for key, option in runtime_ingestion.start_codex_forward_options():
         value = str(forward_values.get(key, "") or "").strip()
@@ -1312,6 +1374,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
         capabilities={
             "codex_exec": True,
             "codex_resume": True,
+            "engine_exec": True,
+            "engine_resume": True,
+            "engine_adapter": True,
             "codex_app": True,
             "project_snapshot": True,
             "review_snapshot": True,
@@ -1341,6 +1406,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "status",
             "codex-exec",
             "codex-resume",
+            "engine-exec",
+            "engine-resume",
+            "engine-adapter",
             "codex-app",
             "projects",
             "review-inbox",
@@ -1474,6 +1542,113 @@ def cmd_codex_resume(args: argparse.Namespace) -> int:
         "codex_resume",
         _run(
             command,
+            cwd=workspace_root(),
+            timeout_seconds=_remote_command_timeout_seconds(
+                execution_profile=execution_profile,
+                source=getattr(args, "source", ""),
+            ),
+        ),
+    )
+    return _print(payload)
+
+
+def cmd_engine_adapter(args: argparse.Namespace) -> int:
+    contract = engine_adapter.session_contract(
+        engine_name=getattr(args, "engine_name", "codex"),
+        entry_surface=getattr(args, "entry_surface", ""),
+        project_name=getattr(args, "project_name", ""),
+        binding_scope=getattr(args, "binding_scope", "chat"),
+        binding_board_path=getattr(args, "binding_board_path", ""),
+        topic_name=getattr(args, "topic_name", ""),
+        launch_source=getattr(args, "source", ""),
+        source_chat_ref=getattr(args, "chat_ref", ""),
+        session_id=getattr(args, "session_id", ""),
+        execution_profile=getattr(args, "execution_profile", ""),
+        approval_state=getattr(args, "approval_state", ""),
+    )
+    manifest = engine_adapter.adapter_manifest(
+        engine_name=getattr(args, "engine_name", "codex"),
+        entry_surface=getattr(args, "entry_surface", ""),
+        launch_source=getattr(args, "source", ""),
+    )
+    lease = runtime_state.fetch_engine_session_lease(lease_key=str(contract.get("lease_key") or "").strip())
+    return _print(_response("engine_adapter", ok=True, manifest=manifest, contract=contract, lease=lease))
+
+
+def cmd_engine_exec(args: argparse.Namespace) -> int:
+    engine_name = engine_adapter.normalize_engine_name(getattr(args, "engine_name", "codex"))
+    if engine_name == "codex":
+        return cmd_codex_exec(args)
+    execution_profile = getattr(args, "execution_profile", "")
+    validation_error = _validate_execution_profile_access(
+        "engine_exec",
+        execution_profile=execution_profile,
+        approval_token=getattr(args, "approval_token", ""),
+        source=getattr(args, "source", ""),
+    )
+    if validation_error:
+        return _print(validation_error)
+    payload = _command_result(
+        "engine_exec",
+        _run(
+            _start_claude_hub_command(
+                prompt=args.prompt,
+                engine_name=engine_name,
+                project_name=getattr(args, "project_name", ""),
+                no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
+                execution_profile=execution_profile,
+                model=getattr(args, "model", ""),
+                reasoning_effort=getattr(args, "reasoning_effort", ""),
+                source=getattr(args, "source", ""),
+                chat_ref=getattr(args, "chat_ref", ""),
+                thread_name=getattr(args, "thread_name", ""),
+                thread_label=getattr(args, "thread_label", ""),
+                source_message_id=getattr(args, "source_message_id", ""),
+                approval_token=getattr(args, "approval_token", ""),
+                entry_surface=getattr(args, "entry_surface", ""),
+            ),
+            timeout_seconds=_remote_command_timeout_seconds(
+                execution_profile=execution_profile,
+                source=getattr(args, "source", ""),
+            ),
+        ),
+    )
+    return _print(payload)
+
+
+def cmd_engine_resume(args: argparse.Namespace) -> int:
+    engine_name = engine_adapter.normalize_engine_name(getattr(args, "engine_name", "codex"))
+    if engine_name == "codex":
+        return cmd_codex_resume(args)
+    execution_profile = getattr(args, "execution_profile", "")
+    validation_error = _validate_execution_profile_access(
+        "engine_resume",
+        execution_profile=execution_profile,
+        approval_token=getattr(args, "approval_token", ""),
+        source=getattr(args, "source", ""),
+    )
+    if validation_error:
+        return _print(validation_error)
+    payload = _command_result(
+        "engine_resume",
+        _run(
+            _start_claude_hub_command(
+                prompt=args.prompt,
+                engine_name=engine_name,
+                project_name=getattr(args, "project_name", ""),
+                session_id=args.session_id,
+                no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
+                execution_profile=execution_profile,
+                model=getattr(args, "model", ""),
+                reasoning_effort=getattr(args, "reasoning_effort", ""),
+                source=getattr(args, "source", ""),
+                chat_ref=getattr(args, "chat_ref", ""),
+                thread_name=getattr(args, "thread_name", ""),
+                thread_label=getattr(args, "thread_label", ""),
+                source_message_id=getattr(args, "source_message_id", ""),
+                approval_token=getattr(args, "approval_token", ""),
+                entry_surface=getattr(args, "entry_surface", ""),
+            ),
             cwd=workspace_root(),
             timeout_seconds=_remote_command_timeout_seconds(
                 execution_profile=execution_profile,
@@ -2102,7 +2277,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
 
 def cmd_command_center(args: argparse.Namespace) -> int:
     action = args.action
-    if action in {"codex-exec", "codex-resume"}:
+    if action in {"codex-exec", "codex-resume", "engine-exec", "engine-resume"}:
         blocked = _pause_block_response("command_center", project_name=getattr(args, "project_name", ""))
         if blocked:
             blocked["action"] = action
@@ -2112,7 +2287,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
         execution_profile=execution_profile,
         source=getattr(args, "source", ""),
     )
-    if action in {"codex-exec", "codex-resume"}:
+    if action in {"codex-exec", "codex-resume", "engine-exec", "engine-resume"}:
         validation_error = _validate_execution_profile_access(
             "command_center",
             execution_profile=execution_profile,
@@ -2191,6 +2366,68 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             "codex_resume",
             _run(command, cwd=workspace_root(), timeout_seconds=timeout_seconds),
         )
+    elif action == "engine-exec":
+        normalized_engine = engine_adapter.normalize_engine_name(getattr(args, "engine_name", "codex"))
+        if normalized_engine == "codex":
+            return cmd_command_center(
+                argparse.Namespace(
+                    **{**vars(args), "action": "codex-exec"},
+                )
+            )
+        payload = _command_result(
+            "engine_exec",
+            _run(
+                _start_claude_hub_command(
+                    prompt=args.prompt,
+                    engine_name=normalized_engine,
+                    project_name=getattr(args, "project_name", ""),
+                    no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
+                    execution_profile=execution_profile,
+                    model=getattr(args, "model", ""),
+                    reasoning_effort=getattr(args, "reasoning_effort", ""),
+                    source=getattr(args, "source", ""),
+                    chat_ref=getattr(args, "chat_ref", ""),
+                    thread_name=getattr(args, "thread_name", ""),
+                    thread_label=getattr(args, "thread_label", ""),
+                    source_message_id=getattr(args, "source_message_id", ""),
+                    approval_token=getattr(args, "approval_token", ""),
+                    entry_surface=getattr(args, "entry_surface", ""),
+                ),
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+    elif action == "engine-resume":
+        normalized_engine = engine_adapter.normalize_engine_name(getattr(args, "engine_name", "codex"))
+        if normalized_engine == "codex":
+            return cmd_command_center(
+                argparse.Namespace(
+                    **{**vars(args), "action": "codex-resume"},
+                )
+            )
+        payload = _command_result(
+            "engine_resume",
+            _run(
+                _start_claude_hub_command(
+                    prompt=args.prompt,
+                    engine_name=normalized_engine,
+                    project_name=getattr(args, "project_name", ""),
+                    session_id=args.session_id,
+                    no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
+                    execution_profile=execution_profile,
+                    model=getattr(args, "model", ""),
+                    reasoning_effort=getattr(args, "reasoning_effort", ""),
+                    source=getattr(args, "source", ""),
+                    chat_ref=getattr(args, "chat_ref", ""),
+                    thread_name=getattr(args, "thread_name", ""),
+                    thread_label=getattr(args, "thread_label", ""),
+                    source_message_id=getattr(args, "source_message_id", ""),
+                    approval_token=getattr(args, "approval_token", ""),
+                    entry_surface=getattr(args, "entry_surface", ""),
+                ),
+                cwd=workspace_root(),
+                timeout_seconds=timeout_seconds,
+            ),
+        )
     else:
         return _print(_response("command_center", ok=False, action=action, error=f"unknown action `{action}`"))
     return _print(
@@ -2210,6 +2447,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             error_type=payload.get("error_type", ""),
             launch_context=payload.get("launch_context"),
             finalize_launch=payload.get("finalize_launch"),
+            engine_lease=payload.get("engine_lease"),
         )
     )
 
@@ -2278,6 +2516,55 @@ def build_parser() -> argparse.ArgumentParser:
     codex_resume.add_argument("--approval-token", default="")
     codex_resume.add_argument("--no-auto-resume", action="store_true")
     codex_resume.set_defaults(func=cmd_codex_resume)
+
+    engine_exec = subparsers.add_parser("engine-exec")
+    engine_exec.add_argument("--engine-name", default="claude")
+    engine_exec.add_argument("--entry-surface", default="")
+    engine_exec.add_argument("--prompt", required=True)
+    engine_exec.add_argument("--execution-profile", default="")
+    engine_exec.add_argument("--model", default="")
+    engine_exec.add_argument("--reasoning-effort", default="")
+    engine_exec.add_argument("--project-name", default="")
+    engine_exec.add_argument("--source", default="")
+    engine_exec.add_argument("--chat-ref", default="")
+    engine_exec.add_argument("--thread-name", default="")
+    engine_exec.add_argument("--thread-label", default="")
+    engine_exec.add_argument("--source-message-id", default="")
+    engine_exec.add_argument("--approval-token", default="")
+    engine_exec.add_argument("--no-auto-resume", action="store_true")
+    engine_exec.set_defaults(func=cmd_engine_exec)
+
+    engine_resume = subparsers.add_parser("engine-resume")
+    engine_resume.add_argument("--engine-name", default="claude")
+    engine_resume.add_argument("--entry-surface", default="")
+    engine_resume.add_argument("--session-id", required=True)
+    engine_resume.add_argument("--prompt", default="")
+    engine_resume.add_argument("--execution-profile", default="")
+    engine_resume.add_argument("--model", default="")
+    engine_resume.add_argument("--reasoning-effort", default="")
+    engine_resume.add_argument("--project-name", default="")
+    engine_resume.add_argument("--source", default="")
+    engine_resume.add_argument("--chat-ref", default="")
+    engine_resume.add_argument("--thread-name", default="")
+    engine_resume.add_argument("--thread-label", default="")
+    engine_resume.add_argument("--source-message-id", default="")
+    engine_resume.add_argument("--approval-token", default="")
+    engine_resume.add_argument("--no-auto-resume", action="store_true")
+    engine_resume.set_defaults(func=cmd_engine_resume)
+
+    engine_adapter_parser = subparsers.add_parser("engine-adapter")
+    engine_adapter_parser.add_argument("--engine-name", default="codex")
+    engine_adapter_parser.add_argument("--entry-surface", default="")
+    engine_adapter_parser.add_argument("--project-name", default="")
+    engine_adapter_parser.add_argument("--binding-scope", default="chat")
+    engine_adapter_parser.add_argument("--binding-board-path", default="")
+    engine_adapter_parser.add_argument("--topic-name", default="")
+    engine_adapter_parser.add_argument("--source", default="")
+    engine_adapter_parser.add_argument("--chat-ref", default="")
+    engine_adapter_parser.add_argument("--session-id", default="")
+    engine_adapter_parser.add_argument("--execution-profile", default="")
+    engine_adapter_parser.add_argument("--approval-state", default="")
+    engine_adapter_parser.set_defaults(func=cmd_engine_adapter)
 
     codex_app = subparsers.add_parser("codex-app")
     codex_app.set_defaults(func=cmd_codex_open_app)
@@ -2419,6 +2706,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     command_center = subparsers.add_parser("command-center")
     command_center.add_argument("--action", required=True)
+    command_center.add_argument("--engine-name", default="codex")
+    command_center.add_argument("--entry-surface", default="")
     command_center.add_argument("--project-name", default="")
     command_center.add_argument("--session-id", default="")
     command_center.add_argument("--prompt", default="")

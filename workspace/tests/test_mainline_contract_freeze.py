@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
+import stat
+import subprocess
 
 
 def reload_modules():
@@ -269,6 +272,29 @@ def test_background_job_profile_uses_workspace_write_with_runtime_roots(monkeypa
     assert "sandbox_workspace_write.network_access=true" in command_str
     assert str(local_broker.workspace_root()) in command_str
     assert str(local_broker.codex_memory.VAULT_ROOT) in command_str
+
+
+def test_start_claude_hub_command_preserves_engine_and_codepilot_surface(sample_env) -> None:
+    from ops import local_broker as local_broker_module
+
+    local_broker = importlib.reload(local_broker_module)
+
+    command = local_broker._start_claude_hub_command(
+        prompt="推进 Claude Hub spine",
+        engine_name="claude",
+        execution_profile="background-job",
+        source="codepilot",
+    )
+
+    assert command[:5] == [
+        str(local_broker.workspace_root() / "ops" / "start-claude-hub"),
+        "--engine-name",
+        "claude",
+        "--entry-surface",
+        "codepilot",
+    ]
+    assert "--execution-profile" in command
+    assert "background-job" in command
 
 
 def test_validate_execution_profile_access_requires_approved_token(sample_env) -> None:
@@ -2260,6 +2286,68 @@ def test_start_codex_and_local_broker_follow_runtime_ingestion_contract(sample_e
         assert f'"{key}": ' in start_codex_text
 
 
+def test_start_codex_smoke_executes_validation_and_lease_paths(sample_env, tmp_path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_args_path = tmp_path / "codex-args.txt"
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                'printf "%s\\n" "$@" > "$FAKE_CODEX_ARGS_PATH"',
+                'printf "START_CODEX_SMOKE_OK\\n"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(fake_codex.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["WORKSPACE_HUB_SKIP_DISCOVERY"] = "1"
+    env["AUTO_OPEN_OBSIDIAN"] = "0"
+    env["FAKE_CODEX_ARGS_PATH"] = str(fake_args_path)
+
+    result = subprocess.run(
+        [
+            str(Path(__file__).resolve().parents[1] / "ops" / "start-codex"),
+            "--execution-profile",
+            "weixin",
+            "--source",
+            "weixin",
+            "--chat-ref",
+            "weixin:default:smoke-user",
+            "--thread-name",
+            "smoke-thread",
+            "--thread-label",
+            "smoke-thread",
+            "--source-message-id",
+            "smoke-msg",
+            "--no-auto-resume",
+            "--prompt",
+            "测试一句话：只回复 好",
+        ],
+        cwd=str(sample_env["workspace_root"]),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert "START_CODEX_SMOKE_OK" in result.stdout
+    assert "WORKSPACE_HUB_LAUNCH_CONTEXT=" in result.stderr
+    assert "WORKSPACE_HUB_ENGINE_LEASE=" in result.stderr
+
+    fake_args = fake_args_path.read_text(encoding="utf-8").splitlines()
+    assert fake_args[0] == "exec"
+    assert "--sandbox" in fake_args
+    assert "workspace-write" in fake_args
+    assert any("测试一句话：只回复 好" in part for part in fake_args)
+
+
 def test_electron_and_feishu_entrypoints_keep_runtime_ingestion_fields(sample_env) -> None:
     electron_main = (Path(__file__).resolve().parents[1] / "apps" / "electron-console" / "main.js").read_text(
         encoding="utf-8"
@@ -2600,6 +2688,89 @@ def test_watcher_uses_snapshot_launch_binding_when_prompt_is_generic(sample_env,
     project_board = codex_memory.load_project_board("SampleProj")
     rollup_ids = {row["ID"] for row in project_board["rollup_rows"]}
     assert "WH-FS-02" in rollup_ids
+
+
+def test_watcher_prefers_explicit_session_binding_over_fixed_workspace_route(sample_env, monkeypatch) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, _local_broker, watcher = reload_modules()
+
+    fixed_project_dir = sample_env["projects_root"] / "FixedProj"
+    fixed_project_dir.mkdir(parents=True, exist_ok=True)
+    codex_memory.create_project_summary("FixedProj", fixed_project_dir, [])
+    codex_memory.create_project_board("FixedProj")
+    registry = codex_memory.load_registry()
+    registry.append(
+        {
+            "project_name": "FixedProj",
+            "aliases": [],
+            "path": str(fixed_project_dir),
+            "status": "active",
+            "summary_note": str(codex_memory.project_summary_path("FixedProj")),
+        }
+    )
+    codex_memory.write_registry(registry)
+    codex_memory.refresh_active_projects(registry)
+
+    sample_board = codex_memory.project_board_path("SampleProj")
+    fixed_board = codex_memory.project_board_path("FixedProj")
+    monkeypatch.setattr(
+        watcher,
+        "load_worktree_route_registry",
+        lambda: {
+            str(sample_env["workspace_root"].resolve()): {
+                "project_name": "FixedProj",
+                "binding_scope": "project",
+                "binding_board_path": str(fixed_board),
+                "topic_name": "",
+                "rollup_target": str(fixed_board),
+            }
+        },
+    )
+    monkeypatch.setattr(watcher, "trigger_retrieval_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "trigger_dashboard_sync_once", lambda: None)
+    monkeypatch.setattr(watcher, "request_health_check_writeback_wake", lambda: {"accepted": True})
+
+    bindings = codex_memory.load_bindings()
+    bindings["bindings"].append(
+        {
+            "launch_id": "manual-session-bind",
+            "project_name": "SampleProj",
+            "prompt": "绑定到 SampleProj",
+            "mode": "resume",
+            "started_at": "2026-03-12T04:55:00Z",
+            "status": "running",
+            "resume_session_id": "sess-explicit-bind",
+            "session_id": "sess-explicit-bind",
+            "binding_scope": "project",
+            "binding_board_path": str(sample_board),
+            "topic_name": "",
+            "rollup_target": str(sample_board),
+            "launch_source": "codex-app-direct",
+        }
+    )
+    codex_memory.save_bindings(bindings)
+
+    result = watcher.sync_snapshot(
+        {
+            "id": "sess-explicit-bind",
+            "started_at": "2026-03-12T05:00:00Z",
+            "last_active_at": "2026-03-12T05:15:00Z",
+            "cwd": str(sample_env["workspace_root"]),
+            "user_message": "继续刚才这个项目",
+            "last_agent_message": "已沿用显式 session binding。",
+            "completed": True,
+            "path": str(sample_env["workspace_root"] / "sess-explicit-bind.jsonl"),
+            "mtime": 3.5,
+        }
+    )
+
+    assert result is not None
+    assert result["action"] == "synced"
+    assert result["project_name"] == "SampleProj"
+    latest_binding = next(item for item in reversed(codex_memory.load_bindings()["bindings"]) if item.get("session_id") == "sess-explicit-bind")
+    assert latest_binding["project_name"] == "SampleProj"
+    assert latest_binding["binding_board_path"] == str(sample_board)
+    router = codex_memory.load_router()
+    assert router["routes"]["SampleProj"]["last_session_id"] == "sess-explicit-bind"
 
 
 def test_sync_snapshot_requests_health_wake_after_project_writeback(sample_env, monkeypatch) -> None:

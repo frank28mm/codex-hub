@@ -78,6 +78,22 @@ def control_root() -> Path:
 
 
 @lru_cache(maxsize=1)
+def load_task_family_registry() -> dict[str, dict[str, Any]]:
+    path = control_root() / "task_families.yaml"
+    if not path.exists():
+        return {}
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    families = payload.get("families", {})
+    if isinstance(families, dict):
+        normalized: dict[str, dict[str, Any]] = {}
+        for family_id, item in families.items():
+            if isinstance(item, dict):
+                normalized[str(family_id).strip() or str(item.get("family_id", "")).strip()] = dict(item)
+        return {key: value for key, value in normalized.items() if key}
+    return {}
+
+
+@lru_cache(maxsize=1)
 def load_growth_control() -> dict[str, Any]:
     path = control_root() / "codex_growth_system.yaml"
     if not path.exists():
@@ -169,6 +185,42 @@ def _coerce_string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _safe_template_context(context: dict[str, Any]) -> dict[str, str]:
+    return {str(key): str(value) for key, value in context.items()}
+
+
+def _render_template(value: Any, context: dict[str, Any]) -> str:
+    text = str(value or "")
+    try:
+        return text.format_map(_safe_template_context(context))
+    except Exception:
+        return text
+
+
+def _coerce_family_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _family_program_defaults(family: dict[str, Any], executor_kind: str = "implementation_loop") -> dict[str, Any]:
+    defaults = _coerce_family_dict(family.get("program_defaults"))
+    template = _default_spec_template(str(defaults.get("executor_kind", executor_kind)).strip() or executor_kind)
+    merged = {**template, **defaults}
+    merged["allowed_actions"] = _coerce_string_list(merged.get("allowed_actions")) or list(template["allowed_actions"])
+    merged["delivery_targets"] = _coerce_string_list(merged.get("delivery_targets")) or list(template["delivery_targets"])
+    merged["executor_kind"] = str(merged.get("executor_kind", template["executor_kind"])).strip() or template["executor_kind"]
+    merged["automation_mode"] = str(merged.get("automation_mode", template["automation_mode"])).strip() or template["automation_mode"]
+    merged["gate_policy"] = str(merged.get("gate_policy", template["gate_policy"])).strip() or template["gate_policy"]
+    merged["max_rounds"] = int(merged.get("max_rounds", template["max_rounds"]) or template["max_rounds"])
+    merged["time_budget_minutes"] = int(
+        merged.get("time_budget_minutes", template["time_budget_minutes"]) or template["time_budget_minutes"]
+    )
+    merged["subgoal_schema_version"] = int(
+        merged.get("subgoal_schema_version", template.get("subgoal_schema_version", 1))
+        or template.get("subgoal_schema_version", 1)
+    )
+    return merged
+
+
 def _default_spec_template(executor_kind: str) -> dict[str, Any]:
     normalized = str(executor_kind or "").strip() or "research_brief"
     if normalized == "implementation_loop":
@@ -194,14 +246,280 @@ def _default_spec_template(executor_kind: str) -> dict[str, Any]:
     }
 
 
+def _task_scope_label(ref: dict[str, Any]) -> str:
+    return str(ref["row"].get("范围", "")).strip() or "任务推进"
+
+
+def _task_source_label(ref: dict[str, Any]) -> str:
+    return str(ref["row"].get("来源", "")).strip() or str(ref.get("source_type", "project")).strip() or "project"
+
+
+def _task_text_corpus(ref: dict[str, Any]) -> str:
+    row = ref["row"]
+    parts = [
+        str(row.get("ID", "")).strip(),
+        _task_scope_label(ref),
+        str(row.get("事项", "")).strip(),
+        str(row.get("下一步", "")).strip(),
+        _task_source_label(ref),
+    ]
+    return "\n".join(item for item in parts if item)
+
+
+def _is_manual_long_task(ref: dict[str, Any]) -> bool:
+    source_label = _task_source_label(ref)
+    scope = _task_scope_label(ref)
+    return source_label == "manual_long_task" or scope in {"长任务", "讨论任务"}
+
+
+def _task_family_context(ref: dict[str, Any], *, artifacts_root: Path) -> dict[str, Any]:
+    row = ref["row"]
+    return {
+        "workspace_root": workspace_root(),
+        "project_name": str(ref.get("project_name", "")).strip(),
+        "task_id": str(row.get("ID", "")).strip(),
+        "task_item": str(row.get("事项", "")).strip(),
+        "next_action": str(row.get("下一步", "")).strip(),
+        "scope": _task_scope_label(ref),
+        "source": _task_source_label(ref),
+        "project_board_path": str(ref.get("project_board_path", "")).strip(),
+        "source_path": str(ref.get("source_path", "")).strip(),
+        "artifacts_root": artifacts_root,
+        "latest_report_path": artifacts_root / "latest.md",
+        "latest_smoke_path": artifacts_root / "latest-smoke.md",
+    }
+
+
+def _family_matches(ref: dict[str, Any], family: dict[str, Any]) -> bool:
+    rules = _coerce_family_dict(family.get("match_rules"))
+    sources = _coerce_string_list(rules.get("sources"))
+    scopes = _coerce_string_list(rules.get("scopes"))
+    keywords_any = [item.lower() for item in _coerce_string_list(rules.get("keywords_any"))]
+    keywords_all = [item.lower() for item in _coerce_string_list(rules.get("keywords_all"))]
+    regex_any = _coerce_string_list(rules.get("regex_any"))
+
+    source_label = _task_source_label(ref)
+    scope_label = _task_scope_label(ref)
+    text = _task_text_corpus(ref).lower()
+
+    if sources and source_label not in sources:
+        return False
+    if scopes and scope_label not in scopes:
+        return False
+    if keywords_all and not all(token in text for token in keywords_all):
+        return False
+    if keywords_any and not any(token in text for token in keywords_any):
+        return False
+    if regex_any and not any(re.search(pattern, _task_text_corpus(ref), re.I) for pattern in regex_any):
+        return False
+    return bool(sources or scopes or keywords_any or keywords_all or regex_any)
+
+
+def _path_text(path: Path | str) -> str:
+    return str(path if isinstance(path, Path) else Path(path))
+
+
+def _generic_report_verify_command(*, report_path: Path, smoke_path: Path, task_id: str, summary: str) -> str:
+    return (
+        "python3 - <<'PY'\n"
+        "from pathlib import Path\n"
+        f"report = Path({report_path.as_posix()!r})\n"
+        f"smoke = Path({smoke_path.as_posix()!r})\n"
+        f"task_id = {task_id!r}\n"
+        f"summary = {summary!r}\n"
+        "assert report.exists(), 'missing latest report'\n"
+        "report_text = report.read_text(encoding='utf-8', errors='ignore')\n"
+        "assert task_id in report_text, 'latest report missing task id'\n"
+        "assert summary in report_text, 'latest report missing current focus summary'\n"
+        "assert smoke.exists(), 'missing latest smoke'\n"
+        "smoke_text = smoke.read_text(encoding='utf-8', errors='ignore')\n"
+        "assert task_id in smoke_text, 'latest smoke missing task id'\n"
+        "PY"
+    )
+
+
+def _generic_codex_exec_packet(
+    *,
+    packet_template: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    target_lines = str(context.get("target_files_joined", "")).strip() or "- 先自行定位最小必要改动面"
+    action_lines = str(context.get("execute_actions_joined", "")).strip() or "- 围绕当前 track 推进最小必要改动"
+    boundary_lines = str(context.get("boundary_notes_joined", "")).strip() or "- 保持板面、报告与真源一致"
+    prompt = _render_template(
+        packet_template.get(
+            "prompt_template",
+            (
+                "继续推进任务 `{task_id}`。\n"
+                "当前 track：{summary}\n"
+                "任务目标：{task_item}\n"
+                "当前下一步：{next_action}\n"
+                "目标文件：\n"
+                "{target_lines}\n"
+                "本轮动作：\n"
+                "{action_lines}\n"
+                "边界要求：\n"
+                "{boundary_lines}\n"
+                "要求：完成最小必要代码/测试/报告更新，并保留可验证的下一步。"
+            ),
+        ),
+        {
+            **context,
+            "target_lines": target_lines,
+            "action_lines": action_lines,
+            "boundary_lines": boundary_lines,
+        },
+    )
+    return {
+        "label": _render_template(packet_template.get("label_template", "{subgoal_id}"), context),
+        "kind": str(packet_template.get("kind", "codex_exec")).strip() or "codex_exec",
+        "project_name": _render_template(packet_template.get("project_name", "{project_name}"), context),
+        "source": str(packet_template.get("source", "background_job_harness")).strip() or "background_job_harness",
+        "execution_profile": str(packet_template.get("execution_profile", "background-job")).strip() or "background-job",
+        "reasoning_effort": str(packet_template.get("reasoning_effort", "medium")).strip() or "medium",
+        "timeout_seconds": int(packet_template.get("timeout_seconds", 900) or 900),
+        "no_auto_resume": bool(packet_template.get("no_auto_resume", True)),
+        "prompt": prompt,
+    }
+
+
+def _materialize_generic_tracks(
+    ref: dict[str, Any],
+    *,
+    family: str,
+    artifacts_root: Path,
+) -> list[dict[str, Any]]:
+    registry = load_task_family_registry()
+    family_payload = registry.get(family, {})
+    if not isinstance(family_payload, dict):
+        return []
+
+    task_id = str(ref["row"].get("ID", "")).strip()
+    report_path = artifacts_root / "latest.md"
+    smoke_path = artifacts_root / "latest-smoke.md"
+    base_context = _task_family_context(ref, artifacts_root=artifacts_root)
+    rendered_tracks: list[dict[str, Any]] = []
+
+    for index, template in enumerate(family_payload.get("track_templates", []), start=1):
+        if not isinstance(template, dict):
+            continue
+        subgoal_id = str(template.get("subgoal_id", "")).strip() or f"goal-{index}"
+        summary = _render_template(template.get("summary_template", subgoal_id), {**base_context, "subgoal_id": subgoal_id})
+        track_context = {
+            **base_context,
+            "family_id": family,
+            "subgoal_id": subgoal_id,
+            "summary": summary,
+        }
+        current_truth = [
+            _render_template(item, track_context)
+            for item in template.get("current_truth_templates", [])
+            if _render_template(item, track_context).strip()
+        ]
+        target_files = [
+            _render_template(item, track_context)
+            for item in template.get("target_files_templates", [])
+            if _render_template(item, track_context).strip()
+        ]
+        execute_actions = [
+            _render_template(item, track_context)
+            for item in template.get("execute_actions", [])
+            if _render_template(item, track_context).strip()
+        ]
+        adapt_actions = [
+            _render_template(item, track_context)
+            for item in template.get("adapt_actions", [])
+            if _render_template(item, track_context).strip()
+        ]
+        boundary_notes = [
+            _render_template(item, track_context)
+            for item in template.get("boundary_notes", [])
+            if _render_template(item, track_context).strip()
+        ]
+        packet_context = {
+            **track_context,
+            "target_files_joined": "\n".join(f"- {item}" for item in target_files) or "- 先自行定位最小必要改动面",
+            "execute_actions_joined": "\n".join(f"- {item}" for item in execute_actions) or "- 围绕当前 track 推进最小必要改动",
+            "boundary_notes_joined": "\n".join(f"- {item}" for item in boundary_notes) or "- 保持板面、报告与真源一致",
+        }
+        packet_template = _coerce_family_dict(template.get("execution_packet_template"))
+        execution_packets = [
+            _generic_codex_exec_packet(
+                packet_template=packet_template,
+                context=packet_context,
+            )
+        ] if packet_template else []
+
+        verify_contract = _coerce_family_dict(template.get("verify_contract"))
+        verify_commands: list[dict[str, Any]] = []
+        for command in verify_contract.get("pytest_commands", []):
+            if not isinstance(command, dict):
+                continue
+            command_text = _render_template(command.get("command_template", ""), packet_context).strip()
+            if not command_text:
+                continue
+            verify_commands.append(
+                {
+                    "label": _render_template(command.get("label", f"verify-{subgoal_id}"), packet_context).strip() or f"verify-{subgoal_id}",
+                    "command": command_text,
+                    "timeout_seconds": int(command.get("timeout_seconds", 180) or 180),
+                }
+            )
+        if bool(verify_contract.get("include_report_verifier", False)):
+            report_summary = _render_template(
+                verify_contract.get("report_summary_template", "{summary}"),
+                packet_context,
+            ).strip() or summary
+            verify_commands.append(
+                {
+                    "label": f"verify-report-{subgoal_id}",
+                    "command": _generic_report_verify_command(
+                        report_path=report_path,
+                        smoke_path=smoke_path,
+                        task_id=task_id,
+                        summary=report_summary,
+                    ),
+                    "timeout_seconds": 60,
+                }
+            )
+        rendered_tracks.append(
+            {
+                "subgoal_id": subgoal_id,
+                "summary": summary,
+                "current_truth": current_truth,
+                "target_files": target_files,
+                "execute_actions": execute_actions,
+                "execution_packets": execution_packets,
+                "verify_commands": verify_commands,
+                "adapt_actions": adapt_actions,
+            }
+        )
+    return rendered_tracks
+
+
 def _pointer_task_spec(project_name: str, ref: dict[str, Any]) -> dict[str, Any] | None:
     pointer = Path(_task_pointer_path(project_name, ref))
     if not pointer.exists() or pointer.suffix.lower() != ".md":
         return None
     text = codex_memory.read_text(pointer)
-    frontmatter, _body = codex_memory.parse_frontmatter(text)
+    frontmatter: dict[str, Any] = {}
+    match = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
+    if match:
+        try:
+            parsed = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            frontmatter = parsed
+    if not frontmatter:
+        frontmatter, _body = codex_memory.parse_frontmatter(text)
     harness = frontmatter.get("harness")
-    if not isinstance(harness, dict) or harness.get("enabled") is False:
+    if not isinstance(harness, dict):
+        return None
+    if harness.get("enabled") is False:
+        return None
+    explicit_keys = {str(key).strip() for key in harness.keys()} - {"family", "enabled"}
+    if not explicit_keys:
         return None
 
     executor_kind = str(harness.get("executor_kind", "")).strip() or "research_brief"
@@ -236,17 +554,95 @@ def _pointer_task_spec(project_name: str, ref: dict[str, Any]) -> dict[str, Any]
     return spec
 
 
+def _pointer_task_family(ref: dict[str, Any]) -> str:
+    pointer = Path(_task_pointer_path(str(ref.get("project_name", "")).strip(), ref))
+    if not pointer.exists() or pointer.suffix.lower() != ".md":
+        return ""
+    text = codex_memory.read_text(pointer)
+    frontmatter: dict[str, Any] = {}
+    match = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
+    if match:
+        try:
+            parsed = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            frontmatter = parsed
+    if not frontmatter:
+        frontmatter, _body = codex_memory.parse_frontmatter(text)
+    harness = frontmatter.get("harness")
+    if not isinstance(harness, dict):
+        return ""
+    return str(harness.get("family", "")).strip()
+
+
+def _registry_family_spec(
+    ref: dict[str, Any],
+    *,
+    family_id: str,
+    family_source: str,
+    family_resolution_reason: str,
+) -> dict[str, Any] | None:
+    registry = load_task_family_registry()
+    family = registry.get(family_id)
+    if not isinstance(family, dict):
+        return None
+    defaults = _family_program_defaults(family, executor_kind="implementation_loop")
+    row = ref["row"]
+    acceptance = [f"围绕任务 `{str(row.get('ID', '')).strip()}` 推进 `{str(row.get('事项', '')).strip()}` 到可验证状态。"]
+    next_action = str(row.get("下一步", "")).strip()
+    deliverable = str(row.get("交付物", "")).strip()
+    if deliverable:
+        acceptance.append(f"产出或更新交付物：{deliverable}。")
+    if next_action:
+        acceptance.append(f"完成当前下一步：{next_action}")
+    return {
+        "job_slug": f"auto-{_identity_segment(str(row.get('ID', '')).strip())}",
+        **defaults,
+        "acceptance_criteria": acceptance,
+        "analysis_focus": [
+            f"按 family `{family_id}` 实例化任务 `{str(row.get('ID', '')).strip()}` 的 program blueprint。",
+            f"围绕范围 `{_task_scope_label(ref)}` 与当前下一步推进 `{str(row.get('事项', '')).strip()}`，并保持板面写回可解释。",
+        ],
+        "task_family": family_id,
+        "family_source": family_source,
+        "family_resolution_reason": family_resolution_reason,
+        "stop_conditions": _coerce_string_list(family.get("stop_conditions")),
+        "family_metadata_defaults": _coerce_family_dict(family.get("metadata_defaults")),
+    }
+
+
+def _generic_task_family(ref: dict[str, Any]) -> str:
+    family_id, _family_source, _resolution_reason = _registry_matched_family(ref)
+    if family_id:
+        return family_id
+    return "generic_manual_long_task" if _is_manual_long_task(ref) else ""
+
+
+def _registry_matched_family(ref: dict[str, Any]) -> tuple[str, str, str]:
+    registry = load_task_family_registry()
+    for family_id, family in registry.items():
+        if family_id == "generic_manual_long_task":
+            continue
+        if _family_matches(ref, family):
+            return family_id, "registry", "match_rules"
+    if _is_manual_long_task(ref) and "generic_manual_long_task" in registry:
+        return "generic_manual_long_task", "registry_fallback", "manual_long_task_fallback"
+    return "", "", ""
+
+
 def _generic_job_spec(ref: dict[str, Any]) -> dict[str, Any]:
     row = ref["row"]
     task_id = str(row.get("ID", "")).strip()
     task_status = codex_memory.normalize_task_status(row.get("状态", "todo"))
-    scope = str(row.get("范围", "")).strip() or "任务推进"
+    scope = _task_scope_label(ref)
     task_item = str(row.get("事项", "")).strip() or task_id
     next_action = str(row.get("下一步", "")).strip()
     deliverable = str(row.get("交付物", "")).strip()
-    source_type = str(ref.get("source_type", "project")).strip() or "project"
-    source_label = str(row.get("来源", "")).strip() or source_type
-    if task_status == "doing":
+    source_label = _task_source_label(ref)
+    manual_long_task = _is_manual_long_task(ref)
+    family = _generic_task_family(ref)
+    if task_status == "doing" or manual_long_task:
         acceptance = [
             f"围绕任务 `{task_id}` 推进 `{task_item}` 到可验证状态。",
         ]
@@ -270,6 +666,11 @@ def _generic_job_spec(ref: dict[str, Any]) -> dict[str, Any]:
                 f"围绕范围 `{scope}` 与当前下一步推进 `{task_item}`，并保持板面写回可解释。",
             ],
             "implementation_tracks": [],
+            "task_family": family,
+            "family_source": "heuristic_fallback",
+            "family_resolution_reason": "generic_manual_long_task",
+            "family_metadata_defaults": {},
+            "stop_conditions": [],
         }
     acceptance = [f"澄清并收口任务 `{task_id}`：{task_item}。"]
     if next_action:
@@ -288,6 +689,11 @@ def _generic_job_spec(ref: dict[str, Any]) -> dict[str, Any]:
             f"把 `{task_id}` 从普通板面任务提升成 Harness-ready 的可执行入口。",
             f"先澄清范围 `{scope}`、交付物与下一步，再决定是否进入更重的 implementation loop。",
         ],
+        "task_family": family,
+        "family_source": "heuristic_fallback",
+        "family_resolution_reason": "generic_manual_long_task",
+        "family_metadata_defaults": {},
+        "stop_conditions": [],
     }
 
 
@@ -299,9 +705,29 @@ def _resolve_task_job_spec(project_name: str, ref: dict[str, Any]) -> dict[str, 
     spec = _pointer_task_spec(project_name, ref)
     if spec is not None:
         return spec
+    pointer_family = _pointer_task_family(ref)
+    if pointer_family:
+        spec = _registry_family_spec(
+            ref,
+            family_id=pointer_family,
+            family_source="pointer_family",
+            family_resolution_reason="harness.family",
+        )
+        if spec is not None:
+            return spec
     task_status = codex_memory.normalize_task_status(ref["row"].get("状态", "todo"))
     if task_status not in RUNNABLE_STATUSES:
         return None
+    family_id, family_source, resolution_reason = _registry_matched_family(ref)
+    if family_id:
+        spec = _registry_family_spec(
+            ref,
+            family_id=family_id,
+            family_source=family_source,
+            family_resolution_reason=resolution_reason,
+        )
+        if spec is not None:
+            return spec
     return _generic_job_spec(ref)
 
 
@@ -473,6 +899,18 @@ def project_background_job(project_name: str, task_id: str) -> dict[str, Any]:
     program_id = f"program.{project_segment}.{task_segment}.{slug_segment}"
     artifacts_root = workspace_root() / "reports" / "ops" / "background-jobs" / project_segment / f"{task_segment}-{slug_segment}"
     legacy_artifacts_root = _legacy_artifacts_root(str(spec["job_slug"]))
+    if (
+        str(spec.get("executor_kind", "")).strip() == "implementation_loop"
+        and not [item for item in spec.get("implementation_tracks", []) if isinstance(item, dict)]
+        and _is_manual_long_task(ref)
+    ):
+        spec = dict(spec)
+        spec["implementation_tracks"] = _materialize_generic_tracks(
+            ref,
+            family=str(spec.get("task_family", "")).strip() or _generic_task_family(ref),
+            artifacts_root=artifacts_root,
+        )
+        spec["subgoal_schema_version"] = max(int(spec.get("subgoal_schema_version", 1) or 1), 2)
     task_spec = _persisted_program_state([artifacts_root, legacy_artifacts_root])
     task_status = _projected_task_status(row, task_spec)
     if task_status not in RUNNABLE_STATUSES:
@@ -507,6 +945,9 @@ def project_background_job(project_name: str, task_id: str) -> dict[str, Any]:
             "task_id": task_id,
             "executor_kind": spec["executor_kind"],
             "source_type": ref["source_type"],
+            "task_family": str(spec.get("task_family", "")).strip(),
+            "family_source": str(spec.get("family_source", "")).strip(),
+            "family_resolution_reason": str(spec.get("family_resolution_reason", "")).strip(),
         },
     ).to_dict()
     handoff_bundle = workspace_job_schema.handoff_bundle_paths(artifacts_root)
@@ -528,6 +969,13 @@ def project_background_job(project_name: str, task_id: str) -> dict[str, Any]:
         "deliverable": row.get("交付物", ""),
         "next_action": row.get("下一步", ""),
         "updated_at": row.get("更新时间", ""),
+        "task_family": str(spec.get("task_family", "")).strip(),
+        "family_source": str(spec.get("family_source", "")).strip(),
+        "family_resolution_reason": str(spec.get("family_resolution_reason", "")).strip(),
+        "stop_conditions": [str(item).strip() for item in spec.get("stop_conditions", []) if str(item).strip()],
+        "family_metadata_defaults": dict(spec.get("family_metadata_defaults", {}))
+        if isinstance(spec.get("family_metadata_defaults"), dict)
+        else {},
         "executor_kind": spec["executor_kind"],
         "automation_mode": spec["automation_mode"],
         "allowed_actions": list(spec["allowed_actions"]),

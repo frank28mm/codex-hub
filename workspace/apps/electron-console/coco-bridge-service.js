@@ -26,7 +26,7 @@ const SERVICE_STATE_PATH = path.join(SHARED_RUNTIME_ROOT, "coco-service-state.js
 const HEARTBEAT_CHECK_INTERVAL_MS = 12_000;
 const ACK_STALLED_AFTER_SECONDS = 75;
 const RESPONSE_DELAYED_AFTER_SECONDS = 120;
-const IDLE_RECONNECT_COOLDOWN_SECONDS = 900;
+const IDLE_RECONNECT_COOLDOWN_SECONDS = 180;
 
 function resolveSharedWorkspaceRoot() {
   const envOverride = process.env.WORKSPACE_HUB_SHARED_ROOT || process.env.WORKSPACE_HUB_ROOT;
@@ -253,9 +253,12 @@ function shouldDeferIdleReconnect(state = {}, serviceState = {}, nowMs = Date.no
   if (!Number.isFinite(lastAttemptAt)) {
     return false;
   }
+  const idleEventWindow = Number(state.event_idle_after_seconds || 0);
   const idleWindowSeconds = Math.max(
-    IDLE_RECONNECT_COOLDOWN_SECONDS,
-    Number(state.event_idle_after_seconds || 0),
+    30,
+    Number.isFinite(idleEventWindow) && idleEventWindow > 0
+      ? Math.min(IDLE_RECONNECT_COOLDOWN_SECONDS, idleEventWindow)
+      : IDLE_RECONNECT_COOLDOWN_SECONDS,
   );
   return Math.max(0, nowMs - lastAttemptAt) / 1000 < idleWindowSeconds;
 }

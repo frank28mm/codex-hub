@@ -341,6 +341,88 @@ module.exports = { createFeishuLongConnectionService };
   });
 }
 
+async function testBridgeHostDoesNotTreatStatusWritesAsFreshEvents() {
+  await withClearedBridgeRootEnv(async () => {
+    const workspaceRoot = makeTempWorkspace();
+    const fresh = new Date().toISOString();
+    const staleEvent = "2026-03-28T16:45:41Z";
+    const bridgeRoot = path.join(workspaceRoot, "bridge", "feishu");
+    fs.mkdirSync(bridgeRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(bridgeRoot, "index.js"),
+      `
+"use strict";
+
+function createFeishuLongConnectionService() {
+  return {
+    async loadSettings() {},
+    async connect() { return { ok: true }; },
+    async disconnect() { return { ok: true }; },
+    async reconnect() { return { ok: true }; },
+    getStatus() {
+      return {
+        connection_status: "connected",
+        transport: "lark_cli_event_plus_cli_im",
+        last_event_at: ${JSON.stringify(staleEvent)},
+        connected_at: ${JSON.stringify(staleEvent)},
+        heartbeat_at: ${JSON.stringify(fresh)},
+        updated_at: ${JSON.stringify(fresh)},
+        stale_after_seconds: 90,
+        event_idle_after_seconds: 1800,
+      };
+    },
+    async sendMessage() { return { ok: true }; },
+  };
+}
+
+module.exports = { createFeishuLongConnectionService };
+`,
+      "utf8",
+    );
+    const host = createBridgeHost({
+      appRoot: workspaceRoot,
+      workspaceRoot,
+      logger: { info() {}, warn() {}, error() {} },
+      async runBroker(args) {
+        const command = args[0];
+        if (command === "bridge-settings") {
+          return { ok: true, stdout: JSON.stringify({ settings: {} }) };
+        }
+        if (command === "bridge-connection") {
+          return { ok: true, stdout: JSON.stringify({ ok: true }) };
+        }
+        if (command === "bridge-status") {
+          return {
+            ok: true,
+            stdout: JSON.stringify({
+              bridge: "feishu",
+              connection_status: "stale",
+              transport: "lark_cli_event_plus_cli_im",
+              last_event_at: staleEvent,
+              heartbeat_at: fresh,
+              stale: true,
+              event_stalled: true,
+              stale_after_seconds: 90,
+              event_idle_after_seconds: 1800,
+              metadata: {},
+            }),
+          };
+        }
+        return { ok: true, stdout: JSON.stringify({ ok: true }) };
+      },
+    });
+
+    await host.connect();
+    const current = await host.getStatus();
+    assert.equal(current.ok, true);
+    assert.equal(current.data.connection_status, "connected");
+    assert.equal(current.data.event_stalled, true);
+    assert.equal(current.data.stale, true);
+    assert.equal(current.data.last_event_at, staleEvent);
+    assert.equal(current.data.updated_at, fresh);
+  });
+}
+
 async function testBridgeHostDoesNotRegressPersistedBridgeTimestamps() {
   await withClearedBridgeRootEnv(async () => {
     const workspaceRoot = makeTempWorkspace();
@@ -529,6 +611,7 @@ async function main() {
   await testBridgeHostForwardsApprovalTokenToApprovedCodexRoutes();
   await testBridgeHostForwardsFeishuCallbackExecutorArgs();
   await testBridgeHostPrefersLiveFreshnessOverBrokerSnapshotFlags();
+  await testBridgeHostDoesNotTreatStatusWritesAsFreshEvents();
   await testBridgeHostDoesNotRegressPersistedBridgeTimestamps();
   await testBridgeHostSendMessageStaysOutboundOnlyWhenDisconnected();
   console.log("ok");

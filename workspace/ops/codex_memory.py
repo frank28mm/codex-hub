@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# When this file is executed as a script, keep a single shared module instance so
+# lock globals do not diverge across `__main__`, `codex_memory`, and `ops.codex_memory`.
+sys.modules.setdefault("codex_memory", sys.modules[__name__])
+sys.modules.setdefault("ops.codex_memory", sys.modules[__name__])
+
 try:
     from ops import project_pause, runtime_state, workspace_hub_project
 except ImportError:  # pragma: no cover
@@ -2284,6 +2293,8 @@ def cmd_register_launch(args: argparse.Namespace) -> int:
             "source_thread_name": args.source_thread_name or "",
             "source_thread_label": args.source_thread_label or "",
             "source_message_id": args.source_message_id or "",
+            "engine_name": args.engine_name or "codex",
+            "entry_surface": args.entry_surface or "",
         }
         data["bindings"].append(binding)
         save_bindings(data)
@@ -2360,6 +2371,8 @@ def cmd_finalize_launch(args: argparse.Namespace) -> int:
                     "binding_board_path": binding.get("binding_board_path", ""),
                     "topic_name": binding.get("topic_name", ""),
                     "rollup_target": binding.get("rollup_target", ""),
+                    "last_engine_name": binding.get("engine_name", "codex"),
+                    "last_entry_surface": binding.get("entry_surface", ""),
                 }
                 save_router(router)
 
@@ -2397,6 +2410,8 @@ def cmd_finalize_launch(args: argparse.Namespace) -> int:
                 "source_thread_name": binding.get("source_thread_name", ""),
                 "source_thread_label": binding.get("source_thread_label", ""),
                 "source_message_id": binding.get("source_message_id", ""),
+                "engine_name": binding.get("engine_name", "codex"),
+                "entry_surface": binding.get("entry_surface", ""),
                 "status": final_status,
                 "writeback_suppressed": bool(pause_payload.get("active")),
                 "pause": pause_payload,
@@ -2441,6 +2456,8 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--source-thread-name", default="")
     register.add_argument("--source-thread-label", default="")
     register.add_argument("--source-message-id", default="")
+    register.add_argument("--engine-name", default="codex")
+    register.add_argument("--entry-surface", default="")
     register.set_defaults(func=cmd_register_launch)
 
     finalize = subparsers.add_parser("finalize-launch")

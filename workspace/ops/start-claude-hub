@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from ops import codex_memory, codex_models, engine_adapter, runtime_state
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+CODE_ROOT = Path(os.environ.get("WORKSPACE_HUB_CODE_ROOT", str(SCRIPT_DIR.parent)))
+WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_HUB_ROOT", str(CODE_ROOT)))
+VAULT_ROOT = Path(
+    os.environ.get("WORKSPACE_HUB_VAULT_ROOT", str((CODE_ROOT / ".." / "memory").resolve()))
+)
+MEMORY_TOOL = CODE_ROOT / "ops" / "codex_memory.py"
+
+APPROVED_PROFILE_SCOPE_MAP = {
+    "claude-hub-approved": "claude_hub_high_risk_execution",
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Launch Claude Hub against the shared workspace-hub truth layer.")
+    parser.add_argument("--project", default="")
+    parser.add_argument("--prompt", default="")
+    parser.add_argument("--execution-profile", default="claude-hub")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--reasoning-effort", default="")
+    parser.add_argument("--resume-session-id", default="")
+    parser.add_argument("--no-auto-resume", action="store_true")
+    parser.add_argument("--source", default="claude-hub")
+    parser.add_argument("--chat-ref", default="")
+    parser.add_argument("--thread-name", default="")
+    parser.add_argument("--thread-label", default="")
+    parser.add_argument("--source-message-id", default="")
+    parser.add_argument("--approval-token", default="")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-open-obsidian", action="store_true")
+    parser.add_argument("--engine-name", default="claude")
+    parser.add_argument("--entry-surface", default="claude-hub")
+    return parser.parse_args()
+
+
+def ensure_obsidian_background() -> None:
+    if os.environ.get("WORKSPACE_HUB_SKIP_OBSIDIAN", "").strip() == "1":
+        return
+    if shutil.which("pgrep") and subprocess.run(["pgrep", "-x", "Obsidian"], capture_output=True).returncode == 0:
+        return
+    if shutil.which("open"):
+        subprocess.run(["open", "-g", "-a", "Obsidian", str(VAULT_ROOT)], check=False, capture_output=True)
+
+
+def resolve_project_from_prompt(prompt: str) -> str:
+    prompt_l = str(prompt or "").lower()
+    if not prompt_l:
+        return ""
+    known: dict[str, dict[str, Any]] = {}
+    for item in codex_memory.load_registry():
+        project_name = str(item.get("project_name", "")).strip()
+        if project_name:
+            known[project_name] = item
+    try:
+        for child in sorted((WORKSPACE_ROOT / "projects").iterdir(), key=lambda item: item.name.lower()):
+            if child.is_dir() and not child.name.startswith(".") and child.name not in known:
+                known[child.name] = {"project_name": child.name, "aliases": [child.name.lower()]}
+    except FileNotFoundError:
+        pass
+    hits: list[str] = []
+    for item in known.values():
+        names = [str(item.get("project_name", "")).strip(), *[str(alias).strip() for alias in item.get("aliases", [])]]
+        for name in names:
+            if name and name.lower() in prompt_l:
+                hits.append(str(item.get("project_name", "")).strip())
+                break
+    hits = sorted({item for item in hits if item})
+    return hits[0] if len(hits) == 1 else ""
+
+
+def resolve_resume_context(
+    *,
+    project_name: str,
+    launch_source: str,
+    source_chat_ref: str,
+    engine_name: str,
+    entry_surface: str,
+) -> dict[str, Any]:
+    router = codex_memory.load_router().get("routes", {})
+    route = router.get(project_name, {}) if isinstance(router, dict) else {}
+    if not isinstance(route, dict):
+        return {}
+    last_session_id = str(route.get("last_session_id") or "").strip()
+    if not last_session_id:
+        return {}
+    last_engine_name = str(route.get("last_engine_name") or "codex").strip()
+    last_entry_surface = str(route.get("last_entry_surface") or "").strip()
+    if last_engine_name and last_engine_name != engine_name:
+        return {}
+    if last_entry_surface and last_entry_surface != entry_surface:
+        return {}
+    last_launch_source = str(route.get("last_launch_source") or "").strip()
+    last_source_chat_ref = str(route.get("last_source_chat_ref") or "").strip()
+    if last_launch_source and launch_source != last_launch_source:
+        return {}
+    if last_source_chat_ref and source_chat_ref != last_source_chat_ref:
+        return {}
+    return {
+        "session_id": last_session_id,
+        "binding_scope": str(route.get("binding_scope") or "project").strip(),
+        "binding_board_path": str(route.get("binding_board_path") or "").strip(),
+        "topic_name": str(route.get("topic_name") or "").strip(),
+        "rollup_target": str(route.get("rollup_target") or "").strip(),
+    }
+
+
+def resolve_runtime_settings(args: argparse.Namespace) -> dict[str, str]:
+    return codex_models.resolve_runtime_settings(
+        args.model,
+        args.reasoning_effort,
+        execution_profile=args.execution_profile,
+        source=args.source,
+    )
+
+
+def validate_execution_profile_access(args: argparse.Namespace) -> None:
+    expected_scope = APPROVED_PROFILE_SCOPE_MAP.get(str(args.execution_profile or "").strip(), "")
+    if not expected_scope:
+        return
+    if not str(args.approval_token or "").strip():
+        raise SystemExit(f"{args.execution_profile} requires --approval-token ({expected_scope})")
+    item = runtime_state.fetch_approval_token(str(args.approval_token).strip())
+    if not item.get("scope"):
+        raise SystemExit(f"approval token {args.approval_token} not found")
+    if str(item.get("status") or "").strip() != "approved":
+        raise SystemExit(f"approval token {args.approval_token} is not approved")
+    expires_at = runtime_state.parse_iso_timestamp(str(item.get("expires_at") or "").strip())
+    if expires_at is not None and expires_at <= runtime_state.parse_iso_timestamp(runtime_state.iso_now()):
+        raise SystemExit(f"approval token {args.approval_token} is expired")
+    if str(item.get("scope") or "").strip() != expected_scope:
+        raise SystemExit(
+            f"approval token {args.approval_token} scope mismatch: expected {expected_scope}, got {item.get('scope', '')}"
+        )
+
+
+def build_launch_context(
+    *,
+    mode: str,
+    project_name: str,
+    binding_scope: str,
+    binding_board_path: str,
+    topic_name: str,
+    rollup_target: str,
+    session_id: str,
+    execution_profile: str,
+    launch_source: str,
+    source_chat_ref: str,
+    source_thread_name: str,
+    source_thread_label: str,
+    source_message_id: str,
+    model: str,
+    reasoning_effort: str,
+    engine_name: str,
+    entry_surface: str,
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "mode": mode,
+        "project_name": project_name,
+        "binding_scope": binding_scope,
+        "binding_board_path": binding_board_path,
+        "topic_name": topic_name,
+        "rollup_target": rollup_target,
+        "session_id": session_id,
+        "execution_profile": execution_profile,
+        "launch_source": launch_source,
+        "source_chat_ref": source_chat_ref,
+        "source_thread_name": source_thread_name,
+        "source_thread_label": source_thread_label,
+        "source_message_id": source_message_id,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "engine_name": engine_name,
+        "entry_surface": entry_surface,
+        "engine_session_contract": contract,
+    }
+
+
+def claude_cli_path() -> str:
+    explicit = str(os.environ.get("WORKSPACE_HUB_CLAUDE_BIN", "")).strip()
+    if explicit:
+        return explicit
+    resolved = shutil.which("claude")
+    return resolved or "claude"
+
+
+def claude_effort(reasoning_effort: str) -> str:
+    mapping = {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "max",
+    }
+    return mapping.get(str(reasoning_effort or "").strip(), "")
+
+
+def build_claude_system_prompt(contract: dict[str, Any], launch_context: dict[str, Any]) -> str:
+    lines = [
+        "You are entering the workspace through Claude Hub.",
+        "workspace-hub remains the only durable business truth.",
+        "Do not treat the Claude runtime root as durable project truth.",
+        f"Shared truth roots: {', '.join(contract.get('shared_memory_roots', [])) or str(WORKSPACE_ROOT)}",
+        f"Claude runtime root: {contract.get('isolated_runtime_root', '')}",
+        f"Session runtime root: {contract.get('session_runtime_root', '')}",
+        "If you create durable project/task/memory state, write it back into workspace-hub or the Vault, not into runtime scratch.",
+        f"Project: {launch_context.get('project_name', '') or 'general'}",
+        f"Binding scope: {launch_context.get('binding_scope', '') or 'chat'}",
+    ]
+    if launch_context.get("binding_board_path"):
+        lines.append(f"Bound board: {launch_context['binding_board_path']}")
+    if launch_context.get("topic_name"):
+        lines.append(f"Topic: {launch_context['topic_name']}")
+    return "\n".join(lines)
+
+
+def build_claude_command(
+    *,
+    prompt: str,
+    session_id: str,
+    mode: str,
+    model: str,
+    reasoning_effort: str,
+    contract: dict[str, Any],
+    launch_context: dict[str, Any],
+) -> list[str]:
+    command = [claude_cli_path(), "--bare", "--permission-mode", "bypassPermissions"]
+    if mode == "resume":
+        command.extend(["-r", session_id])
+    else:
+        command.extend(["--session-id", session_id])
+    if model:
+        command.extend(["--model", model])
+    effort = claude_effort(reasoning_effort)
+    if effort:
+        command.extend(["--effort", effort])
+    for root in contract.get("shared_memory_roots", []):
+        command.extend(["--add-dir", str(root)])
+    runtime_root = str(contract.get("isolated_runtime_root") or "").strip()
+    if runtime_root:
+        Path(runtime_root).mkdir(parents=True, exist_ok=True)
+        command.extend(["--add-dir", runtime_root])
+    session_root = str(contract.get("session_runtime_root") or "").strip()
+    if session_root:
+        Path(session_root).mkdir(parents=True, exist_ok=True)
+        command.extend(["--add-dir", session_root])
+    command.extend(["--append-system-prompt", build_claude_system_prompt(contract, launch_context)])
+    command.extend(["-p", prompt])
+    return command
+
+
+def build_runtime_prompt(user_prompt: str, launch_context: dict[str, Any], recommended_files: list[str]) -> str:
+    lines = [
+        "Workspace-Hub launcher context:",
+        json.dumps(launch_context, ensure_ascii=False, indent=2),
+    ]
+    if recommended_files:
+        lines.append("Recommended context files:")
+        lines.extend(f"- {path}" for path in recommended_files[:4])
+    lines.append("User request:")
+    lines.append(str(user_prompt or "").strip())
+    return "\n\n".join(lines)
+
+
+def run_memory_tool(args: list[str]) -> str:
+    completed = subprocess.run(
+        [sys.executable, str(MEMORY_TOOL), *args],
+        cwd=str(WORKSPACE_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(completed.stderr.strip() or completed.stdout.strip() or "codex_memory command failed")
+    return completed.stdout.strip()
+
+
+def main() -> int:
+    args = parse_args()
+    normalized_engine = engine_adapter.normalize_engine_name(args.engine_name)
+    entry_surface = engine_adapter.normalize_entry_surface(args.entry_surface, engine_name=normalized_engine)
+    if not args.dry_run and not args.prompt.strip():
+        raise SystemExit("start-claude-hub currently requires --prompt")
+
+    subprocess.run([sys.executable, str(MEMORY_TOOL), "discover-projects"], cwd=str(WORKSPACE_ROOT), check=False)
+    project_name = codex_memory.canonical_project_name(args.project) if args.project else ""
+    if not project_name and args.prompt:
+        project_name = resolve_project_from_prompt(args.prompt)
+    project_name = project_name or "general"
+
+    binding_scope = "chat"
+    binding_board_path = ""
+    topic_name = ""
+    rollup_target = ""
+    if project_name != "general":
+        binding = codex_memory.resolve_board_binding(project_name, args.prompt or "")
+        binding_scope = str(binding.get("binding_scope") or "project").strip()
+        binding_board_path = str(binding.get("binding_board_path") or "").strip()
+        topic_name = str(binding.get("topic_name") or "").strip()
+        rollup_target = str(binding.get("rollup_target") or "").strip()
+
+    mode = "new"
+    session_id = str(args.resume_session_id or "").strip()
+    if not session_id and project_name != "general" and not args.no_auto_resume:
+        resume_context = resolve_resume_context(
+            project_name=project_name,
+            launch_source=args.source,
+            source_chat_ref=args.chat_ref,
+            engine_name=normalized_engine,
+            entry_surface=entry_surface,
+        )
+        if resume_context:
+            session_id = str(resume_context.get("session_id") or "").strip()
+            binding_scope = str(resume_context.get("binding_scope") or binding_scope).strip()
+            binding_board_path = str(resume_context.get("binding_board_path") or binding_board_path).strip()
+            topic_name = str(resume_context.get("topic_name") or topic_name).strip()
+            rollup_target = str(resume_context.get("rollup_target") or rollup_target).strip()
+            mode = "resume"
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    if args.resume_session_id:
+        mode = "resume"
+
+    settings = resolve_runtime_settings(args)
+    contract = engine_adapter.session_contract(
+        engine_name=normalized_engine,
+        entry_surface=entry_surface,
+        project_name="" if project_name == "general" else project_name,
+        binding_scope=binding_scope,
+        binding_board_path=binding_board_path,
+        topic_name=topic_name,
+        launch_source=args.source,
+        source_chat_ref=args.chat_ref,
+        session_id=session_id,
+        execution_profile=args.execution_profile,
+        approval_state="approved" if args.approval_token else "not-required",
+        lease_status="running",
+    )
+    launch_context = build_launch_context(
+        mode=mode,
+        project_name=project_name,
+        binding_scope=binding_scope,
+        binding_board_path=binding_board_path,
+        topic_name=topic_name,
+        rollup_target=rollup_target,
+        session_id=session_id,
+        execution_profile=args.execution_profile,
+        launch_source=args.source,
+        source_chat_ref=args.chat_ref,
+        source_thread_name=args.thread_name,
+        source_thread_label=args.thread_label,
+        source_message_id=args.source_message_id,
+        model=settings.get("model", ""),
+        reasoning_effort=settings.get("reasoning_effort", ""),
+        engine_name=normalized_engine,
+        entry_surface=entry_surface,
+        contract=contract,
+    )
+    recommended = []
+    if project_name != "general":
+        recommended.append(binding_board_path)
+    validate_execution_profile_access(args)
+
+    if args.dry_run:
+        print(f"mode={mode}")
+        print(f"project={project_name}")
+        print(f"session_id={session_id}")
+        print(f"engine_name={normalized_engine}")
+        print(f"entry_surface={entry_surface}")
+        print(f"launch_context_json={json.dumps(launch_context, ensure_ascii=False)}")
+        return 0
+
+    if not args.no_open_obsidian:
+        ensure_obsidian_background()
+
+    lease_payload = engine_adapter.claim_engine_session_lease(
+        engine_name=normalized_engine,
+        entry_surface=entry_surface,
+        project_name="" if project_name == "general" else project_name,
+        binding_scope=binding_scope,
+        binding_board_path=binding_board_path,
+        topic_name=topic_name,
+        launch_source=args.source,
+        source_chat_ref=args.chat_ref,
+        session_id=session_id,
+        execution_profile=args.execution_profile,
+        approval_state="approved" if args.approval_token else "not-required",
+        state="running",
+    )
+    print(f"WORKSPACE_HUB_ENGINE_LEASE={json.dumps(lease_payload, ensure_ascii=False)}", file=sys.stderr)
+    if not lease_payload.get("ok", False):
+        return 1
+
+    launch_id = ""
+    if project_name != "general":
+        register_args = [
+            "register-launch",
+            "--project-name",
+            project_name,
+            "--prompt",
+            args.prompt,
+            "--mode",
+            mode,
+            "--binding-scope",
+            binding_scope,
+            "--binding-board-path",
+            binding_board_path,
+            "--topic-name",
+            topic_name,
+            "--rollup-target",
+            rollup_target,
+            "--launch-source",
+            args.source,
+            "--source-chat-ref",
+            args.chat_ref,
+            "--source-thread-name",
+            args.thread_name,
+            "--source-thread-label",
+            args.thread_label,
+            "--source-message-id",
+            args.source_message_id,
+            "--engine-name",
+            normalized_engine,
+            "--entry-surface",
+            entry_surface,
+        ]
+        if mode == "resume":
+            register_args.extend(["--resume-session-id", session_id])
+        launch_id = run_memory_tool(register_args)
+
+    print(f"WORKSPACE_HUB_LAUNCH_CONTEXT={json.dumps(launch_context, ensure_ascii=False)}", file=sys.stderr)
+    runtime_prompt = build_runtime_prompt(args.prompt, launch_context, [item for item in recommended if item])
+    command = build_claude_command(
+        prompt=runtime_prompt,
+        session_id=session_id,
+        mode=mode,
+        model=settings.get("model", ""),
+        reasoning_effort=settings.get("reasoning_effort", ""),
+        contract=contract,
+        launch_context=launch_context,
+    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(WORKSPACE_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        print(f"Claude CLI not found: {exc}", file=sys.stderr)
+        return 127
+    summary_text = (result.stdout or "").strip() or (result.stderr or "").strip()
+    final_status = "completed"
+    if result.returncode != 0:
+        final_status = "aborted" if result.returncode in {130, 143} else "failed"
+
+    finalize_payload: dict[str, Any] | None = None
+    if launch_id:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as handle:
+            handle.write(summary_text)
+            summary_path = Path(handle.name)
+        try:
+            finalize_raw = run_memory_tool(
+                [
+                    "finalize-launch",
+                    "--launch-id",
+                    launch_id,
+                    "--session-id",
+                    session_id,
+                    "--thread-name",
+                    args.thread_name or args.prompt,
+                    "--summary-file",
+                    str(summary_path),
+                    "--final-status",
+                    final_status,
+                ]
+            )
+        finally:
+            summary_path.unlink(missing_ok=True)
+        finalize_payload = json.loads(finalize_raw) if finalize_raw else None
+        if finalize_payload:
+            print(f"WORKSPACE_HUB_FINALIZE_LAUNCH={json.dumps(finalize_payload, ensure_ascii=False)}", file=sys.stderr)
+
+    release_payload = engine_adapter.release_engine_session_lease(
+        lease_key=str((lease_payload.get("lease") or {}).get("lease_key") or contract.get("lease_key") or "").strip(),
+        state=final_status,
+        session_id=session_id,
+        summary=summary_text,
+    )
+    print(f"WORKSPACE_HUB_ENGINE_LEASE={json.dumps(release_payload, ensure_ascii=False)}", file=sys.stderr)
+
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,6 +82,50 @@ def growth_control_for_sample_task() -> dict[str, object]:
     }
 
 
+def implementation_loop_spec() -> dict[str, object]:
+    return {
+        "job_slug": "sample-implementation-loop",
+        "executor_kind": "implementation_loop",
+        "automation_mode": "background_assist",
+        "allowed_actions": ["read", "write_code", "run_tests", "write_report", "write_board"],
+        "delivery_targets": ["board", "report"],
+        "gate_policy": "none",
+        "max_rounds": 3,
+        "time_budget_minutes": 10,
+        "subgoal_schema_version": 2,
+        "acceptance_criteria": ["Close the sample capability loop."],
+        "implementation_tracks": [
+            {
+                "subgoal_id": "im-contract",
+                "summary": "IM contract",
+                "current_truth": ["IM baseline exists."],
+                "target_files": ["/tmp/im.py"],
+                "execute_actions": ["Advance IM contract."],
+                "verify_commands": [{"label": "verify-im", "command": "python3 -c \"print('ok')\"", "timeout_seconds": 10}],
+                "adapt_actions": ["Narrow the IM fix."],
+            },
+            {
+                "subgoal_id": "calendar-contract",
+                "summary": "Calendar contract",
+                "current_truth": ["Calendar baseline exists."],
+                "target_files": ["/tmp/calendar.py"],
+                "execute_actions": ["Advance calendar contract."],
+                "verify_commands": [{"label": "verify-calendar", "command": "python3 -c \"print('ok')\"", "timeout_seconds": 10}],
+                "adapt_actions": ["Narrow the calendar fix."],
+            },
+        ],
+    }
+
+
+def test_final_next_action_marks_done_tasks_complete() -> None:
+    from ops import background_job_executor
+
+    assert (
+        background_job_executor._final_next_action({"decision": "done"}, "进入 verify，运行 smoke。")
+        == "已完成，无需继续。"
+    )
+
+
 def save_project_rows(sample_env, rows: list[dict[str, str]]) -> None:
     from ops import codex_memory
 
@@ -129,6 +175,531 @@ def test_board_job_projector_projects_runnable_task(sample_env, monkeypatch) -> 
     assert payload["program_spec"]["approval_state"] == "not-required"
     assert payload["handoff_bundle"]["task_spec_path"].endswith("task-spec.json")
     assert payload["handoff_bundle"]["latest_smoke_path"].endswith("latest-smoke.md")
+
+
+def save_project_rows(sample_env, rows: list[dict[str, str]]) -> None:
+    from ops import codex_memory
+
+    board = codex_memory.load_project_board("SampleProj")
+    board["project_rows"] = rows
+    codex_memory.save_project_board(
+        board["path"],
+        board["frontmatter"],
+        board["body"],
+        board["project_rows"],
+        board["rollup_rows"],
+        board["gflow_rows"],
+    )
+
+
+def test_board_job_projector_projects_runnable_task(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    seed_sample_project_board(sample_env)
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(
+        board_job_projector,
+        "TASK_JOB_SPECS",
+        {
+            "SP-EXEC-01": {
+                "job_slug": "sample-background-job",
+                "executor_kind": "research_brief",
+                "automation_mode": "background_assist",
+                "allowed_actions": ["read", "write_report"],
+                "delivery_targets": ["board", "report"],
+                "gate_policy": "none",
+                "max_rounds": 2,
+                "time_budget_minutes": 10,
+                "acceptance_criteria": ["Produce a sample brief."],
+            }
+        },
+    )
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-01")
+
+    assert payload["task_item"] == "Run Sample background job"
+    assert payload["automation_mode"] == "background_assist"
+    assert payload["allowed_actions"] == ["read", "write_report"]
+    assert payload["max_rounds"] == 2
+    assert payload["program_spec"]["scope_type"] == "project"
+    assert payload["program_spec"]["scope_ref"] == "SampleProj"
+    assert payload["program_spec"]["approval_state"] == "not-required"
+    assert payload["handoff_bundle"]["task_spec_path"].endswith("task-spec.json")
+    assert payload["handoff_bundle"]["latest_smoke_path"].endswith("latest-smoke.md")
+
+
+def test_board_job_projector_synthesizes_harness_upgrade_manual_long_task(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-24",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "讨论任务",
+                "事项": "讨论并升级 generic 长任务进入 harness 后无法自动循环推进到底的问题：为私有->开源迁移这类任务设计更完整的 implementation_tracks / execution_packets / verify_commands / privacy gate。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "围绕 generic long task spec、privacy gate 和 public migration task type 形成正式升级方案。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-24")
+
+    assert payload["executor_kind"] == "implementation_loop"
+    assert payload["subgoal_schema_version"] >= 2
+    assert len(payload["implementation_tracks"]) == 3
+    assert payload["implementation_tracks"][0]["subgoal_id"] == "generic-harness-contract"
+    assert any(
+        item["summary"] == "为公开迁移类长任务补 privacy 与 public-safe 边界"
+        for item in payload["implementation_tracks"]
+    )
+    verify_commands = payload["implementation_tracks"][0]["verify_commands"]
+    assert any("test_background_job_executor.py" in item["command"] for item in verify_commands)
+    assert any("latest.md" in item["command"] for item in verify_commands)
+
+
+def test_board_job_projector_resolves_family_by_registry(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-REG",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "梳理开源版 Codex Hub 从零安装和使用所需的真实依赖，并补强一键检测和安装链路。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "先盘点公开版真实依赖与当前 bootstrap/accept 覆盖缺口。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-REG")
+
+    assert payload["task_family"] == "install_readiness"
+    assert payload["family_source"] == "registry"
+    assert payload["family_resolution_reason"] == "match_rules"
+
+
+def test_board_job_projector_prefers_explicit_spec_over_family_registry(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-EXPLICIT",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "梳理开源版 Codex Hub 从零安装和使用所需的真实依赖，并补强一键检测和安装链路。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "先盘点公开版真实依赖与当前 bootstrap/accept 覆盖缺口。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(
+        board_job_projector,
+        "TASK_JOB_SPECS",
+        {
+            "SP-EXEC-EXPLICIT": {
+                "job_slug": "explicit-spec",
+                "executor_kind": "research_brief",
+                "automation_mode": "background_assist",
+                "allowed_actions": ["read", "write_report"],
+                "delivery_targets": ["board", "report"],
+                "gate_policy": "none",
+                "max_rounds": 2,
+                "time_budget_minutes": 10,
+                "acceptance_criteria": ["Produce a brief."],
+            }
+        },
+    )
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-EXPLICIT")
+
+    assert payload["executor_kind"] == "research_brief"
+    assert payload["job_slug"] == "explicit-spec"
+    assert payload["implementation_tracks"] == []
+
+
+def test_board_job_projector_prefers_pointer_family_over_text_heuristic(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    pointer_name = "SampleProj-FamilyHarness.md"
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-FAMILY",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "梳理依赖并补强一键安装链路。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "先锁定公开迁移差异面。",
+                "更新时间": "2026-04-04",
+                "指向": pointer_name,
+            }
+        ],
+    )
+    (sample_env["vault_root"] / "01_working" / pointer_name).write_text(
+        "---\n"
+        "harness:\n"
+        "  family: public_migration\n"
+        "---\n\n"
+        "# Pointer Family\n",
+        encoding="utf-8",
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-FAMILY")
+
+    assert payload["task_family"] == "public_migration"
+    assert payload["family_source"] == "pointer_family"
+    assert payload["family_resolution_reason"] == "harness.family"
+
+
+def test_board_job_projector_projects_wh_ops_24_as_harness_upgrade(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "WH-OPS-24",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "讨论任务",
+                "事项": "讨论并升级 generic 长任务进入 harness 后无法自动循环推进到底的问题：为私有->开源迁移这类任务设计更完整的 implementation_tracks / execution_packets / verify_commands / privacy gate。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "围绕 generic long task spec、privacy gate 和 public migration task type 形成正式升级方案。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "WH-OPS-24")
+
+    assert payload["task_family"] == "harness_upgrade"
+    assert payload["executor_kind"] == "implementation_loop"
+
+
+def test_board_job_projector_projects_wh_ops_25_as_install_readiness(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "WH-OPS-25",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "梳理开源版 Codex Hub 从零安装和使用所需的真实依赖，并补强一键检测和安装链路。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "先盘点公开版真实依赖与当前 bootstrap/accept 覆盖缺口，再设计更强的一键检测/安装方案。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "WH-OPS-25")
+
+    assert payload["task_family"] == "install_readiness"
+    assert payload["executor_kind"] == "implementation_loop"
+
+
+def test_board_job_projector_materializes_execution_packets_and_verify_commands_from_family_blueprint(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-BLUEPRINT",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "讨论任务",
+                "事项": "讨论并升级 generic 长任务进入 harness 后无法自动循环推进到底的问题。",
+                "状态": "doing",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "收成 implementation tracks。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-BLUEPRINT")
+
+    track = payload["implementation_tracks"][0]
+    assert track["execution_packets"]
+    assert track["execution_packets"][0]["kind"] == "codex_exec"
+    assert track["verify_commands"]
+    assert any("latest.md" in item["command"] for item in track["verify_commands"])
+
+
+def test_board_job_projector_synthesizes_install_readiness_manual_long_task(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-25",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "梳理开源版 Codex Hub 从零安装和使用所需的真实依赖，并补强一键检测和安装链路。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "先盘点公开版真实依赖与当前 bootstrap/accept 覆盖缺口，再设计更强的一键检测/安装方案。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-25")
+
+    assert payload["executor_kind"] == "implementation_loop"
+    assert len(payload["implementation_tracks"]) == 2
+    assert payload["implementation_tracks"][0]["summary"] == "盘点开源版真实依赖与前置条件"
+    assert any(
+        entry.endswith("/ops/bootstrap_workspace_hub.py")
+        for entry in payload["implementation_tracks"][0]["target_files"]
+    )
+    assert any(
+        "accept_product.py run" in item["command"]
+        for item in payload["implementation_tracks"][1]["verify_commands"]
+    )
+
+
+def test_board_job_projector_synthesizes_generic_manual_long_task_report_verifier(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-26",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "持续推进一个没有显式模板的通用长任务。",
+                "状态": "doing",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "先把当前 contract、实现包和下一步收清楚。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-26")
+
+    assert payload["executor_kind"] == "implementation_loop"
+    assert payload["implementation_tracks"][0]["verify_commands"][0]["label"].startswith("verify-")
+    assert "latest.md" in payload["implementation_tracks"][0]["verify_commands"][0]["command"]
+    assert "Latest Smoke" not in payload["implementation_tracks"][0]["verify_commands"][0]["command"]
+    assert payload["implementation_tracks"][0]["execution_packets"][0]["kind"] == "codex_exec"
+
+
+def test_background_job_executor_rejects_empty_implementation_loop_tracks() -> None:
+    from ops import background_job_executor
+
+    with pytest.raises(ValueError, match="implementation_loop requires non-empty implementation_tracks"):
+        background_job_executor.run_implementation_loop(
+            {
+                "task_id": "SP-EXEC-EMPTY",
+                "task_item": "Empty loop",
+                "executor_kind": "implementation_loop",
+                "implementation_tracks": [],
+                "task_spec": {"stage": "discover", "current_focus": "Empty loop", "subgoals": []},
+                "max_rounds": 3,
+            }
+        )
+
+
+def test_runtime_contract_surfaces_task_family_metadata(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+    from ops import board_job_projector as projector_module
+
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "WH-OPS-24",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "讨论任务",
+                "事项": "讨论并升级 generic 长任务进入 harness 后无法自动循环推进到底的问题。",
+                "状态": "todo",
+                "交付物": "待补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "形成正式升级方案。",
+                "更新时间": "2026-04-04",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+    background_job_executor = importlib.reload(executor_module)
+    job = board_job_projector.project_background_job("SampleProj", "WH-OPS-24")
+
+    scaffold = background_job_executor.initialize_program_scaffold(
+        job,
+        run_context={"run_id": "family-run"},
+        persist=False,
+    )
+
+    task_spec = scaffold["task_spec"]
+    assert task_spec["task_family"] == "harness_upgrade"
+    assert task_spec["family_source"] == "registry"
+    assert task_spec["family_resolution_reason"] == "match_rules"
+    assert task_spec["workflow_manifest"]["metadata"]["task_family"] == "harness_upgrade"
+    assert task_spec["instruction_migration"]["metadata"]["task_family"] == "harness_upgrade"
+    assert task_spec["open_source_boundary"]["metadata"]["task_family"] == "harness_upgrade"
+
+
+def test_board_job_projector_reads_pointer_harness_frontmatter_when_task_is_unregistered(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    pointer_name = "SampleProj-HarnessTask.md"
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-02",
+                "父ID": "",
+                "来源": "project",
+                "范围": "automation",
+                "事项": "Run pointer-driven harness task",
+                "状态": "doing",
+                "交付物": "pointer brief",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "continue",
+                "更新时间": "2026-03-30",
+                "指向": pointer_name,
+            }
+        ],
+    )
+    (sample_env["vault_root"] / "01_working" / pointer_name).write_text(
+        (
+            "---\n"
+            "harness:\n"
+            "  executor_kind: implementation_loop\n"
+            "  job_slug: pointer-driven-harness\n"
+            "  acceptance_criteria:\n"
+            "    - close the pointer-driven task\n"
+            "  implementation_tracks:\n"
+            "    - subgoal_id: pointer-subgoal\n"
+            "      summary: Pointer track\n"
+            "      current_truth:\n"
+            "        - pointer truth exists\n"
+            "      execute_actions:\n"
+            "        - advance pointer task\n"
+            "      execution_packets:\n"
+            "        - label: pointer-shell\n"
+            "          kind: shell\n"
+            "          command: python3 -c \"print('pointer')\"\n"
+            "      verify_commands:\n"
+            "        - label: verify-pointer\n"
+            "          command: python3 -c \"print('ok')\"\n"
+            "---\n\n"
+            "# Pointer Task\n"
+        ),
+        encoding="utf-8",
+    )
+
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-02")
+
+    assert payload["executor_kind"] == "implementation_loop"
+    assert payload["job_slug"] == "pointer-driven-harness"
+    assert payload["implementation_tracks"][0]["subgoal_id"] == "pointer-subgoal"
+    assert payload["implementation_tracks"][0]["execution_packets"][0]["kind"] == "shell"
 
 
 def test_board_job_projector_isolates_identity_and_artifacts_per_task(sample_env, monkeypatch) -> None:
@@ -539,6 +1110,914 @@ def test_initialize_program_scaffold_preserves_existing_program_state(sample_env
     assert scaffold["task_spec"]["iteration_count"] == 3
     assert scaffold["task_spec"]["stage_history"][0]["run_id"] == "prev-run"
     assert scaffold["task_spec"]["wake_policy"]["scheduled"] is False
+
+
+def test_background_job_executor_implementation_loop_migrates_legacy_subgoals(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+    from ops import board_job_projector as projector_module
+
+    seed_sample_project_board(sample_env)
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(
+        board_job_projector,
+        "TASK_JOB_SPECS",
+        {"SP-EXEC-01": implementation_loop_spec()},
+    )
+    background_job_executor = importlib.reload(executor_module)
+    job = board_job_projector.project_background_job("SampleProj", "SP-EXEC-01")
+    bundle = background_job_executor.handoff_bundle(job)
+    background_job_executor.workspace_job_schema.write_json_file(
+        bundle["task_spec_path"],
+        {
+            "task_id": "SP-EXEC-01",
+            "program_id": job["program_spec"]["program_id"],
+            "objective": "Existing objective",
+            "scope_type": "project",
+            "scope_ref": "SampleProj",
+            "approval_required": False,
+            "approval_state": "not-required",
+            "subgoal_schema_version": 1,
+            "stage": "frame",
+            "stage_plan": ["discover", "frame", "execute", "verify", "adapt", "handoff"],
+            "wake_policy": {"manual_wake": True, "scheduled": True},
+            "iteration_count": 1,
+            "current_focus": "Legacy research focus",
+            "subgoals": [{"summary": "Legacy research focus", "status": "pending"}],
+            "updated_at": "2026-03-28T12:00:00+08:00",
+            "last_run_id": "prev-run",
+            "last_evaluation": {"current_stage": "discover", "next_stage": "frame", "decision": "continue"},
+            "stage_history": [],
+            "last_decision": "continue",
+        },
+    )
+
+    payload = background_job_executor.execute_projected_job(job, trigger_source="manual_cli")
+
+    assert payload["ok"] is True
+    task_spec = json.loads(Path(payload["run_record"]["artifacts"]["task_spec_path"]).read_text(encoding="utf-8"))
+    assert task_spec["subgoal_schema_version"] == 2
+    assert task_spec["stage"] == "execute"
+    assert task_spec["current_focus"] == "IM contract"
+    assert task_spec["subgoals"][0]["summary"] == "IM contract"
+    assert task_spec["subgoals"][0]["status"] == "pending"
+    latest_report = Path(payload["log_paths"]["latest_path"]).read_text(encoding="utf-8")
+    assert "# 后台实施报告｜SP-EXEC-01" in latest_report
+
+
+def test_evaluate_program_iteration_keeps_subgoal_pending_until_verify(sample_env) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    evaluation, updated_subgoals = background_job_executor.evaluate_program_iteration(
+        {"task_id": "SP-EXEC-01"},
+        scaffold={
+            "task_spec": {
+                "stage": "execute",
+                "current_focus": "IM contract",
+                "subgoals": [
+                    {"summary": "IM contract", "status": "pending"},
+                    {"summary": "Calendar contract", "status": "pending"},
+                ],
+                "scope_type": "project",
+                "scope_ref": "SampleProj",
+            }
+        },
+        execution_status="ok",
+        delivery_status="delivered",
+        gate_state={"status": "approved"},
+        focus_completed=False,
+    )
+
+    assert evaluation["decision"] == "continue"
+    assert evaluation["next_stage"] == "verify"
+    assert updated_subgoals[0]["status"] == "pending"
+    assert updated_subgoals[1]["status"] == "pending"
+
+
+def test_run_implementation_loop_marks_focus_complete_only_after_verify(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    def _fake_verify(_command_spec: dict[str, object]) -> dict[str, object]:
+        return {
+            "label": "verify-im",
+            "command": "pytest sample",
+            "status": "ok",
+            "exit_code": 0,
+            "duration_ms": 12,
+            "stdout_tail": "passed",
+            "stderr_tail": "",
+        }
+
+    monkeypatch.setattr(background_job_executor, "_run_verify_command", _fake_verify)
+
+    payload = background_job_executor.run_implementation_loop(
+        {
+            "task_id": "SP-EXEC-01",
+            "task_item": "Run Sample background job",
+            "max_rounds": 3,
+            "acceptance_criteria": ["Close the sample capability loop."],
+            "implementation_tracks": implementation_loop_spec()["implementation_tracks"],
+            "current_focus": "IM contract",
+            "program_spec": {"stage": "verify"},
+            "task_spec": {
+                "subgoals": [
+                    {"summary": "IM contract", "status": "pending"},
+                    {"summary": "Calendar contract", "status": "pending"},
+                ]
+            },
+        }
+    )
+
+    assert payload["phase"] == "implementation-v1"
+    assert payload["execution_status"] == "ok"
+    assert payload["focus_completed"] is True
+    assert payload["implementation_payload"]["verification_results"][0]["status"] == "ok"
+    assert "Calendar contract" in payload["next_action"]
+
+
+def test_run_execution_packet_codex_exec_routes_through_local_broker(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "action": "codex-exec"}, ensure_ascii=False)
+        stderr = ""
+
+    observed: dict[str, object] = {}
+
+    def _fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+        observed["command"] = command
+        observed["cwd"] = cwd
+        observed["timeout"] = timeout
+        return _Completed()
+
+    monkeypatch.setattr(background_job_executor.subprocess, "run", _fake_run)
+
+    result = background_job_executor._run_execution_packet(
+        {
+            "label": "Implement pointer fallback",
+            "kind": "codex_exec",
+            "project_name": "SampleProj",
+            "source": "background_job_harness",
+            "prompt": "Implement pointer fallback",
+            "timeout_seconds": 120,
+        },
+        {"project_name": "SampleProj"},
+    )
+
+    assert result["status"] == "ok"
+    assert result["broker_result"]["ok"] is True
+    assert observed["command"][:4] == [
+        background_job_executor.sys.executable,
+        str(background_job_executor.REPO_ROOT / "ops" / "local_broker.py"),
+        "command-center",
+        "--action",
+    ]
+    assert observed["cwd"] == str(background_job_executor.workspace_root())
+
+
+def test_run_execution_packet_engine_exec_routes_through_local_broker(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    class _Completed:
+        returncode = 0
+        stdout = json.dumps({"ok": True, "action": "engine-exec"}, ensure_ascii=False)
+        stderr = ""
+
+    observed: dict[str, object] = {}
+
+    def _fake_run(command, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+        observed["command"] = command
+        observed["cwd"] = cwd
+        observed["timeout"] = timeout
+        return _Completed()
+
+    monkeypatch.setattr(background_job_executor.subprocess, "run", _fake_run)
+
+    result = background_job_executor._run_execution_packet(
+        {
+            "label": "Implement Claude adapter",
+            "kind": "engine_exec",
+            "engine_name": "claude",
+            "entry_surface": "codepilot",
+            "project_name": "SampleProj",
+            "source": "background_job_harness",
+            "prompt": "Implement Claude adapter",
+            "timeout_seconds": 120,
+        },
+        {"project_name": "SampleProj"},
+    )
+
+    assert result["status"] == "ok"
+    assert result["broker_result"]["ok"] is True
+    assert "--engine-name" in observed["command"]
+    assert "claude" in observed["command"]
+    assert "--entry-surface" in observed["command"]
+    assert "codepilot" in observed["command"]
+    assert observed["cwd"] == str(background_job_executor.workspace_root())
+
+
+def test_run_execution_packet_codex_exec_marks_timeout(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    def _fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="codex-exec", timeout=120, stderr="timed out")
+
+    monkeypatch.setattr(background_job_executor.subprocess, "run", _fake_run)
+
+    result = background_job_executor._run_execution_packet(
+        {
+            "label": "Implement timeout recovery",
+            "kind": "codex_exec",
+            "project_name": "SampleProj",
+            "source": "background_job_harness",
+            "prompt": "Implement timeout recovery",
+            "timeout_seconds": 120,
+        },
+        {"project_name": "SampleProj"},
+    )
+
+    assert result["status"] == "timeout"
+    assert result["timed_out"] is True
+    assert result["error_type"] == "command_timeout"
+
+
+def test_run_implementation_loop_execute_runs_execution_packets(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    def _fake_execute(_packet: dict[str, object], _job: dict[str, object]) -> dict[str, object]:
+        return {
+            "label": "execute-im",
+            "kind": "shell",
+            "status": "ok",
+            "exit_code": 0,
+            "duration_ms": 10,
+            "stdout_tail": "done",
+            "stderr_tail": "",
+        }
+
+    monkeypatch.setattr(background_job_executor, "_run_execution_packet", _fake_execute)
+
+    payload = background_job_executor.run_implementation_loop(
+        {
+            "task_id": "SP-EXEC-01",
+            "task_item": "Run Sample background job",
+            "max_rounds": 3,
+            "acceptance_criteria": ["Close the sample capability loop."],
+            "implementation_tracks": [
+                {
+                    "subgoal_id": "im-contract",
+                    "summary": "IM contract",
+                    "current_truth": ["IM baseline exists."],
+                    "target_files": ["/tmp/im.py"],
+                    "execute_actions": ["Advance IM contract."],
+                    "execution_packets": [{"label": "execute-im", "kind": "shell", "command": "echo ok"}],
+                    "verify_commands": [{"label": "verify-im", "command": "python3 -c \"print('ok')\"", "timeout_seconds": 10}],
+                    "adapt_actions": ["Narrow the IM fix."],
+                }
+            ],
+            "current_focus": "IM contract",
+            "program_spec": {"stage": "execute"},
+            "task_spec": {"subgoals": [{"summary": "IM contract", "status": "pending"}]},
+        }
+    )
+
+    assert payload["execution_status"] == "ok"
+    assert payload["focus_completed"] is False
+    assert payload["implementation_payload"]["execution_results"][0]["status"] == "ok"
+    assert "进入 verify" in payload["next_action"]
+
+
+def test_run_implementation_loop_execute_enters_adapt_on_execution_failure(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    def _fake_execute(_packet: dict[str, object], _job: dict[str, object]) -> dict[str, object]:
+        return {
+            "label": "execute-im",
+            "kind": "shell",
+            "status": "error",
+            "exit_code": 1,
+            "duration_ms": 10,
+            "stdout_tail": "",
+            "stderr_tail": "boom",
+        }
+
+    monkeypatch.setattr(background_job_executor, "_run_execution_packet", _fake_execute)
+
+    payload = background_job_executor.run_implementation_loop(
+        {
+            "task_id": "SP-EXEC-01",
+            "task_item": "Run Sample background job",
+            "max_rounds": 3,
+            "acceptance_criteria": ["Close the sample capability loop."],
+            "implementation_tracks": [
+                {
+                    "subgoal_id": "im-contract",
+                    "summary": "IM contract",
+                    "current_truth": ["IM baseline exists."],
+                    "target_files": ["/tmp/im.py"],
+                    "execute_actions": ["Advance IM contract."],
+                    "execution_packets": [{"label": "execute-im", "kind": "shell", "command": "false"}],
+                    "verify_commands": [{"label": "verify-im", "command": "python3 -c \"print('ok')\"", "timeout_seconds": 10}],
+                    "adapt_actions": ["Narrow the IM fix."],
+                }
+            ],
+            "current_focus": "IM contract",
+            "program_spec": {"stage": "execute"},
+            "task_spec": {"subgoals": [{"summary": "IM contract", "status": "pending"}]},
+        }
+    )
+
+    assert payload["execution_status"] == "error"
+    assert "进入 adapt" in payload["next_action"]
+    assert "执行失败" in payload["implementation_payload"]["adaptation_notes"][0]
+
+
+def test_run_implementation_loop_execute_requests_retry_on_timeout(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    def _fake_execute(_packet: dict[str, object], _job: dict[str, object]) -> dict[str, object]:
+        return {
+            "label": "execute-im",
+            "kind": "codex_exec",
+            "status": "timeout",
+            "exit_code": None,
+            "duration_ms": 10,
+            "stdout_tail": "",
+            "stderr_tail": "TIMEOUT after 120s",
+            "timed_out": True,
+            "error_type": "command_timeout",
+        }
+
+    monkeypatch.setattr(background_job_executor, "_run_execution_packet", _fake_execute)
+
+    payload = background_job_executor.run_implementation_loop(
+        {
+            "task_id": "SP-EXEC-01",
+            "task_item": "Run Sample background job",
+            "max_rounds": 3,
+            "acceptance_criteria": ["Close the sample capability loop."],
+            "implementation_tracks": [
+                {
+                    "subgoal_id": "im-contract",
+                    "summary": "IM contract",
+                    "current_truth": ["IM baseline exists."],
+                    "target_files": ["/tmp/im.py"],
+                    "execute_actions": ["Advance IM contract."],
+                    "execution_packets": [{"label": "execute-im", "kind": "codex_exec", "prompt": "do it"}],
+                    "verify_commands": [{"label": "verify-im", "command": "python3 -c \"print('ok')\"", "timeout_seconds": 10}],
+                    "adapt_actions": ["Narrow the IM fix."],
+                }
+            ],
+            "current_focus": "IM contract",
+            "program_spec": {"stage": "execute"},
+            "task_spec": {"subgoals": [{"summary": "IM contract", "status": "pending"}]},
+        }
+    )
+
+    assert payload["execution_status"] == "error"
+    assert payload["execution_metadata"]["recovery_decision"] == "retry"
+    assert "保持 execute" in payload["next_action"]
+
+
+def test_run_implementation_loop_adapt_recovers_when_existing_artifact_verifies(sample_env, monkeypatch, tmp_path) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    target = tmp_path / "open-agent-sdk-typescript-review.md"
+    target.write_text(
+        "## 结论\n\n## SDK 能力模型\n\n## 集成成本与约束\n",
+        encoding="utf-8",
+    )
+
+    def _fake_verify(_command_spec: dict[str, object]) -> dict[str, object]:
+        return {
+            "label": "verify-sdk",
+            "command": "python3 -c \"print('ok')\"",
+            "status": "ok",
+            "exit_code": 0,
+            "duration_ms": 9,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+        }
+
+    monkeypatch.setattr(background_job_executor, "_run_verify_command", _fake_verify)
+
+    payload = background_job_executor.run_implementation_loop(
+        {
+            "task_id": "SP-EXEC-01",
+            "task_item": "Run Sample background job",
+            "max_rounds": 3,
+            "acceptance_criteria": ["Close the sample capability loop."],
+            "implementation_tracks": [
+                {
+                    "subgoal_id": "sdk-contract",
+                    "summary": "SDK contract",
+                    "current_truth": ["SDK review exists."],
+                    "target_files": [str(target)],
+                    "execute_actions": ["Advance SDK review."],
+                    "execution_packets": [{"label": "execute-sdk", "kind": "codex_exec", "prompt": "do it"}],
+                    "verify_commands": [{"label": "verify-sdk", "command": "python3 -c \"print('ok')\"", "timeout_seconds": 10}],
+                    "adapt_actions": ["Reuse the existing SDK review if it already verifies."],
+                }
+            ],
+            "current_focus": "SDK contract",
+            "program_spec": {"stage": "adapt"},
+            "task_spec": {"subgoals": [{"summary": "SDK contract", "status": "pending"}]},
+        }
+    )
+
+    assert payload["execution_status"] == "ok"
+    assert payload["focus_completed"] is True
+    assert payload["implementation_payload"]["verification_results"][0]["status"] == "ok"
+    assert "恢复成功" in payload["implementation_payload"]["headline"]
+    assert "通过 verify" in payload["next_action"]
+
+
+def test_evaluate_program_iteration_retry_keeps_stage(sample_env) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+
+    evaluation, updated_subgoals = background_job_executor.evaluate_program_iteration(
+        {"task_id": "SP-EXEC-01"},
+        scaffold={
+            "task_spec": {
+                "stage": "execute",
+                "scope_type": "project",
+                "scope_ref": "SampleProj",
+                "current_focus": "IM contract",
+                "subgoals": [{"summary": "IM contract", "status": "pending"}],
+            }
+        },
+        execution_status="error",
+        delivery_status="delivered",
+        gate_state={},
+        focus_completed=False,
+        execution_metadata={"recovery_decision": "retry", "recovery_reason": "execution_timeout"},
+    )
+
+    assert evaluation["decision"] == "retry"
+    assert evaluation["next_stage"] == "execute"
+    assert evaluation["metadata"]["execution_recovery_reason"] == "execution_timeout"
+    assert updated_subgoals[0]["status"] == "pending"
+
+
+def test_derive_harness_observability_marks_stale_running(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    stale_claimed_at = (
+        dt.datetime.now().astimezone()
+        - dt.timedelta(seconds=background_job_executor.workspace_wake_broker.RUNNING_STALE_SECONDS + 5)
+    ).isoformat(timespec="seconds")
+
+    payload = background_job_executor.derive_harness_observability(
+        {
+            "job_id": "job.sample",
+            "task_id": "SP-EXEC-01",
+            "project_name": "SampleProj",
+            "artifacts_root": str(sample_env["reports_root"] / "sample"),
+        },
+        task_spec={
+            "stage": "execute",
+            "last_decision": "continue",
+            "subgoals": [{"summary": "IM contract", "status": "pending"}],
+            "current_focus": "IM contract",
+            "last_run_id": "run-1",
+        },
+        wake_status={"running": {"claimed_at": stale_claimed_at}},
+        last_run={},
+        gate_event={},
+    )
+
+    assert payload["harness_state"] == "stalled"
+    assert payload["blocked_reason"] == "wake_running_stale"
+    assert payload["running_stale"] is True
+
+
+def test_derive_harness_observability_marks_orphaned_active_run(sample_env) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    stale_started_at = (
+        dt.datetime.now().astimezone()
+        - dt.timedelta(seconds=background_job_executor.workspace_wake_broker.RUNNING_STALE_SECONDS + 5)
+    ).isoformat(timespec="seconds")
+
+    payload = background_job_executor.derive_harness_observability(
+        {
+            "job_id": "job.sample",
+            "task_id": "SP-EXEC-01",
+            "project_name": "SampleProj",
+            "artifacts_root": str(sample_env["reports_root"] / "sample"),
+        },
+        task_spec={
+            "stage": "execute",
+            "last_decision": "",
+            "subgoals": [{"summary": "IM contract", "status": "pending"}],
+            "current_focus": "IM contract",
+            "last_run_id": "run-1",
+            "active_run_id": "run-2",
+            "running_started_at": stale_started_at,
+        },
+        wake_status={"running": {}},
+        last_run={},
+        gate_event={},
+    )
+
+    assert payload["harness_state"] == "stalled"
+    assert payload["blocked_reason"] == "orphaned_active_run"
+    assert payload["running_stale"] is True
+    assert payload["last_decision"] == "retry"
+
+
+def test_projected_job_status_exposes_observability(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-01",
+                "父ID": "",
+                "来源": "project",
+                "范围": "automation",
+                "事项": "Run Sample background job",
+                "状态": "doing",
+                "交付物": "sample brief",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "continue",
+                "更新时间": "2026-03-30",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        background_job_executor.board_job_projector,
+        "load_task_job_specs",
+        lambda _project_name: {"SP-EXEC-01": implementation_loop_spec()},
+    )
+    job = background_job_executor.board_job_projector.project_background_job("SampleProj", "SP-EXEC-01")
+    monkeypatch.setattr(
+        background_job_executor,
+        "_load_task_spec",
+        lambda _job: {
+            "stage": "execute",
+            "last_decision": "continue",
+            "subgoals": [{"summary": "IM contract", "status": "pending"}],
+            "current_focus": "IM contract",
+            "last_run_id": "run-1",
+        },
+    )
+    monkeypatch.setattr(
+        background_job_executor.workspace_wake_broker,
+        "job_status",
+        lambda _job_id: {"pending": {"requested_at": "2026-03-31T01:00:00+08:00"}, "running": {}},
+    )
+    monkeypatch.setattr(
+        background_job_executor,
+        "latest_run_record",
+        lambda _job: {
+            "run_id": "run-1",
+            "delivery_status": "delivered",
+            "writeback_targets": ["project_board", "dashboard"],
+            "delivery_outcomes": [
+                {"delivery_id": "d-1", "status": "delivered", "targets": ["Codex Hub项目"]},
+            ],
+            "artifacts": {"history_path": "/tmp/history.ndjson", "gates_path": "/tmp/gates.ndjson"},
+        },
+    )
+    monkeypatch.setattr(background_job_executor, "latest_gate_event", lambda _job: {})
+    monkeypatch.setattr(
+        background_job_executor.runtime_state,
+        "fetch_bridge_connection",
+        lambda _bridge: {
+            "status": "connected",
+            "transport": "lark_cli_event_plus_cli_im",
+            "last_event_at": "2026-03-31T01:05:00+08:00",
+            "last_error": "",
+            "host_mode": "daemon",
+            "updated_at": "2026-03-31T01:05:10+08:00",
+        },
+    )
+    monkeypatch.setattr(
+        background_job_executor.runtime_state,
+        "fetch_bridge_message_activity",
+        lambda _bridge: {
+            "inbound": {"message_id": "im-1", "cursor_at": "2026-03-31T01:04:00+08:00"},
+            "outbound": {"message_id": "om-1", "cursor_at": "2026-03-31T01:04:30+08:00"},
+        },
+    )
+    monkeypatch.setattr(
+        background_job_executor.runtime_state,
+        "fetch_bridge_continuity_status",
+        lambda **_kwargs: {"ok": True, "issue_count": 0, "shared_session_count": 1},
+    )
+    monkeypatch.setattr(
+        background_job_executor.runtime_state,
+        "fetch_runtime_queue_status",
+        lambda queue_name: {"counts": {queue_name: {"pending": 0, "processing": 0}}, "latest_created_at": ""},
+    )
+
+    payload = background_job_executor.projected_job_status(job)
+
+    assert payload["harness_state"] == "queued"
+    assert payload["last_decision"] == "continue"
+    assert payload["next_wake_at"] == "2026-03-31T01:00:00+08:00"
+    assert payload["blocked_reason"] == ""
+    assert payload["observability"]["harness_state"] == "queued"
+    assert payload["observability"]["next_wake_at"] == "2026-03-31T01:00:00+08:00"
+    assert payload["observability"]["pending_subgoal_count"] == 1
+    assert payload["status_payload"]["harness_state"] == "queued"
+    assert payload["status_payload"]["last_decision"] == "continue"
+    assert payload["status_payload"]["pending_subgoal_count"] == 1
+    assert payload["runtime_overlay"]["task_id"] == "SP-EXEC-01"
+    assert payload["runtime_overlay"]["current_stage"] == "execute"
+    assert payload["task_runtime_snapshot"]["harness_state"] == "queued"
+    assert payload["compression_policy"]["l1_strategy"] == "tool-output-trim"
+    assert payload["middleware"]["precompletion_checklist"]["status"] == "armed"
+    assert payload["handoff_packet"]["task_spec_path"].endswith("task-spec.json")
+    assert payload["project_runtime"]["task_status"] == "doing"
+    assert payload["bridge_runtime"]["status"] == "connected"
+    assert payload["run_tree"]["run_id"] == "run-1"
+    assert payload["delivery_contract"]["aggregate_status"] == "delivered"
+    assert payload["execution_boundary"]["sandbox_mode"] == "workspace_write"
+    assert payload["instruction_surface"]["hook_enforcement"][0] == "pre_completion_checklist"
+    assert payload["extension_manifest"]["kind"] == "workflow"
+    assert payload["extension_manifest"]["lifecycle_state"] == "enabled"
+    assert "workflow_manifest" in payload["extension_manifest"]["capabilities"]
+    assert payload["workflow_manifest"]["entry_command"] == "background-job-intent"
+    assert payload["workflow_manifest"]["lifecycle_state"] == "loaded"
+    assert "runtime_overlay" in payload["extension_manifest"]["capabilities"]
+    assert payload["instruction_migration"]["migrate_to_policy"][0] == "approval_gate"
+    assert "extension_manifest" in payload["open_source_boundary"]["public_contracts"]
+    assert "workflow_manifest" in payload["open_source_boundary"]["public_contracts"]
+    assert payload["harness_snapshot"]["runtime_overlay"]["task_id"] == "SP-EXEC-01"
+
+
+def test_job_status_payload_flattens_harness_observability(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    job = {
+        "project_name": "SampleProj",
+        "task_id": "SP-EXEC-01",
+        "job_id": "board-job.sampleproj.sp-exec-01.sample-background-job",
+        "task_item": "Run Sample background job",
+        "executor_kind": "implementation_loop",
+    }
+    monkeypatch.setattr(
+        background_job_executor,
+        "projected_job_status",
+        lambda _job: {
+            "job": job,
+            "observability": {
+                "harness_state": "blocked",
+                "last_decision": "blocked",
+                "next_action": "先处理审批阻塞",
+                "next_wake_at": "2026-03-31T09:30:00+08:00",
+                "blocked_reason": "awaiting_gate",
+                "current_stage": "verify",
+                "current_focus": "IM contract",
+                "last_run_id": "run-1",
+                "active_run_id": "",
+                "running_started_at": "",
+            },
+            "status_payload": {
+                "harness_state": "blocked",
+                "last_decision": "blocked",
+                "next_action": "先处理审批阻塞",
+                "next_wake_at": "2026-03-31T09:30:00+08:00",
+                "blocked_reason": "awaiting_gate",
+                "current_stage": "verify",
+                "current_focus": "IM contract",
+                "last_run_id": "run-1",
+                "active_run_id": "",
+                "running_started_at": "",
+                "completed_subgoal_count": 0,
+                "pending_subgoal_count": 1,
+                "running_stale": False,
+                "history_path": "/tmp/history.ndjson",
+                "gates_path": "/tmp/gates.ndjson",
+                "latest_report_path": "/tmp/latest.md",
+            },
+            "runtime_overlay": {
+                "task_id": "SP-EXEC-01",
+                "current_stage": "verify",
+                "current_focus": "IM contract",
+                "run_id": "run-1",
+            },
+            "compression_policy": {
+                "l1_strategy": "tool-output-trim",
+                "l2_strategy": "session-summary",
+                "l3_strategy": "handoff-summary",
+            },
+            "middleware": {
+                "precompletion_checklist": {"status": "armed"},
+                "loop_detection": {"status": "watching"},
+                "local_context": {"allow_paths": ["/tmp/sample"]},
+            },
+            "task_runtime_snapshot": {
+                "harness_state": "blocked",
+                "completed_subgoal_count": 0,
+                "pending_subgoal_count": 1,
+                "active_run_id": "",
+            },
+            "handoff_packet": {"task_spec_path": "/tmp/task-spec.json"},
+            "project_runtime": {
+                "task_status": "doing",
+                "next_action": "先处理审批阻塞",
+                "updated_at": "2026-03-31T09:00:00+08:00",
+            },
+            "bridge_runtime": {
+                "status": "connected",
+                "transport": "lark_cli_event_plus_cli_im",
+                "continuity_issue_count": 0,
+            },
+            "run_tree": {"run_id": "run-1", "children": [], "shared_artifacts": [{"artifact_id": "task_spec_path"}]},
+            "delivery_contract": {
+                "aggregate_status": "delivered",
+                "writeback_targets": ["project_board"],
+                "pending_targets": [],
+                "failed_targets": [],
+            },
+            "execution_boundary": {
+                "sandbox_mode": "workspace_write",
+                "network_access": "conditional",
+                "writable_roots": ["/tmp/a", "/tmp/b"],
+            },
+            "instruction_surface": {
+                "human_guides": ["/tmp/AGENTS.md", "/tmp/skills"],
+                "generated_rules": ["/tmp/generated.rules"],
+                "hook_enforcement": ["pre_completion_checklist", "loop_detection"],
+                "policy_enforcement": ["operation_policy", "execution_boundary"],
+            },
+            "extension_manifest": {
+                "kind": "workflow",
+                "lifecycle_state": "enabled",
+                "capabilities": ["runtime_overlay", "extension_manifest"],
+                "hook_subscriptions": ["run_started", "delivery_done"],
+                "supported_profiles": ["workspace-default", "background-job"],
+            },
+            "workflow_manifest": {
+                "entry_command": "background-job-intent",
+                "lifecycle_state": "paused",
+                "trigger_modes": ["explicit_intent", "wake_broker"],
+                "status_surfaces": ["job_status_payload", "materials_dashboard"],
+            },
+            "instruction_migration": {
+                "retained_in_guides": ["workspace invariants"],
+                "migrate_to_hooks": ["pre_completion_checklist"],
+                "migrate_to_policy": ["approval_gate", "execution_boundary"],
+                "migrate_to_commands": ["continue long task", "pause long task"],
+            },
+            "open_source_boundary": {
+                "public_contracts": ["runtime_overlay", "extension_manifest"],
+                "private_only": ["growth_operator_surface"],
+                "migration_sequence": ["private_mainline_contract_freeze", "public_snapshot_status"],
+                "not_recommended": ["raw_operator_playbooks"],
+            },
+            "harness_snapshot": {
+                "runtime_overlay": {"task_id": "SP-EXEC-01"},
+            },
+            "harness_state": "blocked",
+            "last_decision": "blocked",
+            "next_wake_at": "2026-03-31T09:30:00+08:00",
+            "blocked_reason": "awaiting_gate",
+            "history_path": "/tmp/history.ndjson",
+            "gates_path": "/tmp/gates.ndjson",
+            "latest_report_path": "/tmp/latest.md",
+        },
+    )
+
+    payload = background_job_executor.job_status_payload(job)
+
+    assert payload["task_id"] == "SP-EXEC-01"
+    assert payload["harness_state"] == "blocked"
+    assert payload["last_decision"] == "blocked"
+    assert payload["next_action"] == "先处理审批阻塞"
+    assert payload["next_wake_at"] == "2026-03-31T09:30:00+08:00"
+    assert payload["blocked_reason"] == "awaiting_gate"
+    assert payload["current_focus"] == "IM contract"
+    assert payload["pending_subgoal_count"] == 1
+    assert payload["running_stale"] is False
+    assert payload["runtime_overlay"]["current_stage"] == "verify"
+    assert payload["compression_policy"]["l2_strategy"] == "session-summary"
+    assert payload["middleware"]["loop_detection"]["status"] == "watching"
+    assert payload["extension_manifest"]["lifecycle_state"] == "enabled"
+    assert payload["workflow_manifest"]["lifecycle_state"] == "paused"
+
+
+def test_build_workflow_manifest_tracks_lifecycle_states(sample_env) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    job = {
+        "project_name": "SampleProj",
+        "task_id": "SP-EXEC-01",
+        "executor_kind": "implementation_loop",
+    }
+    extension_manifest = {"extension_id": "codex-hub.background-job.SP-EXEC-01"}
+
+    loaded = background_job_executor._build_workflow_manifest(
+        job,
+        observability={"harness_state": "ready", "last_decision": "continue", "blocked_reason": ""},
+        project_runtime={"task_status": "doing"},
+        extension_manifest=extension_manifest,
+    )
+    paused = background_job_executor._build_workflow_manifest(
+        job,
+        observability={"harness_state": "blocked", "last_decision": "blocked", "blocked_reason": "awaiting_gate"},
+        project_runtime={"task_status": "doing"},
+        extension_manifest=extension_manifest,
+    )
+    unloaded = background_job_executor._build_workflow_manifest(
+        job,
+        observability={"harness_state": "done", "last_decision": "done", "blocked_reason": ""},
+        project_runtime={"task_status": "done"},
+        extension_manifest=extension_manifest,
+    )
+    errored = background_job_executor._build_workflow_manifest(
+        job,
+        observability={"harness_state": "failed", "last_decision": "failed", "blocked_reason": "verify_failed"},
+        project_runtime={"task_status": "doing"},
+        extension_manifest=extension_manifest,
+    )
+
+    assert loaded["lifecycle_state"] == "loaded"
+    assert paused["lifecycle_state"] == "paused"
+    assert unloaded["lifecycle_state"] == "unloaded"
+    assert errored["lifecycle_state"] == "errored"
+
+
+def test_projected_job_status_execution_boundary_uses_program_spec(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    job = {
+        "project_name": "SampleProj",
+        "task_id": "SP-EXEC-01",
+        "job_id": "board-job.sampleproj.sp-exec-01.sample-background-job",
+        "task_item": "Run Sample background job",
+        "executor_kind": "implementation_loop",
+        "artifacts_root": "/tmp/sample-artifacts",
+        "program_spec": {
+            "scope_type": "workspace",
+            "scope_ref": "SampleProj",
+            "approval_required": True,
+            "approval_state": "pending",
+        },
+    }
+    monkeypatch.setattr(background_job_executor.workspace_wake_broker, "job_status", lambda _job_id: {})
+    monkeypatch.setattr(background_job_executor, "latest_run_record", lambda _job: {})
+    monkeypatch.setattr(background_job_executor, "latest_gate_event", lambda _job: {})
+    monkeypatch.setattr(background_job_executor, "_load_task_spec", lambda _job: {})
+    monkeypatch.setattr(
+        background_job_executor,
+        "derive_harness_observability",
+        lambda *_args, **_kwargs: {
+            "harness_state": "ready",
+            "last_decision": "continue",
+            "next_action": "继续执行",
+            "next_wake_at": "",
+            "blocked_reason": "",
+            "current_stage": "execute",
+            "current_focus": "runtime contract",
+            "last_run_id": "",
+            "completed_subgoal_count": 0,
+            "pending_subgoal_count": 1,
+            "running_stale": False,
+        },
+    )
+    monkeypatch.setattr(background_job_executor, "_build_project_runtime_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(background_job_executor, "_build_bridge_runtime_snapshot", lambda **_kwargs: {})
+    monkeypatch.setattr(background_job_executor, "_build_delivery_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(background_job_executor, "_build_run_tree", lambda *_args, **_kwargs: {})
+
+    payload = background_job_executor.projected_job_status(job)
+
+    assert payload["execution_boundary"]["requires_approval"] is True
+    assert payload["execution_boundary"]["expected_scope"] == "SampleProj"
+    assert payload["execution_boundary"]["metadata"]["approval_state"] == "pending"
 
 
 def test_background_job_executor_blocks_workspace_scope_without_approval(sample_env, monkeypatch) -> None:

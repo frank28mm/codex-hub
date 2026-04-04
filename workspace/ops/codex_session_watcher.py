@@ -567,6 +567,32 @@ def resolve_project_from_snapshot(snapshot: dict[str, Any]) -> str:
     return resolve_project_from_prompt(snapshot_prompt_text(snapshot))
 
 
+def resolve_explicit_session_binding(snapshot: dict[str, Any]) -> dict[str, str] | None:
+    session_id = str(snapshot.get("id") or "").strip()
+    if not session_id:
+        return None
+    registry_names = {str(item.get("project_name", "")).strip() for item in load_registry()}
+    bindings = load_bindings().get("bindings", [])
+    for binding in reversed(bindings):
+        if binding.get("session_id") != session_id and binding.get("resume_session_id") != session_id:
+            continue
+        project_name = str(binding.get("project_name") or "").strip()
+        if not project_name or project_name not in registry_names:
+            continue
+        binding_board_path = normalize_vault_path(str(binding.get("binding_board_path") or "").strip())
+        if not binding_board_path:
+            board_binding = resolve_board_binding(project_name, str(binding.get("prompt") or "").strip())
+        else:
+            board_binding = {
+                "binding_scope": str(binding.get("binding_scope") or "project").strip() or "project",
+                "binding_board_path": binding_board_path,
+                "topic_name": str(binding.get("topic_name") or "").strip(),
+                "rollup_target": normalize_vault_path(str(binding.get("rollup_target") or "").strip()),
+            }
+        return {"project_name": project_name, **board_binding}
+    return None
+
+
 def resolve_board_binding_from_snapshot(snapshot: dict[str, Any], project_name: str) -> dict[str, str]:
     binding_board_path = normalize_vault_path(str(snapshot.get("binding_board_path") or "").strip())
     if not binding_board_path:
@@ -644,17 +670,27 @@ def sync_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     source_workspace = snapshot.get("cwd", "")
     prompt_text = snapshot_prompt_text(snapshot)
     thread_name = snapshot_thread_name(snapshot)
-    fixed_binding = resolve_fixed_workspace_binding(source_workspace)
-    if fixed_binding:
-        project_name = fixed_binding["project_name"]
-        board_binding = fixed_binding
+    explicit_binding = resolve_explicit_session_binding(snapshot)
+    if explicit_binding:
+        project_name = explicit_binding["project_name"]
+        board_binding = {
+            "binding_scope": explicit_binding.get("binding_scope", "project"),
+            "binding_board_path": explicit_binding.get("binding_board_path", ""),
+            "topic_name": explicit_binding.get("topic_name", ""),
+            "rollup_target": explicit_binding.get("rollup_target", ""),
+        }
     else:
-        if source_workspace != str(WORKSPACE_ROOT):
-            return None
-        project_name = resolve_project_from_snapshot(snapshot)
-        if not project_name:
-            return {"session_id": snapshot["id"], "action": "ignored", "reason": "general-or-ambiguous"}
-        board_binding = resolve_board_binding_from_snapshot(snapshot, project_name)
+        fixed_binding = resolve_fixed_workspace_binding(source_workspace)
+        if fixed_binding:
+            project_name = fixed_binding["project_name"]
+            board_binding = fixed_binding
+        else:
+            if source_workspace != str(WORKSPACE_ROOT):
+                return None
+            project_name = resolve_project_from_snapshot(snapshot)
+            if not project_name:
+                return {"session_id": snapshot["id"], "action": "ignored", "reason": "general-or-ambiguous"}
+            board_binding = resolve_board_binding_from_snapshot(snapshot, project_name)
 
     pause_payload = project_pause.active_pause(project_name=project_name, scope="session_writeback")
     if pause_payload.get("active"):

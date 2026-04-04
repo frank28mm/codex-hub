@@ -39,6 +39,8 @@ ATTACHMENT_PATH=""
 ATTACHMENT_TYPE=""
 VOICE_TRANSCRIPT=""
 APPROVAL_TOKEN=""
+ENGINE_NAME="codex"
+ENTRY_SURFACE="codex-app"
 
 usage() {
   cat <<'EOF'
@@ -127,6 +129,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --approval-token)
       APPROVAL_TOKEN="${2:-}"
+      shift 2
+      ;;
+    --engine-name)
+      ENGINE_NAME="${2:-}"
+      shift 2
+      ;;
+    --entry-surface)
+      ENTRY_SURFACE="${2:-}"
       shift 2
       ;;
     --dry-run)
@@ -228,9 +238,9 @@ PY
 }
 
 resolve_resume_context() {
-  python3 - "$SESSION_ROUTER" "$PROJECT_BINDINGS_JSON" "$1" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" <<'PY'
+  python3 - "$SESSION_ROUTER" "$PROJECT_BINDINGS_JSON" "$1" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$ENGINE_NAME" <<'PY'
 import json, sys, datetime as dt
-path, bindings_path, project, launch_source, source_chat_ref = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+path, bindings_path, project, launch_source, source_chat_ref, engine_name = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 try:
     data = json.load(open(path, "r", encoding="utf-8"))
 except Exception:
@@ -244,8 +254,10 @@ sid = route.get("last_session_id")
 last_active = route.get("last_active_at")
 route_launch_source = str(route.get("last_launch_source", "")).strip()
 route_source_chat_ref = str(route.get("last_source_chat_ref", "")).strip()
+route_engine_name = str(route.get("last_engine_name", "codex") or "codex").strip()
 launch_source = launch_source.strip()
 source_chat_ref = source_chat_ref.strip()
+engine_name = str(engine_name or "codex").strip()
 if not sid or not last_active:
     print("")
     raise SystemExit(0)
@@ -274,8 +286,12 @@ if not route_launch_source and not route_source_chat_ref:
         latest = candidates[0]
         route_launch_source = str(latest.get("launch_source", "")).strip()
         route_source_chat_ref = str(latest.get("source_chat_ref", "")).strip()
+        route_engine_name = str(latest.get("engine_name", route_engine_name) or route_engine_name).strip()
 now = dt.datetime.now(dt.timezone.utc)
 if (now - ts).total_seconds() <= 24 * 3600:
+    if route_engine_name and route_engine_name != engine_name:
+        print("")
+        raise SystemExit(0)
     if route_launch_source or route_source_chat_ref:
         if not launch_source:
             print("")
@@ -294,6 +310,7 @@ if (now - ts).total_seconds() <= 24 * 3600:
         "rollup_target": route.get("rollup_target", ""),
         "last_launch_source": route_launch_source,
         "last_source_chat_ref": route_source_chat_ref,
+        "last_engine_name": route_engine_name,
     }, ensure_ascii=False))
 else:
     print("")
@@ -551,7 +568,7 @@ PY
 
 build_launch_context_json() {
   python3 - \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" <<'PY'
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}" <<'PY'
 import json, sys
 
 (
@@ -572,7 +589,9 @@ import json, sys
     voice_transcript,
     selected_model,
     selected_reasoning_effort,
-) = sys.argv[1:18]
+    engine_name,
+    entry_surface,
+) = sys.argv[1:20]
 
 print(
     json.dumps(
@@ -594,6 +613,8 @@ print(
             "voice_transcript": voice_transcript,
             "model": selected_model,
             "reasoning_effort": selected_reasoning_effort,
+            "engine_name": engine_name,
+            "entry_surface": entry_surface,
         },
         ensure_ascii=False,
     )
@@ -1011,6 +1032,29 @@ if approved_profile != execution_profile:
 PY
 }
 
+claim_engine_session_lease() {
+  python3 "$CODE_ROOT/ops/engine_adapter.py" claim-lease \
+    --engine-name "$ENGINE_NAME" \
+    --entry-surface "$ENTRY_SURFACE" \
+    --project-name "${PROJECT:-}" \
+    --binding-scope "${BOARD_SCOPE:-chat}" \
+    --binding-board-path "${BINDING_BOARD_PATH:-}" \
+    --topic-name "${TOPIC_NAME:-}" \
+    --launch-source "${LAUNCH_SOURCE:-}" \
+    --source-chat-ref "${SOURCE_CHAT_REF:-}" \
+    --session-id "$1" \
+    --execution-profile "${EXECUTION_PROFILE:-}" \
+    --state "$2"
+}
+
+release_engine_session_lease() {
+  python3 "$CODE_ROOT/ops/engine_adapter.py" release-lease \
+    --lease-key "$1" \
+    --session-id "$2" \
+    --state "$3" \
+    --summary "$4"
+}
+
 ensure_obsidian_background() {
   if [[ "$AUTO_OPEN_OBSIDIAN" != "1" ]]; then
     return 0
@@ -1035,6 +1079,11 @@ run_codex() {
   local -a codex_prefix=()
   local -a codex_exec_base=()
   local feishu_root=""
+  local lease_session_id=""
+  local lease_payload=""
+  local lease_key=""
+  local lease_state="running"
+  local lease_conflict="0"
   local finalize_args=(
     python3 "$MEMORY_TOOL" finalize-launch
     --launch-id "$launch_id"
@@ -1088,7 +1137,17 @@ run_codex() {
     codex_prompt="$(build_codex_prompt "$PROMPT" "$mode")"
   fi
 
-  if [[ -n "$PROJECT" && -n "$PROMPT" && "$mode" == "new" ]]; then
+  lease_session_id="${session_id:-launch-${launch_id:-manual}}"
+  lease_payload="$(claim_engine_session_lease "$lease_session_id" "$lease_state" 2>/dev/null || true)"
+  if [[ -n "$lease_payload" ]]; then
+    printf 'WORKSPACE_HUB_ENGINE_LEASE=%s\n' "$lease_payload" >&2
+    lease_key="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str((payload.get("lease") or {}).get("lease_key") or ""))' <<<"$lease_payload" 2>/dev/null || true)"
+    lease_conflict="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print("1" if payload.get("conflict") else "0")' <<<"$lease_payload" 2>/dev/null || true)"
+  fi
+
+  if [[ "$lease_conflict" == "1" ]]; then
+    status=1
+  elif [[ -n "$PROJECT" && -n "$PROMPT" && "$mode" == "new" ]]; then
     output_file="$WORKSPACE_ROOT/runtime/last-message-${launch_id}.txt"
     rm -f "$output_file"
     "${codex_exec_base[@]}" -o "$output_file" "$codex_prompt" || status=$?
@@ -1116,6 +1175,14 @@ run_codex() {
     fi
   fi
 
+  if [[ -z "$launch_id" && -n "$lease_key" ]]; then
+    local standalone_release_state="completed"
+    if [[ "$status" -ne 0 ]]; then
+      standalone_release_state="failed"
+    fi
+    release_engine_session_lease "$lease_key" "${session_id:-$lease_session_id}" "$standalone_release_state" "" >/dev/null 2>&1 || true
+  fi
+
   if [[ -n "$launch_id" ]]; then
     local final_status="completed"
     if [[ "$status" -ne 0 ]]; then
@@ -1139,6 +1206,21 @@ run_codex() {
     finalize_output="$("${finalize_args[@]}" 2>/dev/null || true)"
     if [[ -n "$finalize_output" ]]; then
       printf 'WORKSPACE_HUB_FINALIZE_LAUNCH=%s\n' "$finalize_output" >&2
+    fi
+    if [[ -n "$lease_key" ]]; then
+      local lease_release_state="$final_status"
+      if [[ "$lease_release_state" == "aborted" ]]; then
+        lease_release_state="aborted"
+      elif [[ "$lease_release_state" == "failed" ]]; then
+        lease_release_state="failed"
+      else
+        lease_release_state="completed"
+      fi
+      local lease_release_output=""
+      lease_release_output="$(release_engine_session_lease "$lease_key" "${session_id:-$lease_session_id}" "$lease_release_state" "${finalize_output:-}" 2>/dev/null || true)"
+      if [[ -n "$lease_release_output" ]]; then
+        printf 'WORKSPACE_HUB_ENGINE_LEASE=%s\n' "$lease_release_output" >&2
+      fi
     fi
     rm -f "$output_file"
   fi
@@ -1222,23 +1304,23 @@ if [[ -n "$SESSION_ID" ]]; then
   if [[ -z "$PROJECT" ]]; then
     if [[ "$DRY_RUN" == "1" ]]; then
       printf 'mode=resume\nproject=general\nsession_id=%s\nvault=%s\n' "$SESSION_ID" "$VAULT_ROOT"
-      printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-      printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+      printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\nengine_name=%s\nentry_surface=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE"
+      printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")"
       print_feishu_ops_summary
       print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "resume")"
       print_context_summary "$CONTEXT_JSON"
       exit 0
     fi
     echo "Routing: project=general mode=resume session=$SESSION_ID" >&2
-    printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+    printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "general" "chat" "" "" "" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")" >&2
     print_context_summary "$CONTEXT_JSON" >&2
     run_codex "" "resume" "$SESSION_ID"
     exit $?
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
     printf 'mode=resume\nproject=%s\nsession_id=%s\nvault=%s\n' "$PROJECT" "$SESSION_ID" "$VAULT_ROOT"
-    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-    printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\nengine_name=%s\nentry_surface=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")"
     print_feishu_ops_summary
     print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "resume")"
     if [[ -n "$PROJECT_PAUSE_JSON" ]]; then
@@ -1252,9 +1334,9 @@ if [[ -n "$SESSION_ID" ]]; then
     exit 0
   fi
   echo "Routing: project=$PROJECT mode=resume session=$SESSION_ID" >&2
-  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "resume" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "$SESSION_ID" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")" >&2
   print_context_summary "$CONTEXT_JSON" >&2
-  LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode resume --resume-session-id "$SESSION_ID" --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID")"
+  LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode resume --resume-session-id "$SESSION_ID" --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID" --engine-name "$ENGINE_NAME" --entry-surface "$ENTRY_SURFACE")"
   run_codex "$LAUNCH_ID" "resume" "$SESSION_ID"
   exit $?
 fi
@@ -1262,8 +1344,8 @@ fi
 if [[ -n "$PROJECT" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
     printf 'mode=new\nproject=%s\nsession_id=\nvault=%s\n' "$PROJECT" "$VAULT_ROOT"
-    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-    printf 'launch_context_json=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\nengine_name=%s\nentry_surface=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")"
     print_feishu_ops_summary
     print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "new")"
     if [[ -n "$PROJECT_PAUSE_JSON" ]]; then
@@ -1277,7 +1359,7 @@ if [[ -n "$PROJECT" ]]; then
     exit 0
   fi
   echo "Routing: project=$PROJECT mode=new" >&2
-  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "new" "$PROJECT" "$BOARD_SCOPE" "$BINDING_BOARD_PATH" "$TOPIC_NAME" "$ROLLUP_TARGET" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")" >&2
   print_context_summary "$CONTEXT_JSON" >&2
   if [[ -z "$BINDING_BOARD_PATH" ]]; then
     BINDING_JSON="$(resolve_board_binding "$PROJECT" "$PROMPT")"
@@ -1293,19 +1375,19 @@ if [[ -n "$PROJECT" ]]; then
     TOPIC_NAME="${TOPIC_NAME:-}"
     ROLLUP_TARGET="${ROLLUP_TARGET:-}"
   fi
-  LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode new --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID")"
+  LAUNCH_ID="$(python3 "$MEMORY_TOOL" register-launch --project-name "$PROJECT" --prompt "$PROMPT" --mode new --binding-scope "$BOARD_SCOPE" --binding-board-path "$BINDING_BOARD_PATH" --topic-name "$TOPIC_NAME" --rollup-target "$ROLLUP_TARGET" --launch-source "$LAUNCH_SOURCE" --source-chat-ref "$SOURCE_CHAT_REF" --source-thread-name "$SOURCE_THREAD_NAME" --source-thread-label "$SOURCE_THREAD_LABEL" --source-message-id "$SOURCE_MESSAGE_ID" --engine-name "$ENGINE_NAME" --entry-surface "$ENTRY_SURFACE")"
 else
   if [[ "$DRY_RUN" == "1" ]]; then
     printf 'mode=general\nproject=general\nsession_id=\nvault=%s\n' "$VAULT_ROOT"
-    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT"
-    printf 'launch_context_json=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")"
+    printf 'launch_source=%s\nchat_ref=%s\nthread_name=%s\nthread_label=%s\nattachment_type=%s\nattachment_path=%s\nmodel=%s\nreasoning_effort=%s\nengine_name=%s\nentry_surface=%s\n' "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_TYPE" "$ATTACHMENT_PATH" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE"
+    printf 'launch_context_json=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")"
     print_feishu_ops_summary
     print_launcher_prompt_preview "$(build_codex_prompt "$PROMPT" "new")"
     print_context_summary "$CONTEXT_JSON"
     exit 0
   fi
   echo "Routing: project=general mode=new" >&2
-  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT")" >&2
+  printf 'WORKSPACE_HUB_LAUNCH_CONTEXT=%s\n' "$(build_launch_context_json "general" "general" "chat" "" "" "" "" "$EXECUTION_PROFILE" "$LAUNCH_SOURCE" "$SOURCE_CHAT_REF" "$SOURCE_THREAD_NAME" "$SOURCE_THREAD_LABEL" "$ATTACHMENT_PATH" "$ATTACHMENT_TYPE" "$VOICE_TRANSCRIPT" "$SELECTED_MODEL" "$SELECTED_REASONING_EFFORT" "$ENGINE_NAME" "$ENTRY_SURFACE")" >&2
   print_context_summary "$CONTEXT_JSON" >&2
 fi
 

@@ -1099,105 +1099,107 @@ def _claim_projection_events(limit: int = 200) -> list[dict[str, Any]]:
 
 def run_sync(*, force_full: bool = False, project_name: str = "") -> dict[str, Any]:
     claimed_events = _claim_projection_events() if not project_name else []
-    with workspace_lock():
-        try:
-            resources = ensure_projection_resources()
+    try:
+        # Only hold the workspace lock while reading the local truth source.
+        # The Feishu sync itself is network-heavy and must not block writeback/finalize paths.
+        with workspace_lock():
             payload = snapshot(project_name=project_name)
-            target_links = {
-                table_key: {
-                    view_name: _bitable_view_url(
-                        resources["app_token"],
-                        _text(resources["tables"][table_key]["table_id"]),
-                        _text(view_id),
-                    )
-                    for view_name, view_id in dict(resources["tables"][table_key].get("view_ids_by_name", {})).items()
-                }
-                for table_key in TABLE_KEYS
-            }
-            payload["operations_overview_rows"] = _attach_overview_target_links(
-                list(payload.get("operations_overview_rows") or []),
-                target_links=target_links,
-            )
-            payload["row_counts"][OVERVIEW_TABLE_KEY] = len(payload["operations_overview_rows"])
-            agent = feishu_agent.FeishuAgent()
-            projects_table_id = resources["tables"][PROJECTS_TABLE_KEY]["table_id"]
-            tasks_table_id = resources["tables"][TASKS_TABLE_KEY]["table_id"]
-            overview_table_id = resources["tables"][OVERVIEW_TABLE_KEY]["table_id"]
-            app_token = resources["app_token"]
-            projects_result = _sync_table_rows(
-                agent,
-                app_token=app_token,
-                table_id=projects_table_id,
-                desired_rows=payload["projects_overview_rows"],
-            )
-            tasks_result = _sync_table_rows(
-                agent,
-                app_token=app_token,
-                table_id=tasks_table_id,
-                desired_rows=payload["tasks_current_rows"],
-            )
-            overview_result = _sync_table_rows(
-                agent,
-                app_token=app_token,
-                table_id=overview_table_id,
-                desired_rows=payload["operations_overview_rows"],
-            )
-            result = {
-                "status": "ok",
-                "schema_version": SCHEMA_VERSION,
-                "project_name": project_name,
-                "trigger": "force_full" if force_full else ("queue" if claimed_events else "reconcile"),
-                "claimed_events": len(claimed_events),
-                "app_token": app_token,
-                "tables": {
-                    PROJECTS_TABLE_KEY: projects_result,
-                    TASKS_TABLE_KEY: tasks_result,
-                    OVERVIEW_TABLE_KEY: overview_result,
-                },
-                "row_counts": payload["row_counts"],
-                "errors": payload.get("errors", []),
-                "target_links": target_links,
-                "synced_at": iso_now(),
-            }
-            save_state(
-                {
-                    "version": 1,
-                    "last_sync_at": result["synced_at"],
-                    "last_status": "ok",
-                    "last_error": "",
-                    "last_result": result,
-                }
-            )
-            for event in claimed_events:
-                runtime_state.complete_runtime_event(
-                    event.get("event_key", ""),
-                    claim_token=_text(event.get("claim_token", "")),
-                    result={"status": "ok", "synced_at": result["synced_at"]},
+        resources = ensure_projection_resources()
+        target_links = {
+            table_key: {
+                view_name: _bitable_view_url(
+                    resources["app_token"],
+                    _text(resources["tables"][table_key]["table_id"]),
+                    _text(view_id),
                 )
-            return result
-        except Exception as exc:
-            save_state(
-                {
-                    "version": 1,
-                    "last_sync_at": iso_now(),
-                    "last_status": "error",
-                    "last_error": str(exc),
-                }
-            )
-            for event in claimed_events:
-                runtime_state.fail_runtime_event(
-                    event.get("event_key", ""),
-                    claim_token=_text(event.get("claim_token", "")),
-                    error=str(exc),
-                    retry_after_seconds=60,
-                )
-            return {
-                "status": "error",
-                "schema_version": SCHEMA_VERSION,
-                "project_name": project_name,
-                "claimed_events": len(claimed_events),
-                "error": str(exc),
+                for view_name, view_id in dict(resources["tables"][table_key].get("view_ids_by_name", {})).items()
             }
+            for table_key in TABLE_KEYS
+        }
+        payload["operations_overview_rows"] = _attach_overview_target_links(
+            list(payload.get("operations_overview_rows") or []),
+            target_links=target_links,
+        )
+        payload["row_counts"][OVERVIEW_TABLE_KEY] = len(payload["operations_overview_rows"])
+        agent = feishu_agent.FeishuAgent()
+        projects_table_id = resources["tables"][PROJECTS_TABLE_KEY]["table_id"]
+        tasks_table_id = resources["tables"][TASKS_TABLE_KEY]["table_id"]
+        overview_table_id = resources["tables"][OVERVIEW_TABLE_KEY]["table_id"]
+        app_token = resources["app_token"]
+        projects_result = _sync_table_rows(
+            agent,
+            app_token=app_token,
+            table_id=projects_table_id,
+            desired_rows=payload["projects_overview_rows"],
+        )
+        tasks_result = _sync_table_rows(
+            agent,
+            app_token=app_token,
+            table_id=tasks_table_id,
+            desired_rows=payload["tasks_current_rows"],
+        )
+        overview_result = _sync_table_rows(
+            agent,
+            app_token=app_token,
+            table_id=overview_table_id,
+            desired_rows=payload["operations_overview_rows"],
+        )
+        result = {
+            "status": "ok",
+            "schema_version": SCHEMA_VERSION,
+            "project_name": project_name,
+            "trigger": "force_full" if force_full else ("queue" if claimed_events else "reconcile"),
+            "claimed_events": len(claimed_events),
+            "app_token": app_token,
+            "tables": {
+                PROJECTS_TABLE_KEY: projects_result,
+                TASKS_TABLE_KEY: tasks_result,
+                OVERVIEW_TABLE_KEY: overview_result,
+            },
+            "row_counts": payload["row_counts"],
+            "errors": payload.get("errors", []),
+            "target_links": target_links,
+            "synced_at": iso_now(),
+        }
+        save_state(
+            {
+                "version": 1,
+                "last_sync_at": result["synced_at"],
+                "last_status": "ok",
+                "last_error": "",
+                "last_result": result,
+            }
+        )
+        for event in claimed_events:
+            runtime_state.complete_runtime_event(
+                event.get("event_key", ""),
+                claim_token=_text(event.get("claim_token", "")),
+                result={"status": "ok", "synced_at": result["synced_at"]},
+            )
+        return result
+    except Exception as exc:
+        save_state(
+            {
+                "version": 1,
+                "last_sync_at": iso_now(),
+                "last_status": "error",
+                "last_error": str(exc),
+            }
+        )
+        for event in claimed_events:
+            runtime_state.fail_runtime_event(
+                event.get("event_key", ""),
+                claim_token=_text(event.get("claim_token", "")),
+                error=str(exc),
+                retry_after_seconds=60,
+            )
+        return {
+            "status": "error",
+            "schema_version": SCHEMA_VERSION,
+            "project_name": project_name,
+            "claimed_events": len(claimed_events),
+            "error": str(exc),
+        }
 
 
 def plist_escape(value: str) -> str:

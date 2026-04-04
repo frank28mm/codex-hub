@@ -96,6 +96,11 @@ RUNTIME_OWNERSHIP: dict[str, dict[str, Any]] = {
         "feishu_mode": "writable",
         "purpose": "Per-conversation execution lease truth for bridge-level stale detection.",
     },
+    "engine_session_leases": {
+        "owner": "launcher/engine_adapter",
+        "feishu_mode": "read_only",
+        "purpose": "Per-entry engine lease truth that keeps Codex and Claude runtimes isolated while sharing memory.",
+    },
     "growth_action_attempts": {
         "owner": "growth_runtime",
         "feishu_mode": "read_only",
@@ -287,6 +292,31 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS engine_session_leases (
+        lease_key TEXT PRIMARY KEY,
+        project_name TEXT NOT NULL DEFAULT '',
+        binding_scope TEXT NOT NULL DEFAULT '',
+        binding_board_path TEXT NOT NULL DEFAULT '',
+        topic_name TEXT NOT NULL DEFAULT '',
+        engine_name TEXT NOT NULL DEFAULT '',
+        entry_surface TEXT NOT NULL DEFAULT '',
+        launch_source TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        workspace_session_ref TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT '',
+        approval_scope TEXT NOT NULL DEFAULT '',
+        approval_state TEXT NOT NULL DEFAULT '',
+        runtime_root TEXT NOT NULL DEFAULT '',
+        session_runtime_root TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL DEFAULT '',
+        last_progress_at TEXT NOT NULL DEFAULT '',
+        completed_at TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS runtime_events (
         event_key TEXT PRIMARY KEY,
         queue_name TEXT NOT NULL,
@@ -375,6 +405,7 @@ def init_db() -> dict[str, Any]:
             "bridge_settings": scalar(conn, "SELECT COUNT(*) FROM bridge_settings"),
             "bridge_connections": scalar(conn, "SELECT COUNT(*) FROM bridge_connections"),
             "bridge_chat_bindings": scalar(conn, "SELECT COUNT(*) FROM bridge_chat_bindings"),
+            "engine_session_leases": scalar(conn, "SELECT COUNT(*) FROM engine_session_leases"),
             "runtime_events": scalar(conn, "SELECT COUNT(*) FROM runtime_events"),
             "growth_action_attempts": scalar(conn, "SELECT COUNT(*) FROM growth_action_attempts"),
         }
@@ -1226,6 +1257,203 @@ def upsert_approval_token(
     return item
 
 
+def fetch_engine_session_lease(*, lease_key: str) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(lease_key or "").strip()
+    if not normalized_key:
+        return {
+            "lease_key": "",
+            "project_name": "",
+            "binding_scope": "",
+            "binding_board_path": "",
+            "topic_name": "",
+            "engine_name": "",
+            "entry_surface": "",
+            "launch_source": "",
+            "session_id": "",
+            "workspace_session_ref": "",
+            "state": "",
+            "approval_scope": "",
+            "approval_state": "",
+            "runtime_root": "",
+            "session_runtime_root": "",
+            "started_at": "",
+            "last_progress_at": "",
+            "completed_at": "",
+            "metadata": {},
+            "created_at": "",
+            "updated_at": "",
+        }
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM engine_session_leases WHERE lease_key = ?", (normalized_key,)).fetchone()
+    payload = row_to_dict(row)
+    if not payload:
+        empty = fetch_engine_session_lease(lease_key="")
+        empty["lease_key"] = normalized_key
+        return empty
+    return {
+        "lease_key": payload["lease_key"],
+        "project_name": payload["project_name"],
+        "binding_scope": payload["binding_scope"],
+        "binding_board_path": payload["binding_board_path"],
+        "topic_name": payload["topic_name"],
+        "engine_name": payload["engine_name"],
+        "entry_surface": payload["entry_surface"],
+        "launch_source": payload["launch_source"],
+        "session_id": payload["session_id"],
+        "workspace_session_ref": payload["workspace_session_ref"],
+        "state": payload["state"],
+        "approval_scope": payload["approval_scope"],
+        "approval_state": payload["approval_state"],
+        "runtime_root": payload["runtime_root"],
+        "session_runtime_root": payload["session_runtime_root"],
+        "started_at": payload["started_at"],
+        "last_progress_at": payload["last_progress_at"],
+        "completed_at": payload["completed_at"],
+        "metadata": json.loads(payload["metadata_json"]),
+        "created_at": payload["created_at"],
+        "updated_at": payload["updated_at"],
+    }
+
+
+def fetch_engine_session_leases(*, project_name: str = "", limit: int = 100) -> list[dict[str, Any]]:
+    init_db()
+    query_limit = max(1, min(int(limit or 100), 500))
+    clauses = []
+    params: list[Any] = []
+    if project_name:
+        clauses.append("project_name = ?")
+        params.append(str(project_name))
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM engine_session_leases
+            {where_sql}
+            ORDER BY updated_at DESC, created_at DESC, lease_key ASC
+            LIMIT ?
+            """,
+            (*params, query_limit),
+        ).fetchall()
+    payloads = []
+    for row in rows_to_dicts(rows):
+        payloads.append(
+            {
+                "lease_key": row["lease_key"],
+                "project_name": row["project_name"],
+                "binding_scope": row["binding_scope"],
+                "binding_board_path": row["binding_board_path"],
+                "topic_name": row["topic_name"],
+                "engine_name": row["engine_name"],
+                "entry_surface": row["entry_surface"],
+                "launch_source": row["launch_source"],
+                "session_id": row["session_id"],
+                "workspace_session_ref": row["workspace_session_ref"],
+                "state": row["state"],
+                "approval_scope": row["approval_scope"],
+                "approval_state": row["approval_state"],
+                "runtime_root": row["runtime_root"],
+                "session_runtime_root": row["session_runtime_root"],
+                "started_at": row["started_at"],
+                "last_progress_at": row["last_progress_at"],
+                "completed_at": row["completed_at"],
+                "metadata": json.loads(row["metadata_json"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    return payloads
+
+
+def upsert_engine_session_lease(
+    *,
+    lease_key: str,
+    project_name: str = "",
+    binding_scope: str = "",
+    binding_board_path: str = "",
+    topic_name: str = "",
+    engine_name: str = "",
+    entry_surface: str = "",
+    launch_source: str = "",
+    session_id: str = "",
+    workspace_session_ref: str = "",
+    state: str = "",
+    approval_scope: str = "",
+    approval_state: str = "",
+    runtime_root: str = "",
+    session_runtime_root: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_db()
+    normalized_key = str(lease_key or "").strip()
+    if not normalized_key:
+        raise ValueError("lease_key is required")
+    metadata = metadata or {}
+    now = iso_now()
+    existing = fetch_engine_session_lease(lease_key=normalized_key)
+    started_at = str(existing.get("started_at") or "").strip() or now
+    completed_at = str(existing.get("completed_at") or "").strip()
+    normalized_state = str(state or "").strip()
+    if normalized_state in {"completed", "failed", "aborted", "released"} and not completed_at:
+        completed_at = now
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO engine_session_leases (
+                lease_key, project_name, binding_scope, binding_board_path, topic_name,
+                engine_name, entry_surface, launch_source, session_id, workspace_session_ref,
+                state, approval_scope, approval_state, runtime_root, session_runtime_root,
+                started_at, last_progress_at, completed_at, metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lease_key) DO UPDATE SET
+                project_name=excluded.project_name,
+                binding_scope=excluded.binding_scope,
+                binding_board_path=excluded.binding_board_path,
+                topic_name=excluded.topic_name,
+                engine_name=excluded.engine_name,
+                entry_surface=excluded.entry_surface,
+                launch_source=excluded.launch_source,
+                session_id=excluded.session_id,
+                workspace_session_ref=excluded.workspace_session_ref,
+                state=excluded.state,
+                approval_scope=excluded.approval_scope,
+                approval_state=excluded.approval_state,
+                runtime_root=excluded.runtime_root,
+                session_runtime_root=excluded.session_runtime_root,
+                started_at=excluded.started_at,
+                last_progress_at=excluded.last_progress_at,
+                completed_at=excluded.completed_at,
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                normalized_key,
+                project_name,
+                binding_scope,
+                binding_board_path,
+                topic_name,
+                engine_name,
+                entry_surface,
+                launch_source,
+                session_id,
+                workspace_session_ref,
+                normalized_state,
+                approval_scope,
+                approval_state,
+                runtime_root,
+                session_runtime_root,
+                started_at,
+                now,
+                completed_at,
+                json_text(metadata),
+                str(existing.get("created_at") or "").strip() or now,
+                now,
+            ),
+        )
+    return fetch_engine_session_lease(lease_key=normalized_key)
+
+
 def fetch_bridge_messages(
     *,
     bridge: str = "feishu",
@@ -2055,6 +2283,7 @@ def fetch_runtime_summary() -> dict[str, Any]:
             "bridge_connection_count": scalar(conn, "SELECT COUNT(*) FROM bridge_connections"),
             "bridge_chat_binding_count": scalar(conn, "SELECT COUNT(*) FROM bridge_chat_bindings"),
             "bridge_execution_lease_count": scalar(conn, "SELECT COUNT(*) FROM bridge_execution_leases"),
+            "engine_session_lease_count": scalar(conn, "SELECT COUNT(*) FROM engine_session_leases"),
             "runtime_event_count": scalar(conn, "SELECT COUNT(*) FROM runtime_events"),
             "growth_action_attempt_count": scalar(conn, "SELECT COUNT(*) FROM growth_action_attempts"),
             "runtime_queue": queue_status,
@@ -2328,6 +2557,7 @@ def feishu_runtime_contract() -> dict[str, Any]:
         "truth_source": "obsidian_vault",
         "bitable_mode": "read_only_projection",
         "writable_tables": ["bridge_messages", "delivery_status", "bridge_execution_leases"],
+        "engine_tables": ["engine_session_leases"],
         "reserved_tables": ["approval_tokens", "sidecar_receipts"],
         "read_only_tables": ["review_items", "coordination_items"],
         "queue_tables": ["runtime_events"],

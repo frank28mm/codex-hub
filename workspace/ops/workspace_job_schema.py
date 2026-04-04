@@ -461,6 +461,8 @@ class HarnessSnapshot:
     run_tree: dict[str, Any] = field(default_factory=dict)
     delivery_contract: dict[str, Any] = field(default_factory=dict)
     execution_boundary: dict[str, Any] = field(default_factory=dict)
+    engine_adapter: dict[str, Any] = field(default_factory=dict)
+    engine_session_contract: dict[str, Any] = field(default_factory=dict)
     instruction_surface: dict[str, Any] = field(default_factory=dict)
     extension_manifest: dict[str, Any] = field(default_factory=dict)
     workflow_manifest: dict[str, Any] = field(default_factory=dict)
@@ -481,6 +483,8 @@ class HarnessSnapshot:
             "run_tree": dict(self.run_tree),
             "delivery_contract": dict(self.delivery_contract),
             "execution_boundary": dict(self.execution_boundary),
+            "engine_adapter": dict(self.engine_adapter),
+            "engine_session_contract": dict(self.engine_session_contract),
             "instruction_surface": dict(self.instruction_surface),
             "extension_manifest": dict(self.extension_manifest),
             "workflow_manifest": dict(self.workflow_manifest),
@@ -599,6 +603,127 @@ def execution_boundary_payload(payload: dict[str, Any] | None) -> dict[str, Any]
         requires_approval=bool(data.get("requires_approval", False)),
         expected_scope=str(data.get("expected_scope", "")).strip(),
         monitor_mode=str(data.get("monitor_mode", "runtime_state")).strip() or "runtime_state",
+        metadata=_payload_dict(data.get("metadata")),
+    ).to_dict()
+
+
+@dataclass(frozen=True)
+class EngineAdapterManifest:
+    adapter_id: str
+    engine_name: str
+    entry_surface: str
+    launcher_path: str = ""
+    shared_memory_roots: list[str] = field(default_factory=list)
+    isolated_runtime_root: str = ""
+    session_namespace: str = ""
+    lease_namespace: str = ""
+    approval_namespace: str = ""
+    supports_resume: bool = True
+    broker_actions: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "adapter_id": str(self.adapter_id).strip(),
+            "engine_name": str(self.engine_name).strip(),
+            "entry_surface": str(self.entry_surface).strip(),
+            "launcher_path": str(self.launcher_path).strip(),
+            "shared_memory_roots": _normalize_string_list(self.shared_memory_roots),
+            "isolated_runtime_root": str(self.isolated_runtime_root).strip(),
+            "session_namespace": str(self.session_namespace).strip(),
+            "lease_namespace": str(self.lease_namespace).strip(),
+            "approval_namespace": str(self.approval_namespace).strip(),
+            "supports_resume": bool(self.supports_resume),
+            "broker_actions": _normalize_string_list(self.broker_actions),
+            "metadata": _normalize_metadata(self.metadata),
+        }
+
+
+def engine_adapter_manifest_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    data = _payload_dict(payload)
+    return EngineAdapterManifest(
+        adapter_id=str(data.get("adapter_id", "")).strip(),
+        engine_name=str(data.get("engine_name", "")).strip(),
+        entry_surface=str(data.get("entry_surface", "")).strip(),
+        launcher_path=str(data.get("launcher_path", "")).strip(),
+        shared_memory_roots=_normalize_string_list(data.get("shared_memory_roots")),
+        isolated_runtime_root=str(data.get("isolated_runtime_root", "")).strip(),
+        session_namespace=str(data.get("session_namespace", "")).strip(),
+        lease_namespace=str(data.get("lease_namespace", "")).strip(),
+        approval_namespace=str(data.get("approval_namespace", "")).strip(),
+        supports_resume=bool(data.get("supports_resume", True)),
+        broker_actions=_normalize_string_list(data.get("broker_actions")),
+        metadata=_payload_dict(data.get("metadata")),
+    ).to_dict()
+
+
+@dataclass(frozen=True)
+class EngineSessionContract:
+    engine_name: str
+    entry_surface: str
+    launch_source: str = ""
+    project_name: str = ""
+    binding_scope: str = ""
+    binding_board_path: str = ""
+    topic_name: str = ""
+    workspace_session_ref: str = ""
+    engine_session_id: str = ""
+    lease_key: str = ""
+    lease_status: str = ""
+    approval_scope: str = ""
+    approval_state: str = ""
+    shared_memory_roots: list[str] = field(default_factory=list)
+    isolated_runtime_root: str = ""
+    session_runtime_root: str = ""
+    projection_root: str = ""
+    scratch_root: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "engine_name": str(self.engine_name).strip(),
+            "entry_surface": str(self.entry_surface).strip(),
+            "launch_source": str(self.launch_source).strip(),
+            "project_name": str(self.project_name).strip(),
+            "binding_scope": str(self.binding_scope).strip(),
+            "binding_board_path": str(self.binding_board_path).strip(),
+            "topic_name": str(self.topic_name).strip(),
+            "workspace_session_ref": str(self.workspace_session_ref).strip(),
+            "engine_session_id": str(self.engine_session_id).strip(),
+            "lease_key": str(self.lease_key).strip(),
+            "lease_status": str(self.lease_status).strip(),
+            "approval_scope": str(self.approval_scope).strip(),
+            "approval_state": str(self.approval_state).strip(),
+            "shared_memory_roots": _normalize_string_list(self.shared_memory_roots),
+            "isolated_runtime_root": str(self.isolated_runtime_root).strip(),
+            "session_runtime_root": str(self.session_runtime_root).strip(),
+            "projection_root": str(self.projection_root).strip(),
+            "scratch_root": str(self.scratch_root).strip(),
+            "metadata": _normalize_metadata(self.metadata),
+        }
+
+
+def engine_session_contract_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    data = _payload_dict(payload)
+    return EngineSessionContract(
+        engine_name=str(data.get("engine_name", "")).strip(),
+        entry_surface=str(data.get("entry_surface", "")).strip(),
+        launch_source=str(data.get("launch_source", "")).strip(),
+        project_name=str(data.get("project_name", "")).strip(),
+        binding_scope=str(data.get("binding_scope", "")).strip(),
+        binding_board_path=str(data.get("binding_board_path", "")).strip(),
+        topic_name=str(data.get("topic_name", "")).strip(),
+        workspace_session_ref=str(data.get("workspace_session_ref", "")).strip(),
+        engine_session_id=str(data.get("engine_session_id", "")).strip(),
+        lease_key=str(data.get("lease_key", "")).strip(),
+        lease_status=str(data.get("lease_status", "")).strip(),
+        approval_scope=str(data.get("approval_scope", "")).strip(),
+        approval_state=str(data.get("approval_state", "")).strip(),
+        shared_memory_roots=_normalize_string_list(data.get("shared_memory_roots")),
+        isolated_runtime_root=str(data.get("isolated_runtime_root", "")).strip(),
+        session_runtime_root=str(data.get("session_runtime_root", "")).strip(),
+        projection_root=str(data.get("projection_root", "")).strip(),
+        scratch_root=str(data.get("scratch_root", "")).strip(),
         metadata=_payload_dict(data.get("metadata")),
     ).to_dict()
 

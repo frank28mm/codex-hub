@@ -5,10 +5,22 @@ import argparse
 import json
 import os
 from pathlib import Path
-import tomllib
+import sys
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import yaml
+
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:  # pragma: no cover
+        tomllib = None  # type: ignore[assignment]
 
 
 WORKSPACE_ROOT = Path(
@@ -35,7 +47,7 @@ def _default_reasoning_catalog() -> list[dict[str, str]]:
 
 
 def _load_user_config() -> dict[str, Any]:
-    if not USER_CONFIG_PATH.exists():
+    if not USER_CONFIG_PATH.exists() or tomllib is None:
         return {}
     try:
         return tomllib.loads(USER_CONFIG_PATH.read_text(encoding="utf-8"))

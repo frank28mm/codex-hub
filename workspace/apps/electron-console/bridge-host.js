@@ -88,7 +88,6 @@ function deriveLiveFreshness(statusPayload = {}) {
   const eventCandidates = [
     parseIsoTimestamp(statusPayload.last_event_at),
     parseIsoTimestamp(statusPayload.connected_at),
-    parseIsoTimestamp(statusPayload.updated_at),
   ].filter((value) => Number.isFinite(value));
   const eventAt = eventCandidates.length ? Math.max(...eventCandidates) : Number.NaN;
   const stale =

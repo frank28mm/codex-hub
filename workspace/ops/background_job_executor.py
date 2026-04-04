@@ -271,6 +271,9 @@ def _render_progress_markdown(
         f"- current_focus: {task_spec.get('current_focus', '')}",
         f"- last_decision: `{last_decision}`",
         f"- last_run_id: `{last_run_id}`",
+        f"- task_family: `{task_spec.get('task_family', '') or 'n/a'}`",
+        f"- family_source: `{task_spec.get('family_source', '') or 'n/a'}`",
+        f"- family_resolution_reason: `{task_spec.get('family_resolution_reason', '') or 'n/a'}`",
         f"- next_wake_at: `{task_spec.get('next_wake_at', '') or 'n/a'}`",
         f"- blocked_reason: `{task_spec.get('blocked_reason', '') or 'n/a'}`",
         "",
@@ -368,6 +371,9 @@ def initialize_program_scaffold(
         "wake_policy": previous_wake_policy,
         "iteration_count": iteration,
         "current_focus": str(current_focus_item.get("summary", "")).strip() or str(job.get("task_item", "")).strip(),
+        "task_family": str(job.get("task_family", "")).strip(),
+        "family_source": str(job.get("family_source", "")).strip(),
+        "family_resolution_reason": str(job.get("family_resolution_reason", "")).strip(),
         "subgoals": subgoals,
         "updated_at": iso_now_local(),
         "last_run_id": run_context["run_id"],
@@ -917,7 +923,7 @@ def _run_execution_packet(packet: dict[str, Any], job: dict[str, Any]) -> dict[s
                 "timed_out": True,
                 "error_type": "command_timeout",
             }
-    if kind == "codex_exec":
+    if kind in {"codex_exec", "engine_exec", "engine_resume"}:
         prompt = str(packet.get("prompt", "")).strip()
         if not prompt:
             return {
@@ -927,14 +933,19 @@ def _run_execution_packet(packet: dict[str, Any], job: dict[str, Any]) -> dict[s
                 "exit_code": None,
                 "duration_ms": 0,
                 "stdout_tail": "",
-                "stderr_tail": "codex_exec packet requires a prompt",
+                "stderr_tail": f"{kind} packet requires a prompt",
             }
+        broker_action = {
+            "codex_exec": "codex-exec",
+            "engine_exec": "engine-exec",
+            "engine_resume": "engine-resume",
+        }[kind]
         command = [
             sys.executable,
             str(REPO_ROOT / "ops" / "local_broker.py"),
             "command-center",
             "--action",
-            "codex-exec",
+            broker_action,
             "--project-name",
             str(packet.get("project_name", "")).strip() or str(job.get("project_name", "")).strip(),
             "--source",
@@ -942,6 +953,25 @@ def _run_execution_packet(packet: dict[str, Any], job: dict[str, Any]) -> dict[s
             "--prompt",
             prompt,
         ]
+        if kind in {"engine_exec", "engine_resume"}:
+            engine_name = str(packet.get("engine_name", "")).strip() or "claude"
+            command.extend(["--engine-name", engine_name])
+            entry_surface = str(packet.get("entry_surface", "")).strip()
+            if entry_surface:
+                command.extend(["--entry-surface", entry_surface])
+        if kind == "engine_resume":
+            session_id = str(packet.get("session_id", "")).strip()
+            if not session_id:
+                return {
+                    "label": label,
+                    "kind": kind,
+                    "status": "error",
+                    "exit_code": None,
+                    "duration_ms": 0,
+                    "stdout_tail": "",
+                    "stderr_tail": "engine_resume packet requires a session_id",
+                }
+            command.extend(["--session-id", session_id])
         execution_profile = str(packet.get("execution_profile", "")).strip() or "background-job"
         if execution_profile:
             command.extend(["--execution-profile", execution_profile])
@@ -1081,6 +1111,8 @@ def _execution_failure_metadata(execution_results: list[dict[str, Any]]) -> dict
 
 
 def run_implementation_loop(job: dict[str, Any]) -> dict[str, Any]:
+    if not _implementation_tracks(job):
+        raise ValueError("implementation_loop requires non-empty implementation_tracks; projector contract bug")
     stage = _current_program_stage(job)
     focus = job_focus(job) or str(job.get("task_item", "")).strip()
     track = _track_for_focus(job, focus)
@@ -2307,6 +2339,12 @@ def render_report(
         )
     if implementation_payload:
         lines.extend(["## 当前阶段", ""])
+        if str(task_spec_snapshot.get("task_family", "")).strip():
+            lines.append(f"- task_family: `{task_spec_snapshot.get('task_family', '')}`")
+            lines.append(f"- family_source: `{task_spec_snapshot.get('family_source', '') or 'n/a'}`")
+            lines.append(
+                f"- family_resolution_reason: `{task_spec_snapshot.get('family_resolution_reason', '') or 'n/a'}`"
+            )
         lines.append(f"- stage: `{implementation_payload.get('current_stage', '')}`")
         lines.append(f"- current_focus: {implementation_payload.get('current_focus', '')}")
         for item in implementation_payload.get("current_truth", []):
@@ -3593,6 +3631,9 @@ def _build_workflow_manifest(
             "execution_profile": str(job.get("execution_profile", "")).strip()
             or str(job.get("executor_kind", "")).strip(),
             "blocked_reason": blocked_reason,
+            "task_family": str(job.get("task_family", "")).strip(),
+            "family_source": str(job.get("family_source", "")).strip(),
+            "family_resolution_reason": str(job.get("family_resolution_reason", "")).strip(),
         },
     ).to_dict()
 
@@ -3627,6 +3668,9 @@ def _build_instruction_migration(job: dict[str, Any]) -> dict[str, Any]:
         metadata={
             "project_name": str(job.get("project_name", "")).strip(),
             "task_id": str(job.get("task_id", "")).strip(),
+            "task_family": str(job.get("task_family", "")).strip(),
+            "family_source": str(job.get("family_source", "")).strip(),
+            "family_resolution_reason": str(job.get("family_resolution_reason", "")).strip(),
         },
     ).to_dict()
 
@@ -3666,6 +3710,9 @@ def _build_open_source_boundary(job: dict[str, Any]) -> dict[str, Any]:
         metadata={
             "project_name": str(job.get("project_name", "")).strip(),
             "task_id": str(job.get("task_id", "")).strip(),
+            "task_family": str(job.get("task_family", "")).strip(),
+            "family_source": str(job.get("family_source", "")).strip(),
+            "family_resolution_reason": str(job.get("family_resolution_reason", "")).strip(),
         },
     ).to_dict()
 

@@ -1,0 +1,411 @@
+version: 1
+
+families:
+  harness_upgrade:
+    family_id: harness_upgrade
+    match_rules:
+      sources:
+        - manual_long_task
+      scopes:
+        - 长任务
+        - 讨论任务
+      keywords_any:
+        - generic 长任务
+        - implementation_tracks
+        - execution_packets
+        - verify_commands
+        - privacy gate
+        - public migration
+        - harness
+      keywords_all: []
+      regex_any: []
+    program_defaults:
+      executor_kind: implementation_loop
+      automation_mode: background_assist
+      allowed_actions: [read, write_code, run_tests, write_report, write_board]
+      delivery_targets: [board, report]
+      gate_policy: none
+      max_rounds: 4
+      time_budget_minutes: 20
+      subgoal_schema_version: 2
+    track_templates:
+      - subgoal_id: generic-harness-contract
+        summary_template: 收口 generic long task family contract
+        current_truth_templates:
+          - 当前 generic manual_long_task 只会投出薄 skeleton，缺 implementation tracks。
+          - 当前范围：{scope}
+        target_files_templates:
+          - "{workspace_root}/ops/board_job_projector.py"
+          - "{workspace_root}/tests/test_background_job_executor.py"
+        execute_actions:
+          - 补 family 判定，让 generic manual_long_task 不再只落 research brief。
+          - 让 projector 能为这类任务自动合成 implementation tracks。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          pytest_commands:
+            - label: verify-generic-harness-contract
+              command_template: "python3 -m pytest -q {workspace_root}/tests/test_background_job_executor.py -k 'registry_family or harness_upgrade'"
+              timeout_seconds: 180
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若 family 判定过宽，先收紧到 manual_long_task / 长任务 / 讨论任务。
+          - 若影响现有显式 TASK_JOB_SPECS，保持显式 spec 优先级不变。
+        boundary_notes:
+          - 保持显式 TASK_JOB_SPECS 与 pointer harness frontmatter 优先。
+          - 不要让非 runnable 状态任务被自动投影成 background job。
+      - subgoal_id: execution-packets-and-verifiers
+        summary_template: 为 generic long task 合成 execution packets 与 verify contract
+        current_truth_templates:
+          - 当前 implementation loop 在 verify 阶段会因为 verify_commands 缺失而停住。
+          - execution_packets 需要能给 Codex 一条最小可执行的推进路径。
+        target_files_templates:
+          - "{workspace_root}/ops/board_job_projector.py"
+          - "{workspace_root}/ops/background_job_executor.py"
+          - "{workspace_root}/tests/test_background_job_executor.py"
+        execute_actions:
+          - 为 generic manual_long_task 合成 codex_exec execution packets。
+          - 为 generic tracks 合成最小 report/smoke verify contract。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          pytest_commands:
+            - label: verify-generic-execution-contract
+              command_template: "python3 -m pytest -q {workspace_root}/tests/test_background_job_executor.py -k 'runtime_contract_surfaces_task_family_metadata or materializes_execution_packets_and_verify_commands_from_family_blueprint'"
+              timeout_seconds: 180
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若 verify 过弱，至少要求 latest.md 与 latest-smoke 都带当前 task/focus。
+          - 若 execute packet 容易串会话，保持 no_auto_resume。
+        boundary_notes:
+          - execution packet 必须保持 background-job profile。
+          - verify contract 应该只依赖本地 report/smoke 与稳定测试入口。
+      - subgoal_id: public-migration-privacy-gate
+        summary_template: 为公开迁移类长任务补 privacy 与 public-safe 边界
+        current_truth_templates:
+          - 私有到公开迁移类任务需要额外 public-safe / privacy boundary。
+          - 当前 generic spec 没有把这些边界显式收进 track contract。
+        target_files_templates:
+          - "{workspace_root}/ops/board_job_projector.py"
+          - "{workspace_root}/ops/background_job_executor.py"
+          - "{workspace_root}/tests/test_background_job_executor.py"
+        execute_actions:
+          - 为公开迁移 family 合成 privacy/public-safe guardrails 与 target files。
+          - 把 open-source boundary 的默认迁移顺序与 private-only 提示显式透出。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          pytest_commands:
+            - label: verify-public-migration-boundary
+              command_template: "python3 -m pytest -q {workspace_root}/tests/test_background_job_executor.py -k 'public_migration_family or runtime_contract_surfaces_task_family_metadata'"
+              timeout_seconds: 180
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若公开迁移边界过泛，先收紧到开源/公开版/私有/迁移关键词命中的任务。
+          - 若 privacy gate 还不能硬性执行，至少先把它收成 implementation track 和 report evidence。
+        boundary_notes:
+          - 不暴露个人项目、个人资源与私有凭据。
+          - 保留公开版产品化能力，不用私有文件整块覆盖公开实现。
+    stop_conditions:
+      - approval_required
+      - blocked
+      - human_choice_required
+      - needs_context
+    metadata_defaults:
+      safety_boundary: public_safe_and_private_guarded
+      task_family: harness_upgrade
+      family_source: registry
+
+  install_readiness:
+    family_id: install_readiness
+    match_rules:
+      sources:
+        - manual_long_task
+      scopes:
+        - 长任务
+        - 讨论任务
+      keywords_any:
+        - 安装
+        - 依赖
+        - bootstrap
+        - accept
+        - 验收
+        - 环境前置
+        - 一键检测
+        - 一键安装
+        - 部署
+      keywords_all: []
+      regex_any: []
+    program_defaults:
+      executor_kind: implementation_loop
+      automation_mode: background_assist
+      allowed_actions: [read, write_code, run_tests, write_report, write_board]
+      delivery_targets: [board, report]
+      gate_policy: none
+      max_rounds: 4
+      time_budget_minutes: 20
+      subgoal_schema_version: 2
+    track_templates:
+      - subgoal_id: dependency-audit
+        summary_template: 盘点开源版真实依赖与前置条件
+        current_truth_templates:
+          - 需要区分可自动安装、需人工准备、需账号授权的依赖。
+          - 当前下一步：{next_action}
+        target_files_templates:
+          - "{workspace_root}/ops/bootstrap_workspace_hub.py"
+          - "{workspace_root}/ops/accept_product.py"
+          - "{workspace_root}/README.md"
+        execute_actions:
+          - 梳理新手从零部署 Codex Hub 所需的真实依赖层与缺口。
+          - 固定 bootstrap 与 accept 目前覆盖不到的前置条件。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          pytest_commands:
+            - label: verify-install-readiness-family
+              command_template: "python3 -m pytest -q {workspace_root}/tests/test_background_job_executor.py -k 'install_readiness_family'"
+              timeout_seconds: 180
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若依赖过多，先按可自动安装 / 需人工准备 / 需授权三层分类。
+        boundary_notes:
+          - 公开版不依赖作者本机私有增强部署。
+          - 明确哪些前置依赖可以自动补齐，哪些只能提示用户完成。
+      - subgoal_id: bootstrap-and-accept-gap-closure
+        summary_template: 补齐 bootstrap / accept 的检测与安装缺口
+        current_truth_templates:
+          - 当前 bootstrap 与 accept 已有基础链路，但覆盖面还不够强。
+          - 需要把安装、检测、验收链路收成更完整的一键路径。
+        target_files_templates:
+          - "{workspace_root}/ops/bootstrap_workspace_hub.py"
+          - "{workspace_root}/ops/accept_product.py"
+        execute_actions:
+          - 补齐缺失的依赖检测、自动安装与明确阻塞提示。
+          - 让 accept_product 对用户安装成功更有说明力。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          pytest_commands:
+            - label: verify-bootstrap-accept-gap
+              command_template: "python3 -m pytest -q {workspace_root}/tests/test_background_job_executor.py -k 'install_readiness_family'"
+              timeout_seconds: 180
+            - label: verify-accept-product
+              command_template: "python3 {workspace_root}/ops/accept_product.py run"
+              timeout_seconds: 240
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若某些依赖必须人工授权，明确提示不要伪装成自动完成。
+        boundary_notes:
+          - 优先自动补齐标准可安装依赖。
+          - 无法自动化的账号授权必须显式暴露而不是静默跳过。
+    stop_conditions:
+      - approval_required
+      - blocked
+      - human_choice_required
+      - needs_context
+    metadata_defaults:
+      safety_boundary: install_readiness
+      task_family: install_readiness
+      family_source: registry
+
+  public_migration:
+    family_id: public_migration
+    match_rules:
+      sources:
+        - manual_long_task
+      scopes:
+        - 长任务
+        - 讨论任务
+      keywords_any:
+        - 开源
+        - 公开版
+        - 私有
+        - 迁移
+        - manual-port
+        - unmanaged_shared_paths
+        - promotion
+        - public
+      keywords_all: []
+      regex_any: []
+    program_defaults:
+      executor_kind: implementation_loop
+      automation_mode: background_assist
+      allowed_actions: [read, write_code, run_tests, write_report, write_board]
+      delivery_targets: [board, report]
+      gate_policy: none
+      max_rounds: 4
+      time_budget_minutes: 20
+      subgoal_schema_version: 2
+    track_templates:
+      - subgoal_id: migration-diff-surface
+        summary_template: 锁定公开迁移差异面与 safe-port 边界
+        current_truth_templates:
+          - 需要区分可迁移能力与必须保留私有的信息边界。
+          - 公开版产品化能力不能被私有实现回退。
+        target_files_templates:
+          - "{project_board_path}"
+          - "{source_path}"
+        execute_actions:
+          - 锁定私有/公开当前差异面与 public-safe 边界。
+          - 把 manual-port 与应保留的公开版差异分清楚。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若差异面过大，先切出最小 public-safe slice。
+        boundary_notes:
+          - 不暴露个人项目、个人资源、个人路径与敏感信息。
+          - 保留公开版安装/README/bootstrap 等产品化差异。
+      - subgoal_id: migration-port-and-verify
+        summary_template: 按切片迁移并完成最小验证
+        current_truth_templates:
+          - 迁移任务要边迁移边验证，不能只停在对比报告。
+        target_files_templates:
+          - "{project_board_path}"
+        execute_actions:
+          - 选择一个最小 public-safe slice 实施迁移。
+          - 完成对应回归或 acceptance 验证。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若当前 slice 过大，缩小到单文件或单 contract。
+        boundary_notes:
+          - 迁移以合并能力为主，不做整文件覆盖。
+    stop_conditions:
+      - approval_required
+      - blocked
+      - human_choice_required
+      - needs_context
+    metadata_defaults:
+      safety_boundary: public_safe_and_private_guarded
+      task_family: public_migration
+      family_source: registry
+
+  generic_manual_long_task:
+    family_id: generic_manual_long_task
+    match_rules:
+      sources: []
+      scopes: []
+      keywords_any: []
+      keywords_all: []
+      regex_any: []
+    program_defaults:
+      executor_kind: implementation_loop
+      automation_mode: background_assist
+      allowed_actions: [read, write_code, run_tests, write_report, write_board]
+      delivery_targets: [board, report]
+      gate_policy: none
+      max_rounds: 3
+      time_budget_minutes: 20
+      subgoal_schema_version: 2
+    track_templates:
+      - subgoal_id: scope-and-contract
+        summary_template: 收口当前长任务的 contract 与最小边界
+        current_truth_templates:
+          - 当前范围：{scope}
+          - 当前下一步：{next_action}
+        target_files_templates:
+          - "{project_board_path}"
+        execute_actions:
+          - 澄清当前任务的 contract、边界和交付物。
+          - 把下一步收成单焦点可执行入口。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若任务仍然发散，先缩成单个最小焦点。
+        boundary_notes:
+          - 保持板面与报告写回可解释。
+      - subgoal_id: implementation-and-verify
+        summary_template: 推进最小实现包并保留验证入口
+        current_truth_templates:
+          - generic manual_long_task 需要有 execution packet 与 verify contract，才能真正循环到底。
+        target_files_templates:
+          - "{project_board_path}"
+        execute_actions:
+          - 围绕当前焦点推进最小实现包。
+          - 保留下一轮可直接执行的验证入口。
+        execution_packet_template:
+          kind: codex_exec
+          label_template: "{subgoal_id}"
+          source: background_job_harness
+          execution_profile: background-job
+          reasoning_effort: medium
+          timeout_seconds: 900
+          no_auto_resume: true
+        verify_contract:
+          include_report_verifier: true
+          report_summary_template: "{summary}"
+        adapt_actions:
+          - 若实现失败，先在 adapt 中收窄边界再重试。
+        boundary_notes:
+          - 优先保留最小可验证路径，而不是一次性摊开完整范围。
+    stop_conditions:
+      - approval_required
+      - blocked
+      - human_choice_required
+      - needs_context
+    metadata_defaults:
+      safety_boundary: generic_manual_long_task
+      task_family: generic_manual_long_task
+      family_source: registry_fallback

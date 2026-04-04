@@ -537,3 +537,121 @@ def test_run_sync_consumes_queue_and_upserts_projection_rows(sample_env, monkeyp
     remaining = next(iter(tasks_table["records"].values()))
     assert remaining["fields"]["任务 ID"] == "SP-1"
     assert runtime_state.fetch_runtime_event(queued_second["event_key"])["status"] == "completed"
+
+
+def test_run_sync_holds_workspace_lock_only_for_local_snapshot(sample_env, monkeypatch) -> None:
+    lock_state = {"held": False}
+    call_order: list[str] = []
+    saved_states: list[tuple[bool, dict[str, Any]]] = []
+
+    class DummyLock:
+        def __enter__(self):
+            assert lock_state["held"] is False
+            lock_state["held"] = True
+            call_order.append("lock_enter")
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            call_order.append("lock_exit")
+            lock_state["held"] = False
+            return False
+
+    def fake_snapshot(project_name=""):
+        assert project_name == ""
+        assert lock_state["held"] is True
+        call_order.append("snapshot")
+        return {
+            "ok": True,
+            "row_counts": {
+                "projects_overview": 1,
+                "tasks_current": 1,
+                "operations_overview": 1,
+            },
+            "projects_overview_rows": [
+                {
+                    "projection_key": "project::SampleProj",
+                    "项目名": "SampleProj",
+                    "状态": "active",
+                    "优先级": "high",
+                    "当前下一步": "Ship it",
+                    "最近更新时间": "2026-03-12",
+                    "活跃专题数": 1,
+                    "未完成任务数": 1,
+                    "阻塞任务数": 0,
+                    "需关注": False,
+                    "项目板链接": "obsidian://project",
+                    "NEXT_ACTIONS 链接": "obsidian://next",
+                }
+            ],
+            "tasks_current_rows": [
+                {
+                    "projection_key": "task::SampleProj::project::SP-1",
+                    "项目": "SampleProj",
+                    "专题": "",
+                    "任务 ID": "SP-1",
+                    "任务标题": "冻结主线契约",
+                    "状态": "doing",
+                    "优先级": "high",
+                    "下一步": "补齐回归测试",
+                    "是否阻塞": False,
+                    "更新时间": "2026-03-12T10:00:00Z",
+                    "来源板链接": "obsidian://project",
+                }
+            ],
+            "operations_overview_rows": [
+                {
+                    "projection_key": "overview::active_tasks",
+                    "指标名称": "当前任务总数",
+                    "指标分组": "任务",
+                    "数值": 1,
+                    "说明": "当前未完成任务总数",
+                    "目标视图": "全部任务",
+                    "目标链接": "https://example.com/tasks",
+                    "是否重点": True,
+                    "更新时间": "2026-03-12T12:00:00Z",
+                }
+            ],
+            "errors": [],
+        }
+
+    def fake_ensure_projection_resources():
+        assert lock_state["held"] is False
+        call_order.append("ensure_resources")
+        return {
+            "app_token": "app_projection",
+            "tables": {
+                "projects_overview": {"table_id": "tbl_projects", "view_ids_by_name": {}},
+                "tasks_current": {"table_id": "tbl_tasks", "view_ids_by_name": {}},
+                "operations_overview": {"table_id": "tbl_overview", "view_ids_by_name": {}},
+            },
+        }
+
+    def fake_sync_table_rows(agent, *, app_token: str, table_id: str, desired_rows):
+        assert lock_state["held"] is False
+        assert app_token == "app_projection"
+        assert desired_rows
+        call_order.append(f"sync:{table_id}")
+        return {"created": len(desired_rows), "updated": 0, "deleted": 0}
+
+    monkeypatch.setattr(feishu_projection, "workspace_lock", lambda: DummyLock())
+    monkeypatch.setattr(feishu_projection, "_claim_projection_events", lambda limit=200: [])
+    monkeypatch.setattr(feishu_projection, "snapshot", fake_snapshot)
+    monkeypatch.setattr(feishu_projection, "ensure_projection_resources", fake_ensure_projection_resources)
+    monkeypatch.setattr(feishu_projection, "_sync_table_rows", fake_sync_table_rows)
+    monkeypatch.setattr(
+        feishu_projection,
+        "save_state",
+        lambda payload: saved_states.append((lock_state["held"], dict(payload))),
+    )
+    monkeypatch.setattr(feishu_projection.feishu_agent, "FeishuAgent", lambda *args, **kwargs: object())
+
+    result = feishu_projection.run_sync(force_full=False)
+
+    assert result["status"] == "ok"
+    assert call_order[:3] == ["lock_enter", "snapshot", "lock_exit"]
+    assert "ensure_resources" in call_order
+    assert "sync:tbl_projects" in call_order
+    assert "sync:tbl_tasks" in call_order
+    assert "sync:tbl_overview" in call_order
+    assert saved_states
+    assert all(held is False for held, _payload in saved_states)

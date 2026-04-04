@@ -176,7 +176,7 @@ function testIdleReconnectCooldownDefersFreshRetry() {
     event_idle_after_seconds: 1800,
   };
   const serviceState = {
-    last_reconnect_attempt_at: new Date(now - 5 * 60_000).toISOString(),
+    last_reconnect_attempt_at: new Date(now - 60_000).toISOString(),
   };
   assert.equal(shouldDeferIdleReconnect(bridgeState, serviceState, now), true);
 }
@@ -194,7 +194,7 @@ function testIdleReconnectCooldownAllowsRetryAfterWindow() {
     event_idle_after_seconds: 1800,
   };
   const serviceState = {
-    last_reconnect_attempt_at: new Date(now - 31 * 60_000).toISOString(),
+    last_reconnect_attempt_at: new Date(now - 4 * 60_000).toISOString(),
   };
   assert.equal(shouldDeferIdleReconnect(bridgeState, serviceState, now), false);
 }
@@ -213,7 +213,7 @@ function testIdleAttentionThreadDoesNotForceImmediateReconnect() {
     event_idle_after_seconds: 1800,
   };
   const serviceState = {
-    last_reconnect_attempt_at: new Date(now - 5 * 60_000).toISOString(),
+    last_reconnect_attempt_at: new Date(now - 60_000).toISOString(),
   };
   assert.equal(shouldDeferIdleReconnect(bridgeState, serviceState, now), true);
 }
