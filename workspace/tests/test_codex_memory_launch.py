@@ -4,6 +4,7 @@ import argparse
 import importlib
 import json
 import subprocess
+import sys
 
 from ops import codex_memory
 
@@ -87,6 +88,76 @@ def test_trigger_dashboard_sync_once_returns_timeout_result(sample_env, monkeypa
     assert "timed out" in (result.stderr or "")
 
 
+def test_trigger_dashboard_sync_once_can_spawn_async(sample_env, monkeypatch) -> None:
+    module = importlib.reload(codex_memory)
+    sync_script = sample_env["workspace_root"] / "ops" / "codex_dashboard_sync.py"
+    sync_script.parent.mkdir(parents=True, exist_ok=True)
+    sync_script.write_text("print('stub')\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    class DummyProcess:
+        pid = 43210
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        return DummyProcess()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+
+    result = module.trigger_dashboard_sync_once(wait=False)
+
+    assert result == {"ok": True, "label": "dashboard sync", "pid": 43210, "mode": "async"}
+    assert captured["command"][0] == sys.executable
+
+
+def test_finalize_launch_triggers_dashboard_sync_async(sample_env, monkeypatch) -> None:
+    module = importlib.reload(codex_memory)
+    printed: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append(" ".join(str(arg) for arg in args)))
+
+    register_args = argparse.Namespace(
+        project_name="SampleProj",
+        prompt="请帮我收口这轮会话",
+        mode="new",
+        resume_session_id="",
+        binding_scope="project",
+        binding_board_path="",
+        topic_name="",
+        rollup_target="",
+        launch_source="feishu",
+        source_chat_ref="feishu:test",
+        source_thread_name="CoCo 私聊",
+        source_thread_label="CoCo 私聊",
+        source_message_id="msg-async-dashboard",
+    )
+    assert module.cmd_register_launch(register_args) == 0
+    launch_id = printed.pop().strip()
+
+    summary_file = sample_env["workspace_root"] / "reply.txt"
+    summary_file.write_text("已经完成。", encoding="utf-8")
+
+    waits: list[bool] = []
+    monkeypatch.setattr(module, "trigger_retrieval_sync_once", lambda: subprocess.CompletedProcess(args=["retrieval"], returncode=0))
+    monkeypatch.setattr(
+        module,
+        "trigger_dashboard_sync_once",
+        lambda *, wait=True: waits.append(wait) or {"ok": True, "mode": "async"},
+    )
+
+    finalize_args = argparse.Namespace(
+        launch_id=launch_id,
+        session_id="sess-async",
+        thread_name="CoCo 私聊",
+        summary_file=str(summary_file),
+        final_status="completed",
+    )
+
+    assert module.cmd_finalize_launch(finalize_args) == 0
+    assert waits == [False]
+
+
 def test_trigger_retrieval_sync_once_requeues_claimed_events_after_timeout(sample_env, monkeypatch) -> None:
     module = importlib.reload(codex_memory)
     from ops import runtime_state
@@ -113,3 +184,26 @@ def test_trigger_retrieval_sync_once_requeues_claimed_events_after_timeout(sampl
     assert result.returncode == 124
     assert event["status"] == "pending"
     assert "timed out" in str(event.get("last_error", ""))
+
+
+def test_trigger_sync_helpers_use_current_python(sample_env, monkeypatch) -> None:
+    module = importlib.reload(codex_memory)
+    dashboard_script = sample_env["workspace_root"] / "ops" / "codex_dashboard_sync.py"
+    retrieval_script = sample_env["workspace_root"] / "ops" / "codex_retrieval.py"
+    dashboard_script.parent.mkdir(parents=True, exist_ok=True)
+    dashboard_script.write_text("print('stub dashboard')\n", encoding="utf-8")
+    retrieval_script.write_text("print('stub retrieval')\n", encoding="utf-8")
+
+    captured: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        captured.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module.trigger_dashboard_sync_once()
+    module.trigger_retrieval_sync_once()
+
+    assert captured[0][0] == sys.executable
+    assert captured[1][0] == sys.executable

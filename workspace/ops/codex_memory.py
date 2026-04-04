@@ -248,7 +248,7 @@ def display_date(text: str) -> str:
 
 
 @contextmanager
-def workspace_lock() -> Any:
+def workspace_lock(*, blocking: bool = True) -> Any:
     global _WORKSPACE_LOCK_OWNER_PID
     global _WORKSPACE_LOCK_DEPTH
     global _WORKSPACE_LOCK_HANDLE
@@ -264,7 +264,11 @@ def workspace_lock() -> Any:
 
     MEMORY_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with MEMORY_LOCK_PATH.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_mode = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(handle.fileno(), lock_mode)
+        except BlockingIOError as exc:
+            raise WorkspaceLockBusy(f"workspace lock is already held: {MEMORY_LOCK_PATH}") from exc
         _WORKSPACE_LOCK_OWNER_PID = current_pid
         _WORKSPACE_LOCK_DEPTH = 1
         _WORKSPACE_LOCK_HANDLE = handle
@@ -366,14 +370,8 @@ def normalize_vault_path(value: str | Path) -> str:
         return ""
     local_root = str(VAULT_ROOT.resolve())
     legacy_root = str(workspace_hub_project.LEGACY_ICLOUD_VAULT_ROOT.resolve())
-    legacy_roots = [
-        legacy_root,
-        "/tmp/legacy-codex-hub-memory",
-    ]
-    for candidate in legacy_roots:
-        if raw.startswith(candidate):
-            raw = f"{local_root}{raw[len(candidate):]}"
-            break
+    if raw.startswith(legacy_root):
+        raw = f"{local_root}{raw[len(legacy_root):]}"
     return str(Path(raw))
 
 
@@ -698,6 +696,168 @@ def _apply_task_updates(rows: list[dict[str, str]], task_updates: list[dict[str,
     return changed
 
 
+TASK_ID_PATTERN = re.compile(r"^([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)-(\d+)$")
+
+
+def _candidate_task_prefixes(rows: list[dict[str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        match = TASK_ID_PATTERN.match(str(row.get("ID", "")).strip())
+        if not match:
+            continue
+        prefix = match.group(1)
+        counts[prefix] = counts.get(prefix, 0) + 1
+    return counts
+
+
+def _fallback_task_prefix(project_name: str) -> str:
+    canonical = canonical_project_name(project_name)
+    if workspace_hub_project.is_workspace_hub_project(canonical):
+        return "WH-OPS"
+    ascii_tokens = re.findall(r"[A-Za-z0-9]+", canonical)
+    if ascii_tokens:
+        token = "".join(part[0].upper() for part in ascii_tokens if part)
+        if token:
+            return f"{token}-LT"
+    return "TASK"
+
+
+def derive_task_prefix(project_name: str, rows: list[dict[str, str]]) -> str:
+    counts = _candidate_task_prefixes(rows)
+    ops_like = {prefix: count for prefix, count in counts.items() if prefix.endswith("-OPS")}
+    if ops_like:
+        return sorted(ops_like.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+    if counts:
+        return sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+    return _fallback_task_prefix(project_name)
+
+
+def allocate_task_id(project_name: str, rows: list[dict[str, str]]) -> str:
+    prefix = derive_task_prefix(project_name, rows)
+    max_index = 0
+    for row in rows:
+        match = TASK_ID_PATTERN.match(str(row.get("ID", "")).strip())
+        if not match or match.group(1) != prefix:
+            continue
+        max_index = max(max_index, int(match.group(2)))
+    return f"{prefix}-{max_index + 1:02d}"
+
+
+def create_harness_task(
+    project_name: str,
+    task_item: str,
+    *,
+    topic_name: str = "",
+    status: str = "doing",
+    deliverable: str = "",
+    next_action: str = "",
+    requested_at: str = "",
+    source: str = "manual_long_task",
+    scope: str = "长任务",
+) -> dict[str, Any]:
+    canonical_project = canonical_project_name(project_name)
+    normalized_status = normalize_task_status(status or "doing")
+    task_item_text = str(task_item or "").strip()
+    if not canonical_project:
+        raise ValueError("project_name_required")
+    if not task_item_text:
+        raise ValueError("task_item_required")
+    binding = resolve_board_binding(canonical_project, topic_name or "")
+    updated_at = requested_at or iso_now()
+    deliverable_text = str(deliverable or "").strip() or "待补充"
+    next_action_text = str(next_action or "").strip() or "进入 discover 并开始推进。"
+    changed_targets: list[str] = []
+    with workspace_lock():
+        project_board = load_project_board(canonical_project)
+        task_id = allocate_task_id(
+            canonical_project,
+            [*project_board["project_rows"], *project_board["rollup_rows"]],
+        )
+        board_path = Path(binding["binding_board_path"])
+        if binding.get("binding_scope") == "topic" and board_path.exists():
+            topic_board = load_topic_board(board_path)
+            topic_rows = topic_board["rows"]
+            topic_rows.insert(
+                0,
+                {
+                    "ID": task_id,
+                    "模块": str(binding.get("topic_name") or topic_name or scope).strip() or "长任务",
+                    "事项": task_item_text,
+                    "状态": normalized_status,
+                    "交付物": deliverable_text,
+                    "审核状态": "",
+                    "审核人": "",
+                    "审核结论": "",
+                    "审核时间": "",
+                    "下一步": next_action_text,
+                    "更新时间": updated_at,
+                    "阻塞/依赖": "",
+                    "上卷ID": task_id,
+                },
+            )
+            save_topic_board(board_path, topic_board["frontmatter"], topic_board["body"], topic_rows)
+            changed_targets.append(str(board_path))
+            project_path = refresh_project_rollups(canonical_project, topic_path=board_path)
+            changed_targets.append(str(project_path))
+        else:
+            project_rows = project_board["project_rows"]
+            project_rows.insert(
+                0,
+                {
+                    "ID": task_id,
+                    "父ID": task_id,
+                    "来源": source,
+                    "范围": str(scope or topic_name or "长任务").strip() or "长任务",
+                    "事项": task_item_text,
+                    "状态": normalized_status,
+                    "交付物": deliverable_text,
+                    "审核状态": "",
+                    "审核人": "",
+                    "审核结论": "",
+                    "审核时间": "",
+                    "下一步": next_action_text,
+                    "更新时间": updated_at,
+                    "指向": str(project_board["path"]),
+                },
+            )
+            save_project_board(
+                project_board["path"],
+                project_board["frontmatter"],
+                project_board["body"],
+                project_rows,
+                project_board["rollup_rows"],
+                project_board.get("gflow_rows", []),
+            )
+            changed_targets.append(str(project_board["path"]))
+        refresh_next_actions_rollup()
+    writeback_binding = {
+        "project_name": canonical_project,
+        "binding_scope": binding.get("binding_scope", "project"),
+        "binding_board_path": binding.get("binding_board_path", ""),
+        "topic_name": binding.get("topic_name", ""),
+        "rollup_target": binding.get("rollup_target", ""),
+        "last_active_at": updated_at,
+    }
+    record_project_writeback(
+        writeback_binding,
+        source="harness_task_create",
+        changed_targets=changed_targets,
+        trigger_dashboard_sync=False,
+    )
+    return {
+        "ok": True,
+        "project_name": canonical_project,
+        "task_id": task_id,
+        "task_item": task_item_text,
+        "task_status": normalized_status,
+        "binding_scope": binding.get("binding_scope", "project"),
+        "binding_board_path": binding.get("binding_board_path", ""),
+        "topic_name": binding.get("topic_name", ""),
+        "rollup_target": binding.get("rollup_target", ""),
+        "changed_targets": changed_targets,
+    }
+
+
 def render_table_section(heading: str, markers: tuple[str, str], headers: list[str], rows: list[dict[str, str]]) -> tuple[str, list[str]]:
     lines = [markers[0], *markdown_table_lines(headers, rows), markers[1]]
     return heading, lines
@@ -725,18 +885,48 @@ def build_current_task_lines(
     project_rows: list[dict[str, str]],
     rollup_rows: list[dict[str, str]],
     gflow_rows: list[dict[str, str]] | None = None,
+    *,
+    project_name: str = "",
 ) -> list[str]:
     grouped = {"todo": [], "doing": [], "blocked": [], "done": []}
     combined = project_rows + rollup_rows + list(gflow_rows or [])
     combined.sort(key=lambda row: (STATUS_ORDER.get(row.get("状态", "todo"), 99), row.get("更新时间", ""), row.get("ID", "")))
+    harness_snapshots: dict[str, dict[str, Any]] = {}
+    if project_name:
+        try:
+            from ops import board_job_projector
+
+            for row in combined:
+                task_id = str(row.get("ID", "")).strip()
+                if not task_id:
+                    continue
+                try:
+                    snapshot = board_job_projector.task_harness_snapshot(project_name, task_id)
+                except Exception:
+                    continue
+                if snapshot:
+                    harness_snapshots[task_id] = snapshot
+        except Exception:
+            harness_snapshots = {}
     for row in combined:
         status = normalize_task_status(row.get("状态", "todo"))
         prefix = "[x]" if status == "done" else "[ ]"
         source = row.get("来源", "project")
         review_status = row.get("审核状态", "")
         review_suffix = f" | 审核：{review_status}" if review_status in {"pending_review", "changes_requested"} else ""
+        harness_suffix = ""
+        snapshot = harness_snapshots.get(str(row.get("ID", "")).strip())
+        if snapshot:
+            snapshot_parts = [f"Harness：{snapshot.get('harness_state', '')}"]
+            if snapshot.get("last_decision"):
+                snapshot_parts.append(f"决策：{snapshot['last_decision']}")
+            if snapshot.get("next_wake_at"):
+                snapshot_parts.append(f"下次唤醒：{display_timestamp(str(snapshot['next_wake_at']))}")
+            if snapshot.get("blocked_reason"):
+                snapshot_parts.append(f"阻塞：{snapshot['blocked_reason']}")
+            harness_suffix = " | " + " | ".join(snapshot_parts)
         grouped.setdefault(status, []).append(
-            f"- {prefix} {row.get('ID', '')} `{source}` {row.get('事项', '')} | 下一步：{row.get('下一步', '待补充')}{review_suffix}"
+            f"- {prefix} {row.get('ID', '')} `{source}` {row.get('事项', '')} | 下一步：{row.get('下一步', '待补充')}{review_suffix}{harness_suffix}"
         )
     lines: list[str] = []
     for status in ["todo", "doing", "blocked", "done"]:
@@ -772,7 +962,12 @@ def project_board_next_action(
     for status in ["doing", "todo", "blocked"]:
         if sections[status]:
             row = sections[status][0]
-            return row.get("事项", "待补充")
+            next_action = str(row.get("下一步", "")).strip()
+            if next_action:
+                return next_action
+            item = str(row.get("事项", "")).strip()
+            if item:
+                return item
     return "待补充"
 
 
@@ -917,7 +1112,17 @@ def save_project_board(
     body = replace_or_append_marked_section(body, "## Project Owned Tasks", AUTO_PROJECT_TASKS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, project_rows))
     body = replace_or_append_marked_section(body, "## Topic Rollups", AUTO_TOPIC_ROLLUPS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, rollup_rows))
     body = replace_or_append_marked_section(body, "## GFlow Runs", AUTO_GFLOW_RUNS_MARKERS, markdown_table_lines(PROJECT_BOARD_HEADERS, gflow_rows or []))
-    body = replace_or_append_marked_section(body, "## 当前任务", AUTO_CURRENT_TASKS_MARKERS, build_current_task_lines(project_rows, rollup_rows, gflow_rows))
+    body = replace_or_append_marked_section(
+        body,
+        "## 当前任务",
+        AUTO_CURRENT_TASKS_MARKERS,
+        build_current_task_lines(
+            project_rows,
+            rollup_rows,
+            gflow_rows,
+            project_name=str(frontmatter.get("project_name", "")).strip(),
+        ),
+    )
     write_text(path, f"{render_frontmatter(frontmatter)}\n\n{body.lstrip()}")
 
 
@@ -1305,12 +1510,38 @@ def _run_sync_trigger(command: list[str], *, cwd: Path, label: str) -> subproces
     return result
 
 
-def trigger_dashboard_sync_once() -> subprocess.CompletedProcess[str] | None:
+def _spawn_sync_trigger(command: list[str], *, cwd: Path, label: str) -> dict[str, Any]:
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        print(f"[codex_memory] {label} spawn failed: {exc}", file=sys.stderr)
+        return {"ok": False, "label": label, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, "label": label, "pid": process.pid, "mode": "async"}
+
+
+class WorkspaceLockBusy(RuntimeError):
+    pass
+
+
+def _python_command(*args: str) -> list[str]:
+    return [sys.executable, *args]
+
+
+def trigger_dashboard_sync_once(*, wait: bool = True) -> subprocess.CompletedProcess[str] | dict[str, Any] | None:
     _refresh_roots()
     sync_script = WORKSPACE_ROOT / "ops" / "codex_dashboard_sync.py"
     if not sync_script.exists():
         return None
-    return _run_sync_trigger(["python3", str(sync_script), "sync-once"], cwd=WORKSPACE_ROOT, label="dashboard sync")
+    command = _python_command(str(sync_script), "sync-once")
+    if not wait:
+        return _spawn_sync_trigger(command, cwd=WORKSPACE_ROOT, label="dashboard sync")
+    return _run_sync_trigger(command, cwd=WORKSPACE_ROOT, label="dashboard sync")
 
 
 def trigger_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | None:
@@ -1319,22 +1550,21 @@ def trigger_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | 
     if not projection_script.exists():
         return None
     return _run_sync_trigger(
-        ["python3", str(projection_script), "run-sync-once"],
+        _python_command(str(projection_script), "run-sync-once"),
         cwd=WORKSPACE_ROOT,
         label="feishu projection sync",
     )
 
 
-def trigger_growth_feishu_projection_sync_once() -> subprocess.CompletedProcess[str] | None:
+def trigger_growth_feishu_projection_sync_once(*, wait: bool = False) -> subprocess.CompletedProcess[str] | dict[str, Any] | None:
     _refresh_roots()
     projection_script = WORKSPACE_ROOT / "ops" / "growth_feishu_projection.py"
     if not projection_script.exists():
         return None
-    return _run_sync_trigger(
-        ["python3", str(projection_script), "run-sync-once"],
-        cwd=WORKSPACE_ROOT,
-        label="growth feishu projection sync",
-    )
+    command = _python_command(str(projection_script), "run-sync-once")
+    if not wait:
+        return _spawn_sync_trigger(command, cwd=WORKSPACE_ROOT, label="growth feishu projection sync")
+    return _run_sync_trigger(command, cwd=WORKSPACE_ROOT, label="growth feishu projection sync")
 
 
 def trigger_growth_operator_surface_report_once() -> subprocess.CompletedProcess[str] | None:
@@ -1344,15 +1574,14 @@ def trigger_growth_operator_surface_report_once() -> subprocess.CompletedProcess
         return None
     output_path = WORKSPACE_ROOT / "reports" / "system" / f"codex-growth-system-operator-snapshot-{dt.date.today().isoformat()}.md"
     return _run_sync_trigger(
-        [
-            "python3",
+        _python_command(
             str(surface_script),
             "report",
             "--project-name",
-            GROWTH_PROJECT_NAME,
+            "增长与营销",
             "--output",
             str(output_path),
-        ],
+        ),
         cwd=WORKSPACE_ROOT,
         label="growth operator surface report",
     )
@@ -1364,15 +1593,14 @@ def trigger_growth_daily_brief_once() -> subprocess.CompletedProcess[str] | None
     if not brief_script.exists():
         return None
     return _run_sync_trigger(
-        [
-            "python3",
+        _python_command(
             str(brief_script),
             "deliver-if-needed",
             "--project-name",
-            GROWTH_PROJECT_NAME,
+            "增长与营销",
             "--chat",
-            GROWTH_CHAT_NAME,
-        ],
+            "增长与营销项目",
+        ),
         cwd=WORKSPACE_ROOT,
         label="growth daily brief",
     )
@@ -1390,7 +1618,7 @@ def trigger_retrieval_sync_once() -> subprocess.CompletedProcess[str] | None:
         lease_seconds=900,
     )
     result = _run_sync_trigger(
-        ["python3", str(retrieval_script), "sync-index"],
+        _python_command(str(retrieval_script), "sync-index"),
         cwd=WORKSPACE_ROOT,
         label="retrieval sync",
     )
@@ -1459,7 +1687,11 @@ def record_project_writeback(
         sort_keys=True,
     )
     event["event_id"] = hashlib.sha1(identity_payload.encode("utf-8")).hexdigest()
-    for queue_name in ("retrieval_sync", "dashboard_sync", "feishu_projection_sync", "growth_feishu_projection_sync"):
+    project_name = str(binding.get("project_name", "")).strip()
+    queue_names = ["retrieval_sync", "dashboard_sync", "feishu_projection_sync"]
+    if project_name == "增长与营销":
+        queue_names.append("growth_feishu_projection_sync")
+    for queue_name in queue_names:
         runtime_state.enqueue_runtime_event(
             queue_name=queue_name,
             event_type="project_writeback",
@@ -1469,15 +1701,61 @@ def record_project_writeback(
         )
     if event["event_id"] not in recent_event_ids(EVENTS_NDJSON):
         append_ndjson(EVENTS_NDJSON, event)
+    event["harness_wake"] = trigger_harness_project_writeback_wake(binding, source=source)
     if trigger_dashboard_sync:
         dashboard_result = trigger_dashboard_sync_once()
         if dashboard_result is None or dashboard_result.returncode == 0:
             trigger_feishu_projection_sync_once()
-            trigger_growth_feishu_projection_sync_once()
-            if str(binding.get("project_name", "")).strip() == GROWTH_PROJECT_NAME:
+            if project_name == "增长与营销":
+                trigger_growth_feishu_projection_sync_once(wait=False)
                 trigger_growth_operator_surface_report_once()
                 trigger_growth_daily_brief_once()
     return event
+
+
+def should_trigger_harness_project_writeback_wake(binding: dict[str, Any], *, source: str) -> bool:
+    project_name = str(binding.get("project_name", "")).strip()
+    if not project_name:
+        return False
+    normalized_source = str(source or "").strip().lower()
+    if not normalized_source:
+        return True
+    if normalized_source == "session-watcher" and any(
+        str(item).strip() for item in binding.get("task_writeback_refs", []) or []
+    ):
+        return False
+    if normalized_source in {"background-job-executor", "harness_task_create"}:
+        return False
+    if normalized_source.startswith("background-job"):
+        return False
+    return True
+
+
+def trigger_harness_project_writeback_wake(binding: dict[str, Any], *, source: str) -> dict[str, Any]:
+    if not should_trigger_harness_project_writeback_wake(binding, source=source):
+        return {
+            "executed": False,
+            "reason": "skipped",
+            "project_name": str(binding.get("project_name", "")).strip(),
+        }
+    try:
+        from ops import background_job_executor
+    except ImportError:  # pragma: no cover
+        import background_job_executor  # type: ignore
+
+    try:
+        return background_job_executor.run_requested_project_wake(
+            str(binding.get("project_name", "")).strip(),
+            reason="project_writeback",
+            trigger_source=source or "project_writeback",
+        )
+    except Exception as exc:  # pragma: no cover - keep writeback path honest but resilient
+        return {
+            "executed": False,
+            "reason": "trigger_failed",
+            "project_name": str(binding.get("project_name", "")).strip(),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def binding_identity(binding: dict[str, Any]) -> str:
@@ -1854,6 +2132,7 @@ def sync_project_layers(binding: dict[str, Any], *, task_updates: list[dict[str,
         project_board = load_project_board(binding["project_name"])
         if task_updates:
             _apply_task_updates(project_board["project_rows"], task_updates, default_updated_at=default_updated_at)
+            _apply_task_updates(project_board["rollup_rows"], task_updates, default_updated_at=default_updated_at)
         save_project_board(
             project_board["path"],
             project_board["frontmatter"],
@@ -2102,7 +2381,7 @@ def cmd_finalize_launch(args: argparse.Namespace) -> int:
 
     if final_status == "completed" and not pause_payload.get("active"):
         trigger_retrieval_sync_once()
-        trigger_dashboard_sync_once()
+        trigger_dashboard_sync_once(wait=False)
     print(
         json.dumps(
             {

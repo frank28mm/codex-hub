@@ -35,6 +35,7 @@ try:
         PROJECTS_DASHBOARD_MD,
         REGISTRY_MD,
         WATCHER_NAME,
+        WorkspaceLockBusy,
         dump_json,
         display_timestamp,
         iso_now,
@@ -81,6 +82,7 @@ except ImportError:  # pragma: no cover
         PROJECTS_DASHBOARD_MD,
         REGISTRY_MD,
         WATCHER_NAME,
+        WorkspaceLockBusy,
         dump_json,
         display_timestamp,
         iso_now,
@@ -104,11 +106,14 @@ except ImportError:  # pragma: no cover
     )
 
 try:
-    from ops import codex_retrieval, material_router, runtime_state
+    from ops import background_job_executor, board_job_projector, codex_retrieval, material_router, runtime_state, workspace_job_schema
 except ImportError:  # pragma: no cover
+    import background_job_executor  # type: ignore
+    import board_job_projector  # type: ignore
     import codex_retrieval  # type: ignore
     import material_router  # type: ignore
     import runtime_state  # type: ignore
+    import workspace_job_schema  # type: ignore
 
 
 HOME_MARKERS = ("<!-- AUTO_HOME_START -->", "<!-- AUTO_HOME_END -->")
@@ -324,10 +329,64 @@ def material_hit_lines(title: str, items: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def project_harness_facts(project_name: str) -> tuple[list[dict[str, Any]], list[str]]:
+    facts: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        jobs = board_job_projector.list_projectable_jobs(project_name)
+    except Exception as exc:
+        return [], [f"{project_name}: harness job projection failed: {exc}"]
+    for job in jobs:
+        try:
+            facts.append(background_job_executor.job_status_payload(job))
+        except Exception as exc:
+            task_id = str(job.get("task_id", "")).strip() or "unknown-task"
+            errors.append(f"{project_name}: harness status failed for `{task_id}`: {exc}")
+    facts.sort(key=lambda item: (str(item.get("task_id", "")), str(item.get("job_id", ""))))
+    return facts, errors
+
+
+def harness_status_lines(items: list[dict[str, Any]]) -> list[str]:
+    lines = ["## Harness 派生状态", ""]
+    if not items:
+        lines.extend(["- 暂无可投影 harness 任务", ""])
+        return lines
+    for item in items:
+        task_id = str(item.get("task_id", "")).strip() or "unknown-task"
+        task_item = str(item.get("task_item", "")).strip() or "未命名任务"
+        harness_state = str(item.get("harness_state", "")).strip() or "unknown"
+        last_decision = str(item.get("last_decision", "")).strip() or "n/a"
+        next_action = str(item.get("next_action", "")).strip() or "n/a"
+        next_wake_at = str(item.get("next_wake_at", "")).strip() or "n/a"
+        blocked_reason = str(item.get("blocked_reason", "")).strip() or "n/a"
+        current_focus = str(item.get("current_focus", "")).strip()
+        runtime_lines = workspace_job_schema.runtime_contract_summary_lines(
+            item,
+            include_project_board_path=False,
+            include_project_updated_at=False,
+            include_handoff_packet=False,
+            include_local_context_roots=True,
+            include_bridge_name=False,
+            snapshot_mode="completed_pending_active",
+        )
+        lines.append(
+            f"- `{task_id}` {task_item} | harness_state=`{harness_state}` | "
+            f"last_decision=`{last_decision}` | next_wake_at=`{next_wake_at}` | blocked_reason=`{blocked_reason}`"
+        )
+        lines.append(f"  - next_action: {next_action}")
+        if current_focus:
+            lines.append(f"  - focus: {current_focus}")
+        for runtime_line in runtime_lines:
+            lines.append(f"  - {runtime_line}")
+    lines.append("")
+    return lines
+
+
 def render_materials_dashboard(project_name: str) -> str:
     inspect_payload = material_router.inspect_material_route(project_name)
     suggest_payload = material_router.suggest_material_route(project_name, "")
     retrieval_state = codex_retrieval.load_state()
+    harness_facts, harness_errors = project_harness_facts(project_name)
     lines = [
         "---",
         f"project_name: {project_name}",
@@ -365,8 +424,10 @@ def render_materials_dashboard(project_name: str) -> str:
         "",
     ]
     issues = inspect_payload.get("issues", [])
+    issues = list(issues) + harness_errors
     if issues:
         lines.extend(["## 配置问题", "", *[f"- `{item}`" for item in issues], ""])
+    lines.extend(harness_status_lines(harness_facts))
     lines.extend(material_hit_lines("Hotset 命中", suggest_payload.get("hotset_hits", [])))
     lines.extend(material_hit_lines("报告命中", suggest_payload.get("report_hits", [])))
     lines.extend(material_hit_lines("交付命中", suggest_payload.get("deliverable_hits", [])))
@@ -488,6 +549,65 @@ def clean_cell(value: str) -> str:
     return str(value).strip().strip("`")
 
 
+def extract_absolute_paths_from_cell(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    matches = re.findall(r"`(/Users/frank/[^`]+)`", text)
+    cleaned = clean_cell(text)
+    if cleaned.startswith("/Users/frank/"):
+        parts = [
+            item.strip().strip("`")
+            for item in re.split(r"[、,;；]\s*", cleaned)
+            if item.strip()
+        ]
+        matches.extend(parts)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in matches:
+        candidate = item.strip()
+        if not candidate.startswith("/Users/frank/"):
+            continue
+        if any(char in candidate for char in "*{}"):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
+def verify_project_path_references(project_name: str) -> list[str]:
+    issues: list[str] = []
+    project_board = load_project_board(project_name)
+    seen: set[str] = set()
+
+    def record_missing(path_text: str, context: str) -> None:
+        candidate = path_text.strip()
+        if not candidate or candidate in seen:
+            return
+        if any(char in candidate for char in "*{}"):
+            return
+        seen.add(candidate)
+        if not Path(candidate).exists():
+            issues.append(f"{project_board['path'].name}: {context} references missing path `{candidate}`")
+
+    for path_text in re.findall(r"`(/Users/frank/[^`]+)`", project_board["body"]):
+        record_missing(path_text, "board body")
+
+    for row_group_name, rows in (
+        ("project row", project_board["project_rows"]),
+        ("rollup row", project_board["rollup_rows"]),
+        ("gflow row", project_board.get("gflow_rows", [])),
+    ):
+        for row in rows:
+            task_id = row.get("ID", "") or "n/a"
+            for field in ("交付物", "指向"):
+                for path_text in extract_absolute_paths_from_cell(row.get(field, "")):
+                    record_missing(path_text, f"{row_group_name} `{task_id}` field `{field}`")
+    return issues
+
+
 def verify_project_rollup_consistency(project_name: str) -> list[str]:
     issues: list[str] = []
     project_board = load_project_board(project_name)
@@ -544,6 +664,7 @@ def verify_project_rollup_consistency(project_name: str) -> list[str]:
             project_board["project_rows"],
             project_board["rollup_rows"],
             project_board.get("gflow_rows", []),
+            project_name=project_name,
         )
     ).strip()
     actual_current = extract_marked_block(project_board["body"], AUTO_CURRENT_TASKS_MARKERS).strip()
@@ -610,6 +731,7 @@ def verify_consistency(project_names: list[str] | None = None) -> dict[str, Any]
     issues.extend([item for item in fact_errors if any(project_name in item for project_name in selected_projects)])
     for project_name in selected_projects:
         issues.extend(verify_project_rollup_consistency(project_name))
+        issues.extend(verify_project_path_references(project_name))
     issues.extend(verify_projects_dashboard_consistency(projects, selected_projects))
     issues.extend(verify_actions_dashboard_consistency())
     return {
@@ -661,9 +783,10 @@ def render_home(text: str, projects: list[dict[str, Any]], bindings: list[dict[s
         reverse=True,
     )[:3]
     recent_sessions = unique_completed_bindings(bindings, limit=5)
+    recent_project_labels = ", ".join(f"`{item['project_name']}`" for item in recent_projects) or "无"
     lines = [
         f"- 活跃项目数：{len(active)}",
-        f"- 最近更新项目：{', '.join(f'`{item['project_name']}`' for item in recent_projects) or '无'}",
+        f"- 最近更新项目：{recent_project_labels}",
         f"- 最近完成会话：{len(recent_sessions)}",
         f"- 需要关注项目：{', '.join(f'`{name}`' for name in stale_projects(projects, now)) or '无'}",
     ]
@@ -756,62 +879,72 @@ def rebuild_dashboards(*, state: dict[str, Any], full: bool, registry: list[dict
     }
 
 
-def run_sync(force_full: bool = False) -> dict[str, Any]:
-    with workspace_lock():
-        state = load_state()
-        registry = load_registry()
-        events = read_events()
-        last_processed = int(state.get("last_processed_event_line", 0))
-        pending_events = [item for item in events if int(item.get("_line", 0)) > last_processed]
-        claimed_runtime_events = runtime_state.claim_runtime_events(
-            queue_name="dashboard_sync",
-            claimed_by="codex_dashboard_sync.run_sync",
-            limit=500,
-            lease_seconds=900,
-        )
-        now = dt.datetime.now(dt.timezone.utc)
-        full = force_full or should_rebuild_all(state, now) or dashboard_sources_changed_since_last_sync(state, registry)
+def run_sync(force_full: bool = False, *, skip_if_locked: bool = False) -> dict[str, Any]:
+    state = load_state()
+    events = read_events()
+    last_processed = int(state.get("last_processed_event_line", 0))
+    pending_events = [item for item in events if int(item.get("_line", 0)) > last_processed]
+    try:
+        with workspace_lock(blocking=not skip_if_locked):
+            registry = load_registry()
+            claimed_runtime_events = runtime_state.claim_runtime_events(
+                queue_name="dashboard_sync",
+                claimed_by="codex_dashboard_sync.run_sync",
+                limit=500,
+                lease_seconds=900,
+            )
+            now = dt.datetime.now(dt.timezone.utc)
+            full = force_full or should_rebuild_all(state, now) or dashboard_sources_changed_since_last_sync(state, registry)
 
-        if not pending_events and not claimed_runtime_events and not full:
-            state["last_status"] = "idle"
-            state["last_error"] = ""
-            save_state(state)
-            return {
-                "status": "idle",
-                "pending_events": 0,
-                "last_processed_event_line": last_processed,
-            }
+            if not pending_events and not claimed_runtime_events and not full:
+                state["last_status"] = "idle"
+                state["last_error"] = ""
+                save_state(state)
+                return {
+                    "status": "idle",
+                    "pending_events": 0,
+                    "last_processed_event_line": last_processed,
+                }
 
-        try:
-            result = rebuild_dashboards(state=state, full=full, registry=registry)
-        except Exception as exc:
+            try:
+                result = rebuild_dashboards(state=state, full=full, registry=registry)
+            except Exception as exc:
+                for item in claimed_runtime_events:
+                    runtime_state.fail_runtime_event(
+                        item.get("event_key", ""),
+                        claim_token=str(item.get("claim_token", "")).strip(),
+                        error=str(exc),
+                        retry_after_seconds=60,
+                    )
+                state["last_status"] = "error"
+                state["last_error"] = str(exc)
+                save_state(state)
+                raise
+
             for item in claimed_runtime_events:
-                runtime_state.fail_runtime_event(
+                runtime_state.complete_runtime_event(
                     item.get("event_key", ""),
                     claim_token=str(item.get("claim_token", "")).strip(),
-                    error=str(exc),
-                    retry_after_seconds=60,
+                    result={"status": "ok", "full_rebuild": bool(full)},
                 )
-            state["last_status"] = "error"
-            state["last_error"] = str(exc)
+            if events:
+                state["last_processed_event_line"] = max(item["_line"] for item in events)
             save_state(state)
-            raise
-
-        for item in claimed_runtime_events:
-            runtime_state.complete_runtime_event(
-                item.get("event_key", ""),
-                claim_token=str(item.get("claim_token", "")).strip(),
-                result={"status": "ok", "full_rebuild": bool(full)},
-            )
-        if events:
-            state["last_processed_event_line"] = max(item["_line"] for item in events)
-        save_state(state)
-        return {
-            "status": "ok",
-            "pending_events": len(pending_events) + len(claimed_runtime_events),
-            "last_processed_event_line": state.get("last_processed_event_line", 0),
-            **result,
-        }
+            return {
+                "status": "ok",
+                "pending_events": len(pending_events) + len(claimed_runtime_events),
+                "last_processed_event_line": state.get("last_processed_event_line", 0),
+                **result,
+            }
+    except Exception as exc:
+        if skip_if_locked and (isinstance(exc, WorkspaceLockBusy) or exc.__class__.__name__ == "WorkspaceLockBusy"):
+            return {
+                "status": "busy",
+                "reason": "workspace_lock_held",
+                "pending_events": len(pending_events),
+                "last_processed_event_line": last_processed,
+            }
+        raise
 
 
 def plist_escape(value: str) -> str:
@@ -865,7 +998,7 @@ def run_launchctl(*parts: str) -> subprocess.CompletedProcess[str]:
 
 
 def cmd_sync_once(_args: argparse.Namespace) -> int:
-    result = run_sync(force_full=False)
+    result = run_sync(force_full=False, skip_if_locked=True)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -925,7 +1058,7 @@ def cmd_install_launchagent(args: argparse.Namespace) -> int:
         "Label": DASHBOARD_SYNC_NAME,
         "ProgramArguments": [
             python_path,
-            str(WORKSPACE_ROOT / "ops" / "codex_dashboard_sync.py"),
+            str(Path(__file__).resolve()),
             "sync-once",
         ],
         "RunAtLoad": True,
