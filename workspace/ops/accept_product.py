@@ -250,7 +250,7 @@ def write_report(results: dict[str, object]) -> None:
                     f"- {'OK' if status.get('object_ops_ready') else 'FAIL'} Feishu 对象能力登录：object_ops_ready=`{status.get('object_ops_ready')}`"
                 )
                 lines.append(
-                    f"- {'OK' if status.get('coco_bridge_ready') else 'FAIL'} CoCo bridge 凭据同步：coco_bridge_ready=`{status.get('coco_bridge_ready')}`"
+                    f"- {'OK' if status.get('coco_bridge_ready') else 'FAIL'} assistant bridge 凭据同步：coco_bridge_ready=`{status.get('coco_bridge_ready')}`"
                 )
                 lines.append(
                     f"- {'OK' if status.get('full_ready') else 'FAIL'} Feishu 完整可用：full_ready=`{status.get('full_ready')}`"

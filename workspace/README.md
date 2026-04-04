@@ -7,7 +7,7 @@
 - 读取和写回 `Obsidian` 记忆库
 - 通过 `Feishu` 做远程协作
 - 运行仓库内自包含的 Feishu bridge runtime
-- 可选接入微信私聊版 `CoCo`
+- 可选接入微信私聊版默认助手昵称 `CoCo`
 - 通过 `Electron` 提供本地控制台
 - 通过自动化脚本维护 dashboard、watcher、只读 Bitable 看板
 
