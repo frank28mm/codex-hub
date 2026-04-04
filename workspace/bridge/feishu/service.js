@@ -94,6 +94,9 @@ const STATUS_QUERY_PATTERNS = [
   /值不值得/iu,
   /适合长期保留/iu,
 ];
+const LONG_TASK_CREATE_PATTERN = /(?:新建|创建|建立|开(?:一个|个)?)长任务/u;
+const LONG_TASK_CONTINUE_PATTERN = /(?:继续|接着|恢复|重新开始|启动)长任务/u;
+const LONG_TASK_PAUSE_PATTERN = /(?:暂停|挂起|先暂停)长任务/u;
 const FEISHU_OBJECT_OPERATION_PATTERNS = [
   /(飞书|lark).*(多维表格|表格|文档|日历|日程|会议|视频会议|任务|消息|群聊|用户)/iu,
   /(多维表格|飞书表格|bitable)/iu,
@@ -1222,6 +1225,13 @@ function classifyDirectIntent(normalized) {
   }
   if (/(系统状态|当前系统状态|健康状态|health|告警|alerts?)/i.test(text)) {
     return { kind: "system_status" };
+  }
+  if (
+    LONG_TASK_CREATE_PATTERN.test(text) ||
+    LONG_TASK_CONTINUE_PATTERN.test(text) ||
+    LONG_TASK_PAUSE_PATTERN.test(text)
+  ) {
+    return { kind: "background_job_intent" };
   }
   return { kind: "none" };
 }
@@ -2900,6 +2910,11 @@ function createFeishuLongConnectionService({
     const binding = await getPersistedBinding(conversationKey);
     const routeContext = resolveMessageRouteContext(normalized, binding);
     const scopedProjectName = String(routeContext.project_name || "").trim();
+    const defaultProjectName =
+      String(normalized?.chat_type || "").trim() === "p2p"
+        ? determineDefaultProjectName(PROJECT_REGISTRY_ENTRIES)
+        : "";
+    const longTaskProjectName = String(scopedProjectName || defaultProjectName).trim();
     const intent = classifyDirectIntent(normalized);
     if (intent.kind === "none" || intent.kind === "empty") {
       return { ok: false, reason: "no_direct_route", normalized };
@@ -2990,6 +3005,72 @@ function createFeishuLongConnectionService({
           `- open_alert_count: ${health.open_alert_count ?? 0}`,
           `- latest_report: ${health.latest_report || "未记录"}`,
         ].join("\n")),
+      };
+    }
+    if (intent.kind === "background_job_intent") {
+      if (!longTaskProjectName) {
+        return {
+          ok: true,
+          normalized,
+          direct: true,
+          replyPhase: "binding_prompt",
+          replyPreview: await addressReply(
+            [
+              "这条长任务还没有绑定到项目。",
+              "你可以直接说：",
+              "- 在 Codex Hub 新建长任务 补齐 harness 自动注册",
+              "- 在 工作-碰碰酷奇 继续长任务 KJG-13",
+            ].join("\n"),
+          ),
+        };
+      }
+      const payload = await brokerClient.call("background-job-intent", {
+        project_name: longTaskProjectName,
+        topic_name: String(routeContext.topic_name || "").trim(),
+        text: String(normalized?.text || "").trim(),
+        trigger_source: "feishu_direct_intent",
+      });
+      if (payload?.ok === false) {
+        const errorText = String(payload.error || payload.reason || "background_job_intent_failed").trim();
+        return {
+          ok: true,
+          normalized,
+          direct: true,
+          replyPhase: "error",
+          replyPreview: await addressReply(`长任务触发失败：${errorText}`),
+        };
+      }
+      const resolvedTaskId = String(payload?.task_id || payload?.created_task?.task_id || "").trim();
+      const result = payload?.result || {};
+      const selectedTaskId = String(result?.selected_task_id || "").trim();
+      const taskId = resolvedTaskId || selectedTaskId;
+      const intentKind = String(payload?.intent_kind || "").trim();
+      let replyLines;
+      if (intentKind === "create") {
+        replyLines = [
+          `已新建长任务：${taskId || "已创建"}`,
+          `项目：${longTaskProjectName}`,
+          "Harness 已开始第一轮推进。",
+        ];
+      } else if (intentKind === "pause") {
+        replyLines = [
+          `已暂停长任务：${taskId || "当前任务"}`,
+          `项目：${longTaskProjectName}`,
+          String(payload?.running_note || "后续自动唤醒会先停住。"),
+        ];
+      } else {
+        replyLines = [
+          `已继续长任务：${taskId || "当前任务"}`,
+          `项目：${longTaskProjectName}`,
+          result?.executed ? "Harness 已继续推进。" : "当前没有可继续的长任务。",
+        ];
+      }
+      return {
+        ok: true,
+        normalized,
+        direct: true,
+        replyPhase: "status",
+        replyPreview: await addressReply(replyLines.join("\n")),
       };
     }
     return { ok: false, reason: "no_direct_route", normalized };

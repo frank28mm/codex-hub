@@ -3184,6 +3184,78 @@ async function testOnlyRuntimeQueriesStayDirect() {
   assert.match(result.replyPreview, /\/approve coco-allow9/);
 }
 
+async function testNaturalLanguageLongTaskIntentRoutesDirectly() {
+  const brokerCalls = [];
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-14T01:00:00Z",
+              updated_at: "2026-03-14T01:00:00Z",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        if (command === "bridge-chat-binding") {
+          return { ok: true, binding: null };
+        }
+        if (command === "background-job-intent") {
+          return {
+            ok: true,
+            intent_kind: "create",
+            project_name: payload.project_name,
+            topic_name: payload.topic_name || "",
+            task_id: "WH-OPS-16",
+            created_task: { task_id: "WH-OPS-16" },
+            result: {
+              executed: true,
+              payload: { ok: true },
+            },
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader: () => null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const result = await service.handleMessageEvent({
+    message: {
+      message_id: "om_new_long_task",
+      message_type: "text",
+      content: JSON.stringify({ text: "新建长任务 补齐 harness 自动注册" }),
+      chat_type: "p2p",
+      chat_id: "",
+    },
+    sender: { sender_id: { open_id: "ou_sender" } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.direct, true);
+  assert.equal(result.replyPhase, "status");
+  assert.match(result.replyPreview, /已新建长任务：WH-OPS-16/);
+  assert.match(result.replyPreview, /项目：Codex Hub/);
+  const intentCall = brokerCalls.find((item) => item.command === "background-job-intent");
+  assert.ok(intentCall);
+  assert.equal(intentCall.payload.project_name, "Codex Hub");
+  assert.equal(intentCall.payload.text, "新建长任务 补齐 harness 自动注册");
+  assert.equal(intentCall.payload.trigger_source, "feishu_direct_intent");
+}
+
 async function testTopLevelHandlerSendsFallbackReplyOnUnexpectedFailure() {
   const replies = [];
   const wsStarts = [];
