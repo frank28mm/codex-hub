@@ -2625,6 +2625,634 @@ async function testReconnectSkipsRecentConversationWithoutOpenWork() {
   assert.equal(replies.length, 0);
 }
 
+async function testReconnectBackfillsMissedMessagesAfterCliEventExit() {
+  const replies = [];
+  const brokerCalls = [];
+  const gatewayInstances = [];
+  let currentExitHandler = null;
+  const historyCreateTime = String(Date.now() + 60_000);
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { data: { message_id: `backfill-reply-${replies.length}` } };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "bridge-settings") {
+          return { ok: true, settings: payload?.settings || {} };
+        }
+        if (command === "bridge-connection") {
+          return { ok: true };
+        }
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-30T00:00:00Z",
+              updated_at: "2026-03-30T00:00:00Z",
+            },
+          };
+        }
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+            rows: [
+              {
+                chat_ref: "oc_backfill",
+                chat_type: "p2p",
+                pending_request: false,
+                awaiting_report: false,
+                needs_attention: false,
+              },
+            ],
+          };
+        }
+        if (command === "panel") {
+          return {
+            ok: true,
+            rows: [{ title: "系统", summary: "正常" }],
+          };
+        }
+        if (command === "health") {
+          return {
+            ok: true,
+            ok_status: true,
+            checks: [{ name: "bridge", status: "ok" }],
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    gatewayFactory: () => {
+      const instance = {
+        registerMessageHandler(handler) {
+          this.messageHandler = handler;
+        },
+        registerCardActionHandler(handler) {
+          this.cardActionHandler = handler;
+        },
+        registerCliEventExitHandler(handler) {
+          currentExitHandler = handler;
+        },
+        async start() {
+          this.started = true;
+        },
+        async stop() {
+          this.started = false;
+        },
+        getRestClient() {
+          return new (sdkLoader().Client)();
+        },
+        getEventDispatcher() {
+          return {};
+        },
+        getTransport() {
+          return "lark_cli_event_plus_cli_im_plus_sdk_card_callbacks";
+        },
+      };
+      gatewayInstances.push(instance);
+      return instance;
+    },
+    listRecentChatMessages: async ({ chatId }) => {
+      assert.equal(chatId, "oc_backfill");
+      return [
+        {
+          message_id: "om_backfill_missed_1",
+          create_time: historyCreateTime,
+          body: { content: JSON.stringify({ text: "当前系统状态" }) },
+          sender: { id: "ou_sender" },
+          msg_type: "text",
+          chat_id: chatId,
+          chat_type: "p2p",
+        },
+      ];
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+  assert.equal((await service.connect()).ok, true);
+  assert.equal(typeof currentExitHandler, "function");
+
+  await currentExitHandler({ code: 1, signal: "SIGTERM" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(gatewayInstances.length >= 2, "expected reconnect to create a new gateway instance");
+  assert.ok(
+    replies.some((text) => text.includes("CoCo 状态摘要")),
+    "expected backfilled message to route through normal reply path",
+  );
+  assert.ok(
+    brokerCalls.some(
+      (item) =>
+        item.command === "record-bridge-message" &&
+        item.payload.direction === "inbound" &&
+        item.payload.message_id === "om_backfill_missed_1",
+    ),
+  );
+}
+
+async function testPeriodicReconciliationBackfillsMissedMessagesWhileIngressStaysConnected() {
+  const replies = [];
+  const brokerCalls = [];
+  const historyCreateTime = new Date(Date.now() + 60_000).toISOString();
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { data: { message_id: `periodic-backfill-reply-${replies.length}` } };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "bridge-settings") {
+          return { ok: true, settings: payload?.settings || {} };
+        }
+        if (command === "bridge-connection") {
+          return { ok: true };
+        }
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-30T00:00:00Z",
+              updated_at: "2026-03-30T00:00:00Z",
+            },
+          };
+        }
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+            rows: [
+              {
+                chat_ref: "oc_periodic_backfill",
+                chat_type: "p2p",
+                pending_request: false,
+                awaiting_report: false,
+                needs_attention: false,
+              },
+            ],
+          };
+        }
+        if (command === "panel") {
+          return {
+            ok: true,
+            cards: [{ label: "系统", value: "正常" }],
+          };
+        }
+        if (command === "health") {
+          return {
+            ok: true,
+            payload: {
+              open_alert_count: 0,
+              latest_report: "ok",
+            },
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    gatewayFactory: () => ({
+      registerMessageHandler(handler) {
+        this.messageHandler = handler;
+      },
+      registerCardActionHandler(handler) {
+        this.cardActionHandler = handler;
+      },
+      registerCliEventExitHandler(handler) {
+        this.cliEventExitHandler = handler;
+      },
+      async start() {
+        this.started = true;
+      },
+      async stop() {
+        this.started = false;
+      },
+      getRestClient() {
+        return new (sdkLoader().Client)();
+      },
+      getEventDispatcher() {
+        return {};
+      },
+      getTransport() {
+        return "lark_cli_event_plus_cli_im";
+      },
+    }),
+    listRecentChatMessages: async ({ chatId, identity }) => {
+      assert.equal(chatId, "oc_periodic_backfill");
+      assert.equal(identity, "bot");
+      return [
+        {
+          message_id: "om_periodic_backfill_1",
+          create_time: historyCreateTime,
+          body: { content: JSON.stringify({ text: "当前系统状态" }) },
+          sender: { id: "ou_sender" },
+          msg_type: "text",
+          chat_id: chatId,
+          chat_type: "p2p",
+        },
+      ];
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+  assert.equal((await service.connect()).ok, true);
+
+  const result = await service.reconcileActiveConversations({ force: true });
+  assert.equal(result.recovered, 1);
+  assert.equal(result.chats, 1);
+  assert.ok(replies.length > 0, "expected periodic reconciliation to emit a reply");
+  assert.ok(
+    brokerCalls.some(
+      (item) =>
+        item.command === "record-bridge-message" &&
+        item.payload.direction === "inbound" &&
+        item.payload.message_id === "om_periodic_backfill_1",
+    ),
+  );
+}
+
+async function testPeriodicReconciliationBackfillsCliPostHistoryShape() {
+  const replies = [];
+  const brokerCalls = [];
+  const historyCreateTime = new Date(Date.now() + 60_000).toISOString();
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async (payload) => {
+                replies.push(parseReplyText(payload));
+                return { data: { message_id: `periodic-post-backfill-reply-${replies.length}` } };
+              },
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        brokerCalls.push({ command, payload });
+        if (command === "bridge-settings") {
+          return { ok: true, settings: payload?.settings || {} };
+        }
+        if (command === "bridge-connection") {
+          return { ok: true };
+        }
+        if (command === "record-bridge-message") {
+          return {
+            ok: true,
+            record: {
+              created_at: "2026-03-30T00:00:00Z",
+              updated_at: "2026-03-30T00:00:00Z",
+            },
+          };
+        }
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+            rows: [
+              {
+                chat_ref: "oc_periodic_backfill_post",
+                chat_type: "p2p",
+                pending_request: false,
+                awaiting_report: false,
+                needs_attention: false,
+              },
+            ],
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async () => ({}),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    gatewayFactory: () => ({
+      registerMessageHandler(handler) {
+        this.messageHandler = handler;
+      },
+      registerCardActionHandler(handler) {
+        this.cardActionHandler = handler;
+      },
+      registerCliEventExitHandler(handler) {
+        this.cliEventExitHandler = handler;
+      },
+      async start() {
+        this.started = true;
+      },
+      async stop() {
+        this.started = false;
+      },
+      getRestClient() {
+        return new (sdkLoader().Client)();
+      },
+      getEventDispatcher() {
+        return {};
+      },
+      getTransport() {
+        return "lark_cli_event_plus_cli_im";
+      },
+    }),
+    listRecentChatMessages: async ({ chatId, identity }) => {
+      assert.equal(chatId, "oc_periodic_backfill_post");
+      assert.equal(identity, "bot");
+      return [
+        {
+          message_id: "om_periodic_backfill_card_1",
+          create_time: new Date(Date.now() + 30_000).toISOString(),
+          content: "<card>ignored</card>",
+          sender: {
+            id: "cli_123",
+            id_type: "app_id",
+            sender_type: "app",
+          },
+          msg_type: "interactive",
+          chat_id: chatId,
+          chat_type: "p2p",
+        },
+        {
+          message_id: "om_periodic_backfill_post_1",
+          create_time: historyCreateTime,
+          content: "这是一条补捞的 post 消息",
+          sender: {
+            id: "ou_sender",
+            id_type: "open_id",
+            sender_type: "user",
+          },
+          msg_type: "post",
+          chat_id: chatId,
+          chat_type: "p2p",
+        },
+      ];
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "all_messages",
+    require_mention: false,
+  });
+  assert.equal((await service.connect()).ok, true);
+
+  const result = await service.reconcileActiveConversations({ force: true });
+  assert.equal(result.recovered, 1);
+  assert.equal(result.chats, 1);
+  assert.ok(replies.length > 0, "expected periodic reconciliation to emit a reply for post history");
+  assert.ok(
+    brokerCalls.some(
+      (item) =>
+        item.command === "record-bridge-message" &&
+        item.payload.direction === "inbound" &&
+        item.payload.message_id === "om_periodic_backfill_post_1" &&
+        item.payload.payload?.message_type === "post",
+    ),
+  );
+  assert.equal(
+    brokerCalls.some(
+      (item) =>
+        item.command === "record-bridge-message" &&
+        item.payload.direction === "inbound" &&
+        item.payload.message_id === "om_periodic_backfill_card_1",
+    ),
+    false,
+  );
+}
+
+async function testPeriodicReconciliationMarksBackfillDegradedWhenHistoryPermissionsAreUnavailable() {
+  const runtimeStatuses = [];
+  const sdkLoader = () => ({
+    Domain: { Feishu: 0, Lark: 1 },
+    Client: class {
+      constructor() {
+        this.im = {
+          v1: {
+            message: {
+              create: async () => ({ data: { message_id: "unused" } }),
+            },
+          },
+        };
+      }
+    },
+    EventDispatcher: class {
+      register(handlers) {
+        this.handlers = handlers;
+        return this;
+      }
+    },
+    WSClient: class {
+      async start() {}
+      async close() {}
+    },
+    LoggerLevel: { info: "info" },
+  });
+
+  const service = createFeishuLongConnectionService({
+    brokerClient: {
+      call: async (command, payload) => {
+        if (command === "bridge-settings") {
+          return { ok: true, settings: payload?.settings || {} };
+        }
+        if (command === "bridge-connection") {
+          return { ok: true };
+        }
+        if (command === "bridge-conversations") {
+          return {
+            ok: true,
+            rows: [
+              {
+                chat_ref: "oc_backfill_group_denied",
+                chat_type: "group",
+                pending_request: false,
+                awaiting_report: false,
+                needs_attention: false,
+              },
+            ],
+          };
+        }
+        if (command === "user-profile") {
+          return {
+            ok: true,
+            profile: { preferred_name: "Frank", relationship: "workspace owner" },
+          };
+        }
+        return { ok: true };
+      },
+    },
+    runtimeState: {
+      saveBridgeStatus: async (payload) => runtimeStatuses.push(payload),
+      saveBridgeSettings: async () => ({}),
+    },
+    sdkLoader,
+    gatewayFactory: () => ({
+      registerMessageHandler(handler) {
+        this.messageHandler = handler;
+      },
+      registerCardActionHandler(handler) {
+        this.cardActionHandler = handler;
+      },
+      registerCliEventExitHandler(handler) {
+        this.cliEventExitHandler = handler;
+      },
+      async start() {
+        this.started = true;
+      },
+      async stop() {
+        this.started = false;
+      },
+      getRestClient() {
+        return new (sdkLoader().Client)();
+      },
+      getEventDispatcher() {
+        return {};
+      },
+      getTransport() {
+        return "lark_cli_event_plus_cli_im";
+      },
+    }),
+    listRecentChatMessages: async ({ identity }) => {
+      if (identity === "bot") {
+        throw new Error("Permission denied [230027]");
+      }
+      throw new Error(
+        'missing required scope(s): im:message.group_msg:get_as_user, im:message.p2p_msg:get_as_user, contact:user.base:readonly',
+      );
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  await service.loadSettings({
+    app_id: "cli_123",
+    app_secret: "secret",
+    group_policy: "mentions_only",
+    require_mention: true,
+  });
+  assert.equal((await service.connect()).ok, true);
+
+  const result = await service.reconcileActiveConversations({ force: true });
+  assert.equal(result.recovered, 0);
+  assert.equal(result.chats, 0);
+  assert.equal(service.getStatus().backfill_degraded, true);
+  assert.equal(service.getStatus().backfill_degraded_count, 1);
+  assert.match(service.getStatus().last_backfill_error, /bot:permission_denied/);
+  assert.match(service.getStatus().last_backfill_error, /user:missing_scope/);
+  assert.equal(
+    runtimeStatuses.some(
+      (item) => item.backfill_degraded === true && Number(item.backfill_degraded_count || 0) === 1,
+    ),
+    true,
+  );
+}
+
 async function testReconnectWhilePreviouslyConnectedSkipsRecentRecoveryNotice() {
   const replies = [];
   const bridgeConversationRows = [];
@@ -2719,7 +3347,7 @@ async function testReconnectWhilePreviouslyConnectedSkipsRecentRecoveryNotice() 
   assert.equal(replies.length, 0);
 }
 
-async function testConnectResetsEventClockAfterLongIdleGap() {
+async function testConnectPreservesLastEventClockAfterLongIdleGap() {
   const sdkLoader = () => ({
     Domain: { Feishu: 0, Lark: 1 },
     Client: class {
@@ -2794,7 +3422,7 @@ async function testConnectResetsEventClockAfterLongIdleGap() {
 
   const currentStatus = service.getStatus();
   assert.notEqual(currentStatus.connected_at, "2026-03-23T02:55:00Z");
-  assert.equal(currentStatus.last_event_at, currentStatus.connected_at);
+  assert.equal(currentStatus.last_event_at, "2026-03-23T03:00:00Z");
 }
 
 async function testColdConnectLoadsPersistedBridgeStatusForRecoveryNotice() {
@@ -6039,8 +6667,12 @@ async function main() {
   await testConnectRecoversPendingConversationWithRecoveryNotice();
   await testReconnectNotifiesRecentActiveConversationAfterOutage();
   await testReconnectSkipsRecentConversationWithoutOpenWork();
+  await testReconnectBackfillsMissedMessagesAfterCliEventExit();
+  await testPeriodicReconciliationBackfillsMissedMessagesWhileIngressStaysConnected();
+  await testPeriodicReconciliationBackfillsCliPostHistoryShape();
+  await testPeriodicReconciliationMarksBackfillDegradedWhenHistoryPermissionsAreUnavailable();
   await testReconnectWhilePreviouslyConnectedSkipsRecentRecoveryNotice();
-  await testConnectResetsEventClockAfterLongIdleGap();
+  await testConnectPreservesLastEventClockAfterLongIdleGap();
   await testColdConnectLoadsPersistedBridgeStatusForRecoveryNotice();
   await testColdConnectSkipsRecentRecoveryNoticeWhenPersistedStatusWasConnected();
   await testOnlyRuntimeQueriesStayDirect();

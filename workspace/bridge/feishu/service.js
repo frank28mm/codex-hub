@@ -3,7 +3,12 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { FeishuGateway } = require("./gateway");
+const {
+  FeishuGateway,
+  createCliMessageClient,
+  listChatMessagesViaLarkCli,
+  shouldUseCliMessageTransport,
+} = require("./gateway");
 const {
   buildMetricDigestCardPayload,
   buildReplyCardPayload,
@@ -48,6 +53,8 @@ const RECOVERY_RECONNECT_MIN_OUTAGE_SECONDS = 60;
 const RECOVERY_RECONNECT_NOTICE_COOLDOWN_SECONDS = 30 * 60;
 const RECOVERY_RECENT_CHAT_MAX_AGE_SECONDS = 24 * 60 * 60;
 const RECOVERY_RECENT_CHAT_LIMIT = 8;
+const RECOVERY_BACKFILL_MESSAGE_LIMIT = 50;
+const PERIODIC_BACKFILL_INTERVAL_MS = 60 * 1000;
 const EMIT_RECOVERY_NOTICES = true;
 const APPROVAL_TOKEN_TTL_SECONDS = 1800;
 const ROUTE_EXECUTION_TIMEOUT_MS = 0;
@@ -150,6 +157,11 @@ const CARD_ACTION_TIMEOUT_MS = 2500;
 const DOC_REPLY_CHAR_THRESHOLD = 1400;
 const DOC_REPLY_LINE_THRESHOLD = 14;
 const DOC_MIRROR_PHASES = new Set(["reply", "report", "final", "status", "thread_status"]);
+const HISTORY_LOOKUP_REQUIRED_USER_SCOPES = [
+  "im:message.group_msg:get_as_user",
+  "im:message.p2p_msg:get_as_user",
+  "contact:user.base:readonly",
+];
 const INTERACTIVE_REPLY_PHASES = new Set([
   "reply",
   "report",
@@ -1431,6 +1443,8 @@ function createFeishuLongConnectionService({
   brokerClient,
   runtimeState,
   sdkLoader = tryLoadFeishuSdk,
+  gatewayFactory = (options) => new FeishuGateway(options),
+  listRecentChatMessages = listChatMessagesViaLarkCli,
   logger = console,
   routeExecutionTimeoutMs = ROUTE_EXECUTION_TIMEOUT_MS,
   emitRecoveryNotices = EMIT_RECOVERY_NOTICES,
@@ -1447,11 +1461,16 @@ function createFeishuLongConnectionService({
   let settings = { ...DEFAULT_SETTINGS };
   let sdk = null;
   let client = null;
+  let standaloneClient = null;
+  let standaloneBaseClient = null;
   let wsClient = null;
   let eventDispatcher = null;
   let gateway = null;
   let cardStreamController = null;
   let heartbeatTimer = null;
+  let periodicBackfillAt = 0;
+  let periodicBackfillPromise = null;
+  let reconnectPromise = null;
   const processedMessageIds = new Map();
   const pendingFollowups = new Map();
   const conversationQueueTails = new Map();
@@ -1483,6 +1502,10 @@ function createFeishuLongConnectionService({
     last_execution_state: "",
     pending_ack_at: "",
     last_recovery_notice_at: "",
+    backfill_degraded: false,
+    backfill_degraded_count: 0,
+    last_backfill_error: "",
+    last_backfill_error_at: "",
   };
 
   async function persistStatus(nextStatus) {
@@ -1907,14 +1930,55 @@ function createFeishuLongConnectionService({
         heartbeat_at: new Date().toISOString(),
         stale_after_seconds: STALE_AFTER_SECONDS,
       });
+      void reconcileActiveConversations();
     }, HEARTBEAT_INTERVAL_MS);
     if (heartbeatTimer && typeof heartbeatTimer.unref === "function") {
       heartbeatTimer.unref();
     }
   }
 
+  function loadSdkModule() {
+    if (sdk && sdk.Client) {
+      return sdk;
+    }
+    sdk = sdkLoader();
+    return sdk;
+  }
+
+  function buildSdkRestClient(sdkModule) {
+    const sdkDomain = normalizeSdkDomain(sdkModule, settings.domain);
+    return new sdkModule.Client({
+      appId: settings.app_id,
+      appSecret: settings.app_secret,
+      domain: sdkDomain,
+    });
+  }
+
+  async function ensureStandaloneReplyClient() {
+    if (client) {
+      return client;
+    }
+    if (!settings.app_id || !settings.app_secret) {
+      return null;
+    }
+    if (standaloneClient) {
+      return standaloneClient;
+    }
+    const sdkModule = loadSdkModule();
+    if (!sdkModule || !sdkModule.Client) {
+      return null;
+    }
+    standaloneBaseClient = buildSdkRestClient(sdkModule);
+    standaloneClient = shouldUseCliMessageTransport()
+      ? createCliMessageClient(standaloneBaseClient, logger)
+      : standaloneBaseClient;
+    return standaloneClient;
+  }
+
   async function loadSettings(nextSettings) {
     settings = sanitizeSettings(nextSettings || settings);
+    standaloneClient = null;
+    standaloneBaseClient = null;
     await runtime.saveBridgeSettings(settings);
     return { settings, settings_summary: summarizeSettings(settings) };
   }
@@ -2191,62 +2255,100 @@ function createFeishuLongConnectionService({
     }
   }
 
-  async function connect() {
+  async function deliverProcessedMessageEvent(event) {
+    try {
+      const handled = await processMessageEvent(event);
+      if (!handled.ok) {
+        return handled;
+      }
+      if (handled.replyPayload?.kind === "approval_prompt") {
+        await sendApprovalPrompt({
+          normalized: handled.normalized,
+          approval: handled.replyPayload.approval,
+          binding: handled.replyPayload.binding,
+          deliveryNotice: handled.replyPayload.deliveryNotice || "",
+        });
+        return handled;
+      }
+      await sendReply({
+        chatId: handled.normalized.chat_id,
+        openId: handled.normalized.open_id,
+        text: handled.replyPreview,
+        sourceMessageId: handled.normalized.message_id,
+        phase: handled.replyPhase || (handled.direct ? "direct" : "reply"),
+      });
+      return handled;
+    } catch (error) {
+      await persistStatus({
+        connection_status: "error",
+        last_error: String(error?.message || error || "feishu_event_handler_failed"),
+        last_execution_state: "failed",
+        heartbeat_at: new Date().toISOString(),
+      });
+      await sendHandlerFailureReply(event, error);
+      return { ok: false, reason: "handler_failed", error };
+    }
+  }
+
+  async function handleCliEventStreamExit({ code = null, signal = "" } = {}) {
+    if (reconnectPromise) {
+      return reconnectPromise;
+    }
+    const previousStatus = { ...status };
+    if (String(previousStatus.connection_status || "").trim() !== "connected") {
+      return { ok: false, reason: "bridge_not_connected", status: previousStatus };
+    }
+    reconnectPromise = (async () => {
+      await persistStatus({
+        connection_status: "reconnecting",
+        last_error: `cli_event_stream_exited:${signal || code || "unknown"}`,
+        heartbeat_at: new Date().toISOString(),
+      });
+      if (gateway) {
+        await gateway.stop();
+      }
+      gateway = null;
+      wsClient = null;
+      client = null;
+      eventDispatcher = null;
+      cardStreamController = null;
+      return connect({ previousStatus });
+    })();
+    try {
+      return await reconnectPromise;
+    } finally {
+      reconnectPromise = null;
+    }
+  }
+
+  async function connect({ previousStatus = null } = {}) {
     if (!settings.app_id || !settings.app_secret) {
       await persistStatus({ connection_status: "blocked", last_error: "missing_app_credentials" });
       return { ok: false, reason: "missing_app_credentials", status };
     }
     const persistedPreviousStatus =
-      status.last_event_at || status.connected_at ? null : await loadPersistedPreviousStatus();
-    const previousStatus = { ...status, ...(persistedPreviousStatus || {}) };
-    sdk = sdkLoader();
-    if (!sdk || !sdk.Client || !sdk.WSClient || !sdk.EventDispatcher) {
+      previousStatus || status.last_event_at || status.connected_at ? null : await loadPersistedPreviousStatus();
+    const recoveryStatus = previousStatus || { ...status, ...(persistedPreviousStatus || {}) };
+    const sdkModule = loadSdkModule();
+    if (!sdkModule || !sdkModule.Client || !sdkModule.WSClient || !sdkModule.EventDispatcher) {
       await persistStatus({ connection_status: "blocked", last_error: "sdk_unavailable" });
       return { ok: false, reason: "sdk_unavailable", status };
     }
 
-    const sdkDomain = normalizeSdkDomain(sdk, settings.domain);
+    const sdkDomain = normalizeSdkDomain(sdkModule, settings.domain);
 
-    gateway = new FeishuGateway({
-      sdk,
+    gateway = gatewayFactory({
+      sdk: sdkModule,
       settings: {
         ...settings,
         sdk_domain: sdkDomain,
       },
       logger,
     });
-    gateway.registerMessageHandler(async (event) => {
-        try {
-          const handled = await processMessageEvent(event);
-          if (!handled.ok) {
-            return;
-          }
-          if (handled.replyPayload?.kind === "approval_prompt") {
-            await sendApprovalPrompt({
-              normalized: handled.normalized,
-              approval: handled.replyPayload.approval,
-              binding: handled.replyPayload.binding,
-              deliveryNotice: handled.replyPayload.deliveryNotice || "",
-            });
-            return;
-          }
-          await sendReply({
-            chatId: handled.normalized.chat_id,
-            openId: handled.normalized.open_id,
-            text: handled.replyPreview,
-            sourceMessageId: handled.normalized.message_id,
-            phase: handled.replyPhase || (handled.direct ? "direct" : "reply"),
-          });
-        } catch (error) {
-          await persistStatus({
-            connection_status: "error",
-            last_error: String(error?.message || error || "feishu_event_handler_failed"),
-            last_execution_state: "failed",
-            heartbeat_at: new Date().toISOString(),
-          });
-          await sendHandlerFailureReply(event, error);
-        }
-    });
+    if (typeof gateway.registerCliEventExitHandler === "function") {
+      gateway.registerCliEventExitHandler((payload) => handleCliEventStreamExit(payload));
+    }
+    gateway.registerMessageHandler(async (event) => deliverProcessedMessageEvent(event));
     gateway.registerCardActionHandler(async (event) => {
       try {
         return await handleCardActionEvent(event);
@@ -2271,6 +2373,7 @@ function createFeishuLongConnectionService({
       ? createCardStreamController(client, { throttleMs: 200, footer: { status: true, elapsed: true } })
       : null;
     const connectedAt = new Date().toISOString();
+    const preservedLastEventAt = String(recoveryStatus.last_event_at || status.last_event_at || "").trim();
     await persistStatus({
       connection_status: "connected",
       transport: typeof gateway.getTransport === "function" ? gateway.getTransport() : "sdk_websocket_plus_rest",
@@ -2280,15 +2383,15 @@ function createFeishuLongConnectionService({
       heartbeat_at: connectedAt,
       stale_after_seconds: STALE_AFTER_SECONDS,
       event_idle_after_seconds: EVENT_IDLE_AFTER_SECONDS_IDLE,
-      last_event_at: connectedAt,
-      recent_message_count: Number(previousStatus.recent_message_count || 0),
-      recent_reply_count: Number(previousStatus.recent_reply_count || 0),
-      last_message_preview: previousStatus.last_message_preview || "",
-      last_sender_ref: previousStatus.last_sender_ref || "",
+      last_event_at: preservedLastEventAt,
+      recent_message_count: Number(recoveryStatus.recent_message_count || 0),
+      recent_reply_count: Number(recoveryStatus.recent_reply_count || 0),
+      last_message_preview: recoveryStatus.last_message_preview || "",
+      last_sender_ref: recoveryStatus.last_sender_ref || "",
       settings_summary: summarizeSettings(settings),
     });
     startHeartbeat();
-    void recoverAfterReconnect(previousStatus);
+    void recoverAfterReconnect(recoveryStatus);
     return { ok: true, status };
   }
 
@@ -3269,7 +3372,259 @@ function createFeishuLongConnectionService({
     return notifiedChats;
   }
 
+  function messageTimestampMsFromHistory(item) {
+    const iso = normalizeEventTimestamp(
+      item?.create_time || item?.create_at || item?.created_at || item?.message_create_time || "",
+    );
+    const parsed = parseIsoTimestamp(iso);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+  }
+
+  function isRecoverableCliHistoryMessage(item) {
+    const messageType = String(item?.msg_type || item?.message_type || "text")
+      .trim()
+      .toLowerCase();
+    if (!TEXTUAL_MESSAGE_TYPES.has(messageType)) {
+      return false;
+    }
+    const senderType = String(item?.sender?.sender_type || item?.sender_type || "")
+      .trim()
+      .toLowerCase();
+    if (senderType && senderType !== "user") {
+      return false;
+    }
+    const rawContent =
+      item?.body && typeof item.body === "object" && item.body.content !== undefined
+        ? item.body.content
+        : item?.content;
+    const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent || {});
+    const text = extractMessageText(messageType, safeParseContent(content));
+    return Boolean(String(text || "").trim());
+  }
+
+  function eventFromCliHistoryMessage(item, { chatId = "", chatType = "" } = {}) {
+    const sender = item && typeof item === "object" ? item.sender || {} : {};
+    const senderId = sender && typeof sender === "object" ? sender.sender_id || {} : {};
+    const rawContent =
+      item?.body && typeof item.body === "object" && item.body.content !== undefined
+        ? item.body.content
+        : item?.content;
+    const content =
+      typeof rawContent === "string"
+        ? rawContent
+        : JSON.stringify(rawContent || {});
+    const openId = String(senderId?.open_id || sender?.open_id || sender?.id || "").trim();
+    const userId = String(senderId?.user_id || sender?.user_id || "").trim();
+    return {
+      event_type: "im.message.receive_v1",
+      message: {
+        message_id: String(item?.message_id || item?.messageId || "").trim(),
+        message_type: String(item?.msg_type || item?.message_type || "text").trim() || "text",
+        content,
+        chat_id: String(item?.chat_id || item?.chatId || chatId || "").trim(),
+        chat_type: String(item?.chat_type || item?.chatType || chatType || "").trim(),
+        create_time: String(
+          item?.create_time || item?.create_at || item?.created_at || item?.message_create_time || "",
+        ).trim(),
+        mentions: Array.isArray(item?.mentions) ? item.mentions : [],
+      },
+      sender: {
+        sender_id: {
+          open_id: openId,
+          user_id: userId,
+        },
+        open_id: openId,
+        user_id: userId,
+      },
+    };
+  }
+
+  function classifyHistoryLookupError(error) {
+    const source = String(error?.message || error || "").trim();
+    if (!source) {
+      return { kind: "unknown", detail: "unknown" };
+    }
+    if (/missing required scope\(s\):/i.test(source)) {
+      const scopes = HISTORY_LOOKUP_REQUIRED_USER_SCOPES.filter((scope) => source.includes(scope));
+      return {
+        kind: "missing_scope",
+        detail: scopes.length ? `missing_scope:${scopes.join(",")}` : "missing_scope",
+      };
+    }
+    if (/permission denied/i.test(source) || /\b230027\b/.test(source)) {
+      return { kind: "permission_denied", detail: "permission_denied" };
+    }
+    return { kind: "unknown", detail: source };
+  }
+
+  async function listRecoveryHistoryForConversation(conversationRef, { chatType = "" } = {}) {
+    const normalizedRef = String(conversationRef || "").trim();
+    if (!normalizedRef) {
+      return [];
+    }
+    const target =
+      normalizedRef.startsWith("oc_")
+        ? { chatId: normalizedRef }
+        : { userId: normalizedRef };
+    const attempts = [
+      { identity: "bot", ...target },
+      { identity: "user", ...target },
+    ];
+    let lastError = null;
+    const failures = [];
+    for (const attempt of attempts) {
+      try {
+        return await listRecentChatMessages({
+          ...attempt,
+          pageSize: RECOVERY_BACKFILL_MESSAGE_LIMIT,
+        });
+      } catch (error) {
+        lastError = error;
+        failures.push({
+          identity: String(attempt.identity || "").trim() || "bot",
+          ...classifyHistoryLookupError(error),
+        });
+      }
+    }
+    const summary = failures.map((item) => `${item.identity}:${item.detail}`).join("; ");
+    const historyError = new Error(
+      summary
+        ? `history_lookup_unavailable chat_type=${String(chatType || "").trim() || "unknown"} ${summary}`
+        : "history_lookup_failed",
+    );
+    historyError.code = "history_lookup_unavailable";
+    historyError.details = failures;
+    historyError.chat_type = String(chatType || "").trim();
+    historyError.conversation_ref = normalizedRef;
+    throw historyError || lastError || new Error("history_lookup_failed");
+  }
+
+  async function reconcileActiveConversations({ force = false } = {}) {
+    if (!gateway || typeof gateway.getTransport !== "function") {
+      return { recovered: 0, chats: 0, skipped: "gateway_unavailable" };
+    }
+    const transport = String(gateway.getTransport() || "").trim();
+    if (!transport.startsWith("lark_cli_event_")) {
+      return { recovered: 0, chats: 0, skipped: "transport_not_cli_event" };
+    }
+    const now = Date.now();
+    if (!force && now - periodicBackfillAt < PERIODIC_BACKFILL_INTERVAL_MS) {
+      return { recovered: 0, chats: 0, skipped: "cooldown" };
+    }
+    if (periodicBackfillPromise) {
+      return periodicBackfillPromise;
+    }
+    periodicBackfillAt = now;
+    const previousStatus = {
+      connection_status: String(status.connection_status || "").trim(),
+      last_event_at: String(status.last_event_at || "").trim(),
+      connected_at: String(status.connected_at || "").trim(),
+    };
+    periodicBackfillPromise = (async () => {
+      try {
+        return await recoverMissedMessages(previousStatus);
+      } catch (error) {
+        logger.warn?.("feishu periodic backfill failed", error);
+        return { recovered: 0, chats: 0, error: String(error?.message || error || "periodic_backfill_failed") };
+      } finally {
+        periodicBackfillPromise = null;
+      }
+    })();
+    return periodicBackfillPromise;
+  }
+
+  async function recoverMissedMessages(previousStatus) {
+    if (!gateway || typeof gateway.getTransport !== "function") {
+      return { recovered: 0, chats: 0 };
+    }
+    const transport = String(gateway.getTransport() || "").trim();
+    if (!transport.startsWith("lark_cli_event_")) {
+      return { recovered: 0, chats: 0 };
+    }
+    const lastSignalMs = parseIsoTimestamp(previousStatus?.last_event_at || previousStatus?.connected_at || "");
+    if (!Number.isFinite(lastSignalMs)) {
+      return { recovered: 0, chats: 0 };
+    }
+    let rows = [];
+    try {
+      const payload = await brokerClient.call("bridge-conversations", {
+        bridge: BRIDGE_NAME,
+        limit: Math.max(RECOVERY_SWEEP_LIMIT, RECOVERY_RECENT_CHAT_LIMIT),
+      });
+      rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    } catch (error) {
+      logger.warn?.("feishu backfill skipped", error);
+      return { recovered: 0, chats: 0 };
+    }
+    let recovered = 0;
+    let chats = 0;
+    const degradedChats = [];
+    for (const row of rows) {
+      const chatId = String(row?.chat_ref || "").trim();
+      if (!chatId) {
+        continue;
+      }
+      let messages = [];
+      try {
+        messages = await listRecoveryHistoryForConversation(chatId, {
+          chatType: String(row?.chat_type || "").trim(),
+        });
+      } catch (error) {
+        if (String(error?.code || "").trim() === "history_lookup_unavailable") {
+          degradedChats.push({
+            chat_id: chatId,
+            chat_type: String(row?.chat_type || "").trim(),
+            error: String(error?.message || error || "history_lookup_unavailable"),
+          });
+        }
+        logger.warn?.("feishu backfill history lookup failed", {
+          chat_id: chatId,
+          chat_type: String(row?.chat_type || "").trim(),
+          error: String(error?.message || error || "history_lookup_failed"),
+        });
+        continue;
+      }
+      const candidates = messages
+        .map((item) => ({
+          item,
+          timestampMs: messageTimestampMsFromHistory(item),
+        }))
+        .filter(({ item, timestampMs }) => {
+          const messageId = String(item?.message_id || item?.messageId || "").trim();
+          return (
+            messageId &&
+            Number.isFinite(timestampMs) &&
+            timestampMs > lastSignalMs &&
+            isRecoverableCliHistoryMessage(item)
+          );
+        })
+        .sort((left, right) => left.timestampMs - right.timestampMs);
+      if (!candidates.length) {
+        continue;
+      }
+      chats += 1;
+      for (const candidate of candidates) {
+        const event = eventFromCliHistoryMessage(candidate.item, {
+          chatId,
+          chatType: String(row?.chat_type || "").trim(),
+        });
+        const handled = await deliverProcessedMessageEvent(event);
+        if (handled?.reason !== "duplicate_message") {
+          recovered += 1;
+        }
+      }
+    }
+    await persistStatus({
+      backfill_degraded: degradedChats.length > 0,
+      backfill_degraded_count: degradedChats.length,
+      last_backfill_error: degradedChats.length > 0 ? degradedChats[0].error : "",
+      last_backfill_error_at: degradedChats.length > 0 ? new Date().toISOString() : "",
+    });
+    return { recovered, chats };
+  }
+
   async function recoverAfterReconnect(previousStatus) {
+    await recoverMissedMessages(previousStatus);
     const notifiedChats = await recoverPendingConversations(new Set());
     if (String(previousStatus?.connection_status || "").trim() !== "connected") {
       await recoverRecentConversations(previousStatus, notifiedChats);
@@ -3306,7 +3661,8 @@ function createFeishuLongConnectionService({
     const replyText = withDeliveryNotice(await buildApprovalPromptReply(approval, binding, routeContext), deliveryNotice);
     const receiveId = normalized.chat_id || normalized.open_id;
     const receiveIdType = normalized.chat_id ? "chat_id" : normalized.open_id ? "open_id" : "";
-    if (!client || !receiveId || !receiveIdType || typeof client.im?.v1?.message?.create !== "function") {
+    const replyClient = client || (await ensureStandaloneReplyClient());
+    if (!replyClient || !receiveId || !receiveIdType || typeof replyClient.im?.v1?.message?.create !== "function") {
       return sendReply({
         chatId: normalized.chat_id,
         openId: normalized.open_id,
@@ -3316,7 +3672,7 @@ function createFeishuLongConnectionService({
       });
     }
     try {
-      const response = await sendInteractiveCardMessage(client, {
+      const response = await sendInteractiveCardMessage(replyClient, {
         chatId: receiveIdType === "chat_id" ? receiveId : "",
         openId: receiveIdType === "open_id" ? receiveId : "",
         card: buildApprovalCardPayload(approval, binding),
@@ -3368,11 +3724,12 @@ function createFeishuLongConnectionService({
   }
 
   async function sendReply({ chatId, openId, text, sourceMessageId = "", phase = "" }) {
-    if (!client || !text) {
+    if (!text) {
       await persistStatus({ last_error: "reply_unavailable" });
       return { ok: false, reason: "reply_unavailable" };
     }
-    if (typeof client.im?.v1?.message?.create !== "function") {
+    const replyClient = client || (await ensureStandaloneReplyClient());
+    if (!replyClient || typeof replyClient.im?.v1?.message?.create !== "function") {
       await persistStatus({ last_error: "rest_client_unavailable" });
       return { ok: false, reason: "rest_client_unavailable" };
     }
@@ -3473,7 +3830,7 @@ function createFeishuLongConnectionService({
     }
     if (shouldUseInteractiveReply(phase)) {
       const card = buildInteractiveReplyCard(phase, shapedText, docRef);
-      const response = await sendInteractiveCardMessage(client, {
+      const response = await sendInteractiveCardMessage(replyClient, {
         chatId,
         openId,
         card,
@@ -3534,8 +3891,8 @@ function createFeishuLongConnectionService({
     for (const part of parts) {
       const response =
         messageType === "text"
-          ? await sendTextMessage(client, { chatId, openId, text: part })
-          : await sendPostMessage(client, { chatId, openId, text: part });
+          ? await sendTextMessage(replyClient, { chatId, openId, text: part })
+          : await sendPostMessage(replyClient, { chatId, openId, text: part });
       const replyMessageId = String(
         response?.messageId || `${sourceMessageId || receiveId}:reply:${Date.now()}`
       );
@@ -4584,6 +4941,7 @@ function createFeishuLongConnectionService({
     handleMessageEvent,
     handleCardActionEvent,
     processMessageEvent,
+    reconcileActiveConversations,
     getStatus,
     normalizeMessageEvent,
     normalizeCardActionEvent,
