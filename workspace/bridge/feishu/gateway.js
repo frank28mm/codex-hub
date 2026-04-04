@@ -1,6 +1,9 @@
 "use strict";
 
 const { execFile, spawn } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const readline = require("node:readline");
 const { promisify } = require("node:util");
 
@@ -18,6 +21,18 @@ function parseJsonSafe(value) {
   } catch (_error) {
     return {};
   }
+}
+
+function escapeProcessMatchPattern(value) {
+  return String(value || "").replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
+}
+
+function subscribeLockPathForApp(appId) {
+  const normalized = String(appId || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  return path.join(os.homedir(), ".lark-cli", "locks", `subscribe_${normalized}.lock`);
 }
 
 function normalizeCliEventEnvelope(payload) {
@@ -89,6 +104,40 @@ async function sendMessageViaLarkCli({ receiveIdType = "", receiveId = "", msgTy
   };
 }
 
+async function listChatMessagesViaLarkCli({
+  chatId = "",
+  userId = "",
+  pageSize = 50,
+  identity = "bot",
+  execFileAsyncImpl = execFileAsync,
+} = {}) {
+  const normalizedChatId = String(chatId || "").trim();
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedChatId && !normalizedUserId) {
+    throw new Error("missing_history_target");
+  }
+  const command = [
+    "im",
+    "+chat-messages-list",
+    "--as",
+    String(identity || "bot"),
+    "--page-size",
+    String(Math.max(1, Number(pageSize || 50) || 50)),
+  ];
+  if (normalizedChatId) {
+    command.push("--chat-id", normalizedChatId);
+  } else {
+    command.push("--user-id", normalizedUserId);
+  }
+  const { stdout } = await execFileAsyncImpl("lark-cli", command, { maxBuffer: 8 * 1024 * 1024 });
+  const payload = parseJsonSafe(stdout);
+  const body = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+  if (Array.isArray(body?.messages)) {
+    return body.messages;
+  }
+  return Array.isArray(body?.items) ? body.items : [];
+}
+
 function createCliMessageClient(baseClient, logger) {
   return {
     im: {
@@ -143,6 +192,8 @@ class FeishuGateway {
     this.transport = "sdk_websocket_plus_rest";
     this.running = false;
     this.recentMessageIds = new Map();
+    this.cliEventExitHandler = null;
+    this.cliEventStopping = false;
   }
 
   getRestClient() {
@@ -159,6 +210,10 @@ class FeishuGateway {
 
   registerCardActionHandler(handler) {
     this.cardActionHandler = handler;
+  }
+
+  registerCliEventExitHandler(handler) {
+    this.cliEventExitHandler = typeof handler === "function" ? handler : null;
   }
 
   _extractMessageId(event) {
@@ -206,9 +261,11 @@ class FeishuGateway {
       messageHandler: this.messageHandler,
       cardActionHandler: this.cardActionHandler,
     });
-    const pgrepPattern = eventTypes.length
-      ? "lark-cli event +subscribe --as bot --event-types"
-      : "lark-cli event +subscribe --as bot";
+    const pgrepPattern = escapeProcessMatchPattern(
+      eventTypes.length
+        ? "lark-cli event +subscribe --as bot --event-types"
+        : "lark-cli event +subscribe --as bot",
+    );
     try {
       ({ stdout } = await this.execFileAsync(
         "pgrep",
@@ -217,10 +274,11 @@ class FeishuGateway {
       ));
     } catch (error) {
       if (Number(error?.code || 0) === 1) {
+        stdout = "";
+      } else {
+        this.logger.warn?.(LOG_TAG, "failed to inspect existing lark-cli event subscribers", error);
         return;
       }
-      this.logger.warn?.(LOG_TAG, "failed to inspect existing lark-cli event subscribers", error);
-      return;
     }
     const candidatePids = String(stdout || "")
       .split(/\r?\n/)
@@ -231,7 +289,21 @@ class FeishuGateway {
         return match ? Number(match[1]) : 0;
       })
       .filter((pid) => Number.isInteger(pid) && pid > 0);
+    const subscribeLockPath = subscribeLockPathForApp(this.settings.app_id);
     if (!candidatePids.length) {
+      if (subscribeLockPath && fs.existsSync(subscribeLockPath)) {
+        try {
+          fs.unlinkSync(subscribeLockPath);
+          this.logger.warn?.(LOG_TAG, "removed stale lark-cli event subscribe lock", {
+            lock_path: subscribeLockPath,
+          });
+        } catch (error) {
+          this.logger.warn?.(LOG_TAG, "failed to remove stale lark-cli event subscribe lock", {
+            lock_path: subscribeLockPath,
+            error: String(error?.message || error || "unlink_failed"),
+          });
+        }
+      }
       return;
     }
     const terminated = [];
@@ -247,6 +319,16 @@ class FeishuGateway {
       }
     }
     if (terminated.length) {
+      if (subscribeLockPath && fs.existsSync(subscribeLockPath)) {
+        try {
+          fs.unlinkSync(subscribeLockPath);
+        } catch (error) {
+          this.logger.warn?.(LOG_TAG, "failed to clear lark-cli event subscribe lock after termination", {
+            lock_path: subscribeLockPath,
+            error: String(error?.message || error || "unlink_failed"),
+          });
+        }
+      }
       this.logger.warn?.(LOG_TAG, "terminated competing lark-cli event subscribers", { pids: terminated });
       await this.wait(250);
     }
@@ -266,29 +348,16 @@ class FeishuGateway {
     this.eventDispatcher = {};
     if (shouldUseCliEventTransport() && (this.messageHandler || this.cardActionHandler)) {
       if (this.cardActionHandler) {
-        this.wsClient = new sdk.WSClient({
-          appId: this.settings.app_id,
-          appSecret: this.settings.app_secret,
-          domain: this.settings.sdk_domain,
-          autoReconnect: true,
-          loggerLevel: sdk.LoggerLevel?.info,
-        });
-        this.patchWsClientForCardCallbacks();
-        this.eventDispatcher = new sdk.EventDispatcher({}).register({
-          "card.action.trigger": async (event) => this.safeCardActionHandler(event),
-        });
-        await this.wsClient.start({ eventDispatcher: this.eventDispatcher });
+        this.logger.warn?.(
+          LOG_TAG,
+          "card callbacks disabled while lark-cli event transport owns ingress",
+          { app_id: this.settings.app_id },
+        );
       }
       await this.startCliEventStream();
-      if (this.cardActionHandler) {
-        this.transport = shouldUseCliMessageTransport()
-          ? "lark_cli_event_plus_cli_im_plus_sdk_card_callbacks"
-          : "lark_cli_event_plus_sdk_rest_plus_sdk_card_callbacks";
-      } else {
-        this.transport = shouldUseCliMessageTransport()
-          ? "lark_cli_event_plus_cli_im"
-          : "lark_cli_event_plus_sdk_rest";
-      }
+      this.transport = shouldUseCliMessageTransport()
+        ? "lark_cli_event_plus_cli_im"
+        : "lark_cli_event_plus_sdk_rest";
     } else if (this.messageHandler) {
       this.wsClient = new sdk.WSClient({
         appId: this.settings.app_id,
@@ -339,6 +408,7 @@ class FeishuGateway {
       this.cliEventLines.close();
     }
     if (this.cliEventProcess && !this.cliEventProcess.killed) {
+      this.cliEventStopping = true;
       this.cliEventProcess.kill("SIGTERM");
     }
     this.cliEventLines = null;
@@ -393,6 +463,7 @@ class FeishuGateway {
     if (!eventTypes.length) {
       return;
     }
+    this.cliEventStopping = false;
     const child = this.spawnProcess(
       "lark-cli",
       ["event", "+subscribe", "--as", "bot", "--event-types", eventTypes.join(","), "--quiet"],
@@ -407,9 +478,21 @@ class FeishuGateway {
       }
     });
     child.on("exit", (code, signal) => {
+      const intentional = this.cliEventStopping;
+      this.cliEventStopping = false;
       this.logger.warn?.(LOG_TAG, "lark-cli event stream exited", { code, signal });
       this.cliEventProcess = null;
       this.cliEventLines = null;
+      if (!intentional && typeof this.cliEventExitHandler === "function") {
+        void Promise.resolve(
+          this.cliEventExitHandler({
+            code,
+            signal,
+          }),
+        ).catch((error) => {
+          this.logger.error?.(LOG_TAG, "cli event exit handler failed", error);
+        });
+      }
     });
     const rl = this.readlineModule.createInterface({ input: child.stdout });
     rl.on("line", async (line) => {
@@ -456,6 +539,8 @@ class FeishuGateway {
 module.exports = {
   FeishuGateway,
   FALLBACK_TOAST,
+  createCliMessageClient,
+  listChatMessagesViaLarkCli,
   normalizeCliEventEnvelope,
   shouldUseCliEventTransport,
   shouldUseCliMessageTransport,
