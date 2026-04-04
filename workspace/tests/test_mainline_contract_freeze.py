@@ -250,6 +250,27 @@ def test_feishu_local_extend_profile_adds_codex_home_roots(monkeypatch, tmp_path
     assert (codex_home / "agents").exists()
 
 
+def test_background_job_profile_uses_workspace_write_with_runtime_roots(monkeypatch, tmp_path) -> None:
+    worktree = tmp_path / "workspace-hub-worktrees" / "core-v1-0-3-to-v1-0-5"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("WORKSPACE_HUB_ROOT", str(worktree))
+    monkeypatch.setenv("HOME", "/tmp/workspace-hub-test-home")
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    monkeypatch.setattr(local_broker, "_codex_command_prefix", lambda: ["/opt/homebrew/bin/node", "/tmp/codex"])
+
+    command = local_broker._codex_exec_command(
+        prompt="推进 WH-OPS-19",
+        execution_profile="background-job",
+    )
+
+    command_str = " ".join(command)
+    assert "--sandbox" in command and "workspace-write" in command
+    assert 'approval_policy="never"' in command_str
+    assert "sandbox_workspace_write.network_access=true" in command_str
+    assert str(local_broker.workspace_root()) in command_str
+    assert str(local_broker.codex_memory.VAULT_ROOT) in command_str
+
+
 def test_validate_execution_profile_access_requires_approved_token(sample_env) -> None:
     _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
     runtime_state.init_db()
@@ -658,6 +679,99 @@ def test_bridge_status_marks_event_stall_as_stale(sample_env, monkeypatch, capsy
     assert payload["event_stalled"] is True
     assert payload["event_idle_after_seconds"] == 300
 
+
+def test_bridge_status_uses_fresh_connected_at_for_event_liveness(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    now = local_broker.dt.datetime.now(local_broker.dt.timezone.utc)
+    connected_at = now.isoformat().replace("+00:00", "Z")
+    last_event_at = (now - local_broker.dt.timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    monkeypatch.setattr(
+        local_broker.runtime_state,
+        "fetch_bridge_connection",
+        lambda bridge: {
+            "status": "connected",
+            "host_mode": "electron",
+            "transport": "lark_cli_event_plus_cli_im",
+            "last_error": "",
+            "last_event_at": last_event_at,
+            "updated_at": connected_at,
+            "metadata": {
+                "connected_at": connected_at,
+                "heartbeat_at": connected_at,
+                "stale_after_seconds": 90,
+                "event_idle_after_seconds": 300,
+            },
+        },
+    )
+    monkeypatch.setattr(local_broker, "_bridge_settings_summary", lambda bridge: {"has_app_credentials": True})
+
+    payload = local_broker._bridge_status_snapshot("feishu")
+
+    assert payload["connection_status"] == "connected"
+    assert payload["stale"] is False
+    assert payload["event_stalled"] is False
+
+
+def test_bridge_status_surfaces_backfill_degraded_metadata(sample_env, monkeypatch, capsys) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, _runtime_state, local_broker, _watcher = reload_modules()
+    now = local_broker.dt.datetime.now(local_broker.dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    monkeypatch.setattr(
+        local_broker.runtime_state,
+        "fetch_bridge_connection",
+        lambda bridge: {
+            "status": "connected",
+            "host_mode": "electron",
+            "transport": "lark_cli_event_plus_cli_im",
+            "last_error": "",
+            "last_event_at": now,
+            "updated_at": now,
+            "metadata": {
+                "connected_at": now,
+                "heartbeat_at": now,
+                "stale_after_seconds": 90,
+                "event_idle_after_seconds": 300,
+                "backfill_degraded": True,
+                "backfill_degraded_count": 2,
+                "last_backfill_error": "bot:permission_denied; user:missing_scope",
+                "last_backfill_error_at": now,
+            },
+        },
+    )
+    monkeypatch.setattr(local_broker, "_bridge_settings_summary", lambda bridge: {"has_app_credentials": True})
+
+    payload = local_broker._bridge_status_snapshot("feishu")
+
+    assert payload["connection_status"] == "connected"
+    assert payload["backfill_degraded"] is True
+    assert payload["backfill_degraded_count"] == 2
+    assert payload["last_backfill_error"] == "bot:permission_denied; user:missing_scope"
+    assert payload["last_backfill_error_at"] == now
+
+
+def test_bridge_message_activity_preserves_event_cursor_metadata(sample_env) -> None:
+    _dashboard_sync, _codex_memory, _review_plane, _coordination_plane, runtime_state, _local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    runtime_state.upsert_bridge_message(
+        bridge="feishu",
+        direction="inbound",
+        message_id="msg-cursor-in",
+        status="received",
+        payload={
+            "chat_id": "chat_cursor",
+            "text": "继续检查 bridge runtime",
+            "event_created_at": "2026-03-31T01:03:00+08:00",
+            "event_observed_at": "2026-03-31T01:04:00+08:00",
+            "cursor_kind": "event_observed_at",
+        },
+    )
+
+    activity = runtime_state.fetch_bridge_message_activity("feishu")
+
+    assert activity["inbound"]["cursor_at"] == "2026-03-31T01:04:00+08:00"
+    assert activity["inbound"]["cursor_kind"] == "event_observed_at"
+
+
+def test_bridge_connection_update_preserves_latest_runtime_timestamps(sample_env, monkeypatch, capsys) -> None:
     _dashboard_sync, _codex_memory, review_plane, coordination_plane, runtime_state, local_broker, _watcher = reload_modules()
     seed_console_state(_codex_memory, review_plane, coordination_plane)
     runtime_state.upsert_bridge_settings(

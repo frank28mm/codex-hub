@@ -1305,6 +1305,8 @@ def fetch_bridge_message_activity(bridge: str = "feishu") -> dict[str, Any]:
                 "created_at": "",
                 "updated_at": "",
                 "activity_at": "",
+                "cursor_at": "",
+                "cursor_kind": "",
                 "text": "",
                 "sender_ref": "",
                 "phase": "",
@@ -1312,12 +1314,15 @@ def fetch_bridge_message_activity(bridge: str = "feishu") -> dict[str, Any]:
         payload = json.loads(row["payload_json"] or "{}")
         created_at = str(row["created_at"] or "").strip()
         updated_at = str(row["updated_at"] or "").strip()
+        cursor_at = str(payload.get("event_observed_at") or payload.get("event_created_at") or updated_at or created_at).strip()
         return {
             "message_id": str(row["message_id"] or "").strip(),
             "status": str(row["status"] or "").strip(),
             "created_at": created_at,
             "updated_at": updated_at,
             "activity_at": updated_at or created_at,
+            "cursor_at": cursor_at,
+            "cursor_kind": str(payload.get("cursor_kind") or "").strip(),
             "text": str(payload.get("text") or "").strip(),
             "sender_ref": str(
                 payload.get("open_id")
