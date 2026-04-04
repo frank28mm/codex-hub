@@ -8,6 +8,11 @@ const {
   phaseCardMeta,
 } = require("./feishu/outbound");
 
+function matchCount(text, pattern) {
+  const matches = String(text || "").match(pattern);
+  return matches ? matches.length : 0;
+}
+
 async function testBuildReplyCardPayloadIncludesDocLinkAndFooter() {
   const card = buildReplyCardPayload({
     phase: "report",
@@ -20,9 +25,21 @@ async function testBuildReplyCardPayloadIncludesDocLinkAndFooter() {
   const elements = card.body.elements;
   const rendered = JSON.stringify(elements);
   assert.match(rendered, /结论：升级已完成/);
+  assert.equal(matchCount(rendered, /结论：升级已完成/g), 1);
   assert.match(rendered, /完整报告/);
   assert.match(rendered, /doc_123/);
   assert.match(rendered, /已完成 · 12s/);
+}
+
+async function testBuildReplyCardPayloadAvoidsDuplicateSummaryWithoutDocLink() {
+  const card = buildReplyCardPayload({
+    phase: "final",
+    text: "明天是 2026 年 3 月 31 日，周二。\n\n偏凉，建议带折叠伞。\n\n带一把折叠伞最稳。",
+  });
+  const elements = card.body.elements;
+  const rendered = JSON.stringify(elements);
+  assert.equal(elements[0]?.content, "**已完成**");
+  assert.equal(matchCount(rendered, /偏凉，建议带折叠伞/g), 1);
 }
 
 async function testBuildMetricDigestCardPayloadIncludesMetrics() {
@@ -64,6 +81,7 @@ async function testPhaseCardMetaCoversCompletionAndErrors() {
 
 async function main() {
   await testBuildReplyCardPayloadIncludesDocLinkAndFooter();
+  await testBuildReplyCardPayloadAvoidsDuplicateSummaryWithoutDocLink();
   await testBuildMetricDigestCardPayloadIncludesMetrics();
   await testOptimizeMarkdownCompactsLocalImageAndHeaders();
   await testPhaseCardMetaCoversCompletionAndErrors();

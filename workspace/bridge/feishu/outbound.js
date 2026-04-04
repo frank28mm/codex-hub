@@ -99,13 +99,12 @@ function buildReplyCardPayload({
 } = {}) {
   const meta = phaseCardMeta(phase);
   const normalizedText = optimizeMarkdown(text);
-  const summary = summarizeText(normalizedText, 200) || "本次没有附带可读摘要。";
   const metrics = extractMetricPairs(text, 4);
   const previewText = docUrl ? trimText(normalizedText, 900) : normalizedText;
   const elements = [
     {
       tag: "markdown",
-      content: `**${meta.statusLabel}**\n${summary}`,
+      content: `**${meta.statusLabel}**`,
       text_align: "left",
       text_size: "normal",
     },
@@ -118,6 +117,14 @@ function buildReplyCardPayload({
     elements.push({
       tag: "markdown",
       content: previewText,
+      text_align: "left",
+      text_size: "normal",
+    });
+  } else {
+    const summary = summarizeText(normalizedText, 200) || "本次没有附带可读摘要。";
+    elements.push({
+      tag: "markdown",
+      content: summary,
       text_align: "left",
       text_size: "normal",
     });
