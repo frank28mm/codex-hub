@@ -1917,4 +1917,48 @@ def test_writeback_job_progress_triggers_growth_projection_sync(sample_env, monk
     )
 
     assert changed == ["board"]
+    assert triggered == ["retrieval", "dashboard", "feishu"]
+
+
+def test_writeback_job_progress_triggers_growth_projection_only_for_growth_project(sample_env, monkeypatch) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    triggered: list[str] = []
+
+    monkeypatch.setattr(background_job_executor, "fixture_mode", lambda: False)
+    monkeypatch.setattr(background_job_executor.codex_memory, "sync_project_layers", lambda *args, **kwargs: ["board"])
+    monkeypatch.setattr(background_job_executor.codex_memory, "record_project_writeback", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(background_job_executor.codex_memory, "trigger_retrieval_sync_once", lambda: triggered.append("retrieval"))
+    monkeypatch.setattr(background_job_executor.codex_memory, "trigger_dashboard_sync_once", lambda: triggered.append("dashboard"))
+    monkeypatch.setattr(background_job_executor.codex_memory, "trigger_feishu_projection_sync_once", lambda: triggered.append("feishu"))
+    monkeypatch.setattr(
+        background_job_executor.codex_memory,
+        "trigger_growth_feishu_projection_sync_once",
+        lambda *args, **kwargs: triggered.append("growth-feishu"),
+    )
+    monkeypatch.setattr(
+        background_job_executor.codex_memory,
+        "trigger_growth_operator_surface_report_once",
+        lambda: triggered.append("growth-operator-surface"),
+    )
+
+    job = {
+        "project_name": "增长与营销",
+        "task_id": "GM-O29",
+        "source_type": "topic",
+        "source": "topic:操盘线",
+        "source_path": "/tmp/topic.md",
+        "project_board_path": "/tmp/project.md",
+    }
+
+    changed = background_job_executor.writeback_job_progress(
+        job,
+        run_id="run-1",
+        deliverable="/tmp/latest.md",
+        next_action="continue",
+        trigger_followup_syncs=True,
+    )
+
+    assert changed == ["board"]
     assert triggered == ["retrieval", "dashboard", "feishu", "growth-feishu", "growth-operator-surface"]

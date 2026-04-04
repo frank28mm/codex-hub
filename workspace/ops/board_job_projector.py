@@ -114,9 +114,17 @@ def _growth_task_specs(project_name: str) -> dict[str, dict[str, Any]]:
         if not workflow_id or not isinstance(workflow, dict):
             continue
         input_objects = [str(name).strip() for name in workflow.get("input_objects", []) if str(name).strip()]
+        executor_kind = str(workflow.get("executor_kind", "")).strip() or "growth_signal_scan"
+        output_objects = [str(name).strip() for name in workflow.get("output_objects", []) if str(name).strip()]
+        if not output_objects and executor_kind.startswith("growth_"):
+            output_objects = [name for name in ("Action", "Evidence") if table_map.get(name, "")]
+        projected_objects: list[str] = []
+        for name in [*input_objects, *output_objects]:
+            if name and name not in projected_objects:
+                projected_objects.append(name)
         projected[str(task_id).strip()] = {
             "job_slug": str(item.get("job_slug", "")).strip() or str(task_id).strip().lower(),
-            "executor_kind": str(workflow.get("executor_kind", "")).strip() or "growth_signal_scan",
+            "executor_kind": executor_kind,
             "automation_mode": str(item.get("automation_mode", "")).strip() or "background_assist",
             "allowed_actions": [str(value).strip() for value in workflow.get("allowed_actions", []) if str(value).strip()],
             "delivery_targets": [str(value).strip() for value in workflow.get("delivery_targets", []) if str(value).strip()],
@@ -130,7 +138,7 @@ def _growth_task_specs(project_name: str) -> dict[str, dict[str, Any]]:
             "workflow_id": workflow_id,
             "summary_focus": str(item.get("summary_focus", "")).strip(),
             "input_objects": input_objects,
-            "object_tables": {name: table_map.get(name, "") for name in input_objects},
+            "object_tables": {name: table_map.get(name, "") for name in projected_objects if table_map.get(name, "")},
             "system_name": str(config.get("system_name", "")).strip(),
             "primary_product": str(config.get("primary_product", "")).strip(),
             "primary_platforms": [str(value).strip() for value in config.get("primary_platforms", []) if str(value).strip()],

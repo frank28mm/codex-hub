@@ -1700,6 +1700,33 @@ def test_record_project_writeback_enqueues_runtime_queue_events(sample_env) -> N
     assert any(item["payload"].get("event_id") == event["event_id"] for item in retrieval_events)
     assert any(item["payload"].get("event_id") == event["event_id"] for item in dashboard_events)
     assert any(item["payload"].get("event_id") == event["event_id"] for item in projection_events)
+    assert not any(item["payload"].get("event_id") == event["event_id"] for item in growth_projection_events)
+
+
+def test_record_project_writeback_enqueues_growth_projection_only_for_growth_project(sample_env, monkeypatch) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, runtime_state, _local_broker, _watcher = reload_modules()
+    runtime_state.init_db()
+    monkeypatch.setattr(codex_memory, "trigger_harness_project_writeback_wake", lambda *args, **kwargs: {"reason": "skipped"})
+
+    binding = {
+        "project_name": "增长与营销",
+        "session_id": "sess-writeback-growth-1",
+        "binding_scope": "project",
+        "binding_board_path": "/tmp/growth-board.md",
+        "topic_name": "",
+        "rollup_target": "/tmp/growth-board.md",
+        "last_active_at": "2026-03-12T02:00:00Z",
+        "started_at": "2026-03-12T01:50:00Z",
+    }
+    event = codex_memory.record_project_writeback(
+        binding,
+        source="pytest",
+        changed_targets=["/tmp/growth-board.md"],
+        trigger_dashboard_sync=False,
+    )
+
+    growth_projection_events = runtime_state.fetch_runtime_events(queue_name="growth_feishu_projection_sync", limit=20)
+
     assert any(item["payload"].get("event_id") == event["event_id"] for item in growth_projection_events)
 
 
