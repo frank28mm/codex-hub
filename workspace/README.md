@@ -195,6 +195,29 @@
 - `Electron`
   - 用于桌面控制台
 
+### 依赖分层
+
+为了让新手更容易判断“哪些现在就要补，哪些按需再装”，公开版当前把依赖拆成 4 层：
+
+1. 核心必需
+   - `python3`
+   - `node`
+   - `npm`
+   - `npx`
+   - `codex`
+   - 已完成一次 `codex login`
+2. 可自动安装
+   - `requirements.txt` 里的 Python 包
+   - `lark-cli` 与官方 `lark-*` skills（仅在启用 Feishu 时）
+3. 推荐安装
+   - `Codex.app`
+   - `Obsidian.app`
+4. 特性依赖
+   - `tesseract / ocrmypdf / pdftoppm`
+     - 只在启用 `Knowledge Base` 的 PDF/OCR intake 时需要
+   - `Google Chrome`
+     - 只在启用 `OpenCLI` 浏览器执行面时需要
+
 ### 官方链接
 
 - `Codex`：[OpenAI Codex](https://developers.openai.com/codex/)
@@ -338,6 +361,13 @@ python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 - 最后自动跑：
   - `python3 ops/accept_product.py run`
 
+同时，`setup` 结束后写出的 `runtime/bootstrap-status.json` 现在会明确显示：
+
+- `Codex CLI` 是否已经登录
+- 哪些 Python 依赖已经装好
+- 哪些工具属于推荐安装项
+- 哪些只是特性依赖，不会阻塞基础使用
+
 如果你想把 Python 依赖安装和 bootstrap 拆开，也可以先运行：
 
 ```bash
@@ -384,10 +414,21 @@ python3 ops/accept_product.py run
 
 - 路径是否完整
 - `python3 / node / npm / npx / codex` 是否可用
-- `PyYAML / python-docx / openpyxl / pypdf / qrcode / certifi / requests` 是否已经装好
+- `Codex CLI` 是否已经完成登录
+- `PyYAML / python-docx / openpyxl / pypdf / qrcode / certifi / requests / cryptography / openai` 是否已经装好
 - 是否还残留个人现网路径
 - bootstrap 是否完成
 - 如果启用了 `Feishu`，还会检查 `lark-cli` 和本地配置是否存在
+
+验收也会额外报告但默认不阻塞基础 PASS 的项目：
+
+- `Codex.app / Obsidian.app / Google Chrome.app`
+- `tesseract / ocrmypdf / pdftoppm`
+
+也就是说，公开版现在会明确区分：
+
+- “这台机器现在还不能正常使用”
+- “这台机器能正常使用，但某些增强特性还没装”
 
 结果会写到：
 

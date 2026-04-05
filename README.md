@@ -127,6 +127,29 @@
 - `Codex CLI`
 - macOS
 
+### 依赖分层
+
+公开版当前把安装前置拆成 4 层，方便新手判断：
+
+1. 核心必需
+   - `python3`
+   - `node`
+   - `npm`
+   - `npx`
+   - `codex`
+   - 已完成一次 `codex login`
+2. 可自动安装
+   - `workspace/requirements.txt` 里的 Python 包
+   - `lark-cli` 与官方 `lark-*` skills（仅在启用 Feishu 时）
+3. 推荐安装
+   - `Codex.app`
+   - `Obsidian.app`
+4. 特性依赖
+   - `tesseract / ocrmypdf / pdftoppm`
+     - 仅在启用 `Knowledge Base` 的 PDF/OCR intake 时需要
+   - `Google Chrome`
+     - 仅在启用 `OpenCLI` 浏览器执行面时需要
+
 ## 它适合谁
 
 适合想要在本地搭建以下工作方式的人：
@@ -385,11 +408,12 @@ codex login
 
 ```bash
 cd workspace
-python3 ops/bootstrap_workspace_hub.py init
+python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 ```
 
-这个命令会自动：
+这个 `setup` 会自动：
 
+- 安装 `requirements.txt` 里的 Python 依赖
 - 生成本地 `.codex/config.toml`
 - 建立 `runtime/`、`logs/`、`reports/ops/`
 - 从仓库根层 `memory/` 模板生成本地 `memory.local/` 运行时骨架
@@ -397,6 +421,27 @@ python3 ops/bootstrap_workspace_hub.py init
   - `refresh-index`
   - `rebuild-all`
   - `verify-consistency`
+- 最后自动跑：
+  - `python3 ops/accept_product.py run`
+
+并且会在 `workspace/runtime/bootstrap-status.json` 里明确显示：
+
+- `Codex CLI` 是否已经登录
+- 哪些 Python 包已经装好
+- 哪些是推荐安装项
+- 哪些只是特性依赖，不会阻塞基础使用
+
+如果你想把 Python 依赖安装和 bootstrap 拆开，也可以先运行：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py install-python-deps
+```
+
+然后再使用旧的高级初始化命令：
+
+```bash
+python3 ops/bootstrap_workspace_hub.py init
+```
 
 如果你确定要把后台自动任务也一起装上，再执行：
 
@@ -420,8 +465,14 @@ python3 ops/accept_product.py run
 
 - 正确目录结构
 - 可用命令
+- 已完成 `codex login`
 - 无个人路径污染
 - 可运行 bootstrap 状态
+
+验收现在还会额外报告但默认不阻塞基础 PASS 的项：
+
+- `Codex.app / Obsidian.app / Google Chrome.app`
+- `tesseract / ocrmypdf / pdftoppm`
 
 ### 第 8 步：按你的使用目标选择模式
 

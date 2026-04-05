@@ -11,6 +11,9 @@ python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 
 echo
 echo "Setup finished."
+echo "If this machine has not logged into Codex yet, run:"
+echo "  codex login"
+echo
 echo "If you want Feishu chat entry as well, run:"
 echo "  python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app"
 echo "  python3 ops/bootstrap_workspace_hub.py init --install-feishu-bridge"

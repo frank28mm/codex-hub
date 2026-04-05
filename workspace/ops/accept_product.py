@@ -33,6 +33,16 @@ REQUIRED_PYTHON_MODULES = (
     ("cryptography", "cryptography"),
     ("openai", "openai"),
 )
+FEATURE_TOOL_GROUPS = {
+    "knowledge_base_pdf_ocr": {
+        "label": "Knowledge Base PDF / OCR ingestion",
+        "commands": ("tesseract", "ocrmypdf", "pdftoppm"),
+    },
+    "opencli_browser": {
+        "label": "OpenCLI browser execution",
+        "apps": ("Google Chrome",),
+    },
+}
 
 FORBIDDEN_PATTERNS = [
     "/workspace-hub-data/Codex-Workspace-Memory",
@@ -45,6 +55,10 @@ FORBIDDEN_PATTERNS = [
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def codex_auth_path() -> Path:
+    return Path.home() / ".codex" / "auth.json"
 
 
 def load_site() -> tuple[Path, Path, bool]:
@@ -120,11 +134,41 @@ def check_commands(*, feishu_enabled: bool) -> list[tuple[str, bool, str]]:
     return checks
 
 
+def check_apps() -> list[tuple[str, bool, str]]:
+    return [
+        ("Codex.app", (Path("/Applications") / "Codex.app").exists(), "recommended desktop app"),
+        ("Obsidian.app", (Path("/Applications") / "Obsidian.app").exists(), "recommended for full Vault browsing"),
+        ("Google Chrome.app", (Path("/Applications") / "Google Chrome.app").exists(), "optional for OpenCLI browser execution"),
+    ]
+
+
 def check_python_modules() -> list[tuple[str, bool, str]]:
     return [
         (package, importlib.util.find_spec(module) is not None, f"required Python package ({module})")
         for module, package in REQUIRED_PYTHON_MODULES
     ]
+
+
+def check_feature_tools() -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    for key, item in FEATURE_TOOL_GROUPS.items():
+        label = str(item.get("label", key)).strip()
+        for command in item.get("commands", ()):
+            checks.append((command, shutil.which(command) is not None, f"optional for {label}"))
+        for app in item.get("apps", ()):
+            checks.append((app, (Path("/Applications") / f"{app}.app").exists(), f"optional for {label}"))
+    return checks
+
+
+def read_codex_auth_status() -> dict[str, object]:
+    path = codex_auth_path()
+    if not path.exists():
+        return {"ready": False, "path": str(path), "reason": "missing"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ready": False, "path": str(path), "reason": f"invalid-json:{type(exc).__name__}"}
+    return {"ready": isinstance(payload, dict) and bool(payload), "path": str(path), "reason": "ok"}
 
 
 def scan_forbidden(root: Path) -> list[tuple[str, str]]:
@@ -220,10 +264,24 @@ def write_report(results: dict[str, object]) -> None:
     for item in results["command_checks"]:
         name, ok, note = item
         lines.append(f"- {'OK' if ok else 'FAIL'} `{name}`：{note}")
+    lines.extend(["", "## Auth Checks", ""])
+    auth = results.get("codex_auth_status") or {}
+    if isinstance(auth, dict):
+        lines.append(
+            f"- {'OK' if auth.get('ready') else 'FAIL'} Codex 登录：`{auth.get('path', '')}` | reason=`{auth.get('reason', '')}`"
+        )
     lines.extend(["", "## Python Package Checks", ""])
     for item in results["python_module_checks"]:
         name, ok, note = item
         lines.append(f"- {'OK' if ok else 'FAIL'} `{name}`：{note}")
+    lines.extend(["", "## App Checks", ""])
+    for item in results.get("app_checks", []):
+        name, ok, note = item
+        lines.append(f"- {'OK' if ok else 'MISS'} `{name}`：{note}")
+    lines.extend(["", "## Feature Tool Checks", ""])
+    for item in results.get("feature_tool_checks", []):
+        name, ok, note = item
+        lines.append(f"- {'OK' if ok else 'MISS'} `{name}`：{note}")
     lines.extend(["", "## Forbidden Pattern Scan", ""])
     forbidden_hits = results["forbidden_hits"]
     if forbidden_hits:
@@ -263,8 +321,11 @@ def cmd_run(_: argparse.Namespace) -> int:
     lark_cli_config_path = Path.home() / ".lark-cli" / "config.json"
     path_checks = check_paths(workspace_root, memory_root, feishu_enabled=feishu_enabled)
     command_checks = check_commands(feishu_enabled=feishu_enabled)
+    app_checks = check_apps()
     python_module_checks = check_python_modules()
+    feature_tool_checks = check_feature_tools()
     forbidden_hits = scan_forbidden(workspace_root)
+    codex_auth_status = read_codex_auth_status()
     feishu_auth_status = read_feishu_auth_status(workspace_root) if feishu_enabled else {"status": {}}
     feishu_status = feishu_auth_status.get("status") if isinstance(feishu_auth_status, dict) else {}
     feishu_full_ready = bool(isinstance(feishu_status, dict) and feishu_status.get("full_ready"))
@@ -282,6 +343,7 @@ def cmd_run(_: argparse.Namespace) -> int:
     passed = (
         all(ok for _, ok, _ in path_checks)
         and all(ok for _, ok, _ in command_checks)
+        and bool(codex_auth_status.get("ready"))
         and all(ok for _, ok, _ in python_module_checks)
         and not forbidden_hits
         and BOOTSTRAP_STATUS_PATH.exists()
@@ -295,7 +357,10 @@ def cmd_run(_: argparse.Namespace) -> int:
         "feishu_enabled": feishu_enabled,
         "path_checks": path_checks,
         "command_checks": command_checks,
+        "app_checks": app_checks,
+        "codex_auth_status": codex_auth_status,
         "python_module_checks": python_module_checks,
+        "feature_tool_checks": feature_tool_checks,
         "forbidden_hits": forbidden_hits,
         "bootstrap_status_exists": BOOTSTRAP_STATUS_PATH.exists(),
         "bootstrap_local_ready": bootstrap_local_ready,

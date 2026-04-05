@@ -34,8 +34,21 @@ PYTHON_DEPENDENCIES = (
     ("bs4", "beautifulsoup4"),
     ("qrcode", "qrcode[pil]"),
     ("certifi", "certifi"),
-    ("requests", "requests"),
+    ("cryptography", "cryptography"),
+    ("openai", "openai"),
 )
+FEATURE_TOOL_GROUPS = {
+    "knowledge_base_pdf_ocr": {
+        "label": "Knowledge Base PDF / OCR ingestion",
+        "commands": ("tesseract", "ocrmypdf", "pdftoppm"),
+        "install_hint": "brew install tesseract ocrmypdf poppler",
+    },
+    "opencli_browser": {
+        "label": "OpenCLI browser execution",
+        "apps": ("Google Chrome",),
+        "install_hint": "install Google Chrome",
+    },
+}
 LARK_CLI_PACKAGE = "@larksuite/cli"
 LARK_CLI_SKILLS_REPO = "https://github.com/larksuite/cli"
 LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
@@ -230,6 +243,21 @@ def command_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def codex_auth_path() -> Path:
+    return Path.home() / ".codex" / "auth.json"
+
+
+def codex_auth_ready() -> bool:
+    path = codex_auth_path()
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(payload, dict) and bool(payload)
+
+
 def lark_cli_skills_installed() -> bool:
     if not LARK_CLI_SKILLS_ROOT.exists():
         return False
@@ -243,6 +271,22 @@ def python_module_status() -> dict[str, bool]:
 def missing_python_packages() -> list[str]:
     status = python_module_status()
     return [package for module, package in PYTHON_DEPENDENCIES if not status.get(module, False)]
+
+
+def feature_tool_status() -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, item in FEATURE_TOOL_GROUPS.items():
+        commands = {name: command_available(name) for name in item.get("commands", ())}
+        apps = {name: app_installed(name) for name in item.get("apps", ())}
+        ready = all(commands.values()) and all(apps.values())
+        payload[key] = {
+            "label": str(item.get("label", "")).strip(),
+            "commands": commands,
+            "apps": apps,
+            "ready": ready,
+            "install_hint": str(item.get("install_hint", "")).strip(),
+        }
+    return payload
 
 
 def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
@@ -444,7 +488,7 @@ def _infer_local_ready(site: SiteConfig, payload: dict[str, object] | None = Non
 def _refresh_bootstrap_status(site: SiteConfig, payload: dict[str, object]) -> dict[str, object]:
     refreshed = dict(payload)
     dynamic = bootstrap_status_payload(site)
-    for key in ("commands", "python_modules", "apps", "files", "feishu_cli", "feishu_setup"):
+    for key in ("commands", "auth", "python_modules", "feature_tools", "apps", "files", "feishu_cli", "feishu_setup"):
         refreshed[key] = dynamic.get(key, refreshed.get(key))
     refreshed["manual_actions"] = build_manual_actions(site, refreshed)
     refreshed["checked_at"] = utc_now()
@@ -510,10 +554,16 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
             "codex": command_available("codex"),
             "lark_cli": command_available("lark-cli"),
         },
+        "auth": {
+            "codex_cli_logged_in": codex_auth_ready(),
+            "codex_auth_path": str(codex_auth_path()),
+        },
         "python_modules": python_module_status(),
+        "feature_tools": feature_tool_status(),
         "apps": {
             "obsidian": app_installed("Obsidian"),
             "codex_desktop": app_installed("Codex"),
+            "google_chrome": app_installed("Google Chrome"),
         },
         "files": {
             "site_config": SITE_CONFIG_PATH.exists(),
@@ -557,12 +607,20 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
         )
     if not commands.get("codex"):
         actions.append("Install Codex CLI and complete `codex login`.")
-    else:
+    elif not bool((payload.get("auth") or {}).get("codex_cli_logged_in")):
         actions.append("Run `codex login` once if this machine has not authenticated yet.")
     if not apps.get("codex_desktop"):
         actions.append("Optional but recommended: install the Codex desktop app for direct-open workspace sessions.")
     if not apps.get("obsidian"):
         actions.append("Optional but strongly recommended: install Obsidian for full Vault browsing and `obsidian://` deep-link support.")
+    feature_tools = payload.get("feature_tools") if isinstance(payload.get("feature_tools"), dict) else {}
+    for key, item in feature_tools.items():
+        if not isinstance(item, dict) or item.get("ready"):
+            continue
+        label = str(item.get("label", key)).strip()
+        install_hint = str(item.get("install_hint", "")).strip()
+        if install_hint:
+            actions.append(f"Optional for `{label}`: {install_hint}.")
     if site.feishu_enabled:
         feishu_setup = payload.get("feishu_setup") if isinstance(payload.get("feishu_setup"), dict) else {}
         actions.append("Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.")

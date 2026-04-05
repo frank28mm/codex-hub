@@ -31,6 +31,17 @@ def test_install_python_dependencies_uses_requirements_file(monkeypatch, tmp_pat
     assert observed["cwd"] == bootstrap.WORKSPACE_ROOT
 
 
+def test_bootstrap_python_dependency_inventory_covers_acceptance_modules() -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+
+    modules = {module for module, _package in bootstrap.PYTHON_DEPENDENCIES}
+
+    assert "cryptography" in modules
+    assert "openai" in modules
+
+
 def test_maybe_install_launchagents_uses_poll_interval_for_watcher(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
@@ -380,6 +391,53 @@ def test_build_manual_actions_guides_future_feishu_setup(monkeypatch) -> None:
 
     assert any("install-feishu-cli" in action for action in actions)
     assert any("setup-feishu-cli --create-feishu-app" in action for action in actions)
+
+
+def test_bootstrap_status_payload_includes_auth_and_feature_tools(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "_current_lark_cli_config", lambda: {"available": False, "configured": False})
+    monkeypatch.setattr(bootstrap, "_run_feishu_auth_status", lambda: {"status": {}})
+    monkeypatch.setattr(bootstrap, "codex_auth_ready", lambda: True)
+    monkeypatch.setattr(
+        bootstrap,
+        "feature_tool_status",
+        lambda: {
+            "knowledge_base_pdf_ocr": {
+                "label": "Knowledge Base PDF / OCR ingestion",
+                "commands": {"tesseract": True, "ocrmypdf": True, "pdftoppm": True},
+                "apps": {},
+                "ready": True,
+                "install_hint": "brew install tesseract ocrmypdf poppler",
+            }
+        },
+    )
+
+    payload = bootstrap.bootstrap_status_payload(bootstrap.default_site_config())
+
+    assert payload["auth"]["codex_cli_logged_in"] is True
+    assert "codex_auth_path" in payload["auth"]
+    assert payload["feature_tools"]["knowledge_base_pdf_ocr"]["ready"] is True
+
+
+def test_build_manual_actions_requests_codex_login_when_auth_missing(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    site = bootstrap.default_site_config()
+    payload = {
+        "commands": {"codex": True, "lark_cli": False},
+        "auth": {"codex_cli_logged_in": False},
+        "python_modules": {module: True for module, _package in bootstrap.PYTHON_DEPENDENCIES},
+        "apps": {"codex_desktop": True, "obsidian": True},
+        "feature_tools": {},
+        "feishu_setup": {},
+    }
+
+    actions = bootstrap.build_manual_actions(site, payload)
+
+    assert any("codex login" in action for action in actions)
 
 
 def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
