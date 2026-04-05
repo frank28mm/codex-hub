@@ -11,6 +11,7 @@ import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 try:
     import yaml
@@ -47,6 +48,45 @@ FEATURE_TOOL_GROUPS = {
         "label": "OpenCLI browser execution",
         "apps": ("Google Chrome",),
         "install_hint": "install Google Chrome",
+    },
+}
+SUPPORTED_PACKAGE_MANAGERS = ("brew", "apt", "winget", "choco")
+SYSTEM_PACKAGE_GROUPS: dict[str, dict[str, dict[str, list[str]]]] = {
+    "knowledge_base_pdf_ocr": {
+        "brew": {"formula": ["tesseract", "ocrmypdf", "poppler"], "cask": []},
+        "apt": {"packages": ["tesseract-ocr", "ocrmypdf", "poppler-utils"]},
+        "winget": {"ids": ["UB-Mannheim.TesseractOCR", "OCRmyPDF.OCRMYPDF", "oschwartz10612.Poppler"]},
+        "choco": {"packages": ["tesseract", "ocrmypdf", "poppler"]},
+    },
+    "opencli_browser": {
+        "brew": {"formula": [], "cask": ["google-chrome"]},
+        "apt": {"packages": ["chromium-browser"]},
+        "winget": {"ids": ["Google.Chrome"]},
+        "choco": {"packages": ["googlechrome"]},
+    },
+}
+FEATURE_SURFACES = {
+    "feishu": {
+        "label": "Feishu object ops and bridge",
+        "installer": "setup-feishu-cli",
+    },
+    "knowledge-base": {
+        "label": "Knowledge Base intake and OCR",
+        "system_group": "knowledge_base_pdf_ocr",
+        "installer": "install-system-deps",
+    },
+    "opencli": {
+        "label": "OpenCLI browser execution",
+        "system_group": "opencli_browser",
+        "installer": "install-system-deps",
+    },
+    "weixin": {
+        "label": "Weixin bridge",
+        "installer": "npm-install-bridge",
+    },
+    "electron": {
+        "label": "Electron desktop shell",
+        "installer": "npm-install-electron",
     },
 }
 LARK_CLI_PACKAGE = "@larksuite/cli"
@@ -243,6 +283,18 @@ def command_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def detect_system_package_manager() -> str:
+    if command_available("brew"):
+        return "brew"
+    if command_available("apt-get"):
+        return "apt"
+    if command_available("winget"):
+        return "winget"
+    if command_available("choco"):
+        return "choco"
+    return ""
+
+
 def codex_auth_path() -> Path:
     return Path.home() / ".codex" / "auth.json"
 
@@ -287,6 +339,193 @@ def feature_tool_status() -> dict[str, object]:
             "install_hint": str(item.get("install_hint", "")).strip(),
         }
     return payload
+
+
+def build_system_install_command(group_id: str, *, manager: str) -> list[str]:
+    group = SYSTEM_PACKAGE_GROUPS.get(group_id, {})
+    payload = group.get(manager, {})
+    if manager == "brew":
+        formula = list(payload.get("formula", []))
+        cask = list(payload.get("cask", []))
+        commands: list[list[str]] = []
+        if formula:
+            commands.append(["brew", "install", *formula])
+        if cask:
+            commands.append(["brew", "install", "--cask", *cask])
+        flattened: list[str] = []
+        for command in commands:
+            if flattened:
+                flattened.extend(["&&"])
+            flattened.extend(command)
+        return flattened
+    if manager == "apt":
+        packages = list(payload.get("packages", []))
+        return ["sudo", "apt-get", "install", "-y", *packages] if packages else []
+    if manager == "winget":
+        ids = list(payload.get("ids", []))
+        if not ids:
+            return []
+        # Emit one command line flattened for display; execution helper will split into multiple installs.
+        flattened: list[str] = []
+        for package_id in ids:
+            if flattened:
+                flattened.extend(["&&"])
+            flattened.extend(["winget", "install", "--id", package_id, "--exact", "--accept-package-agreements", "--accept-source-agreements"])
+        return flattened
+    if manager == "choco":
+        packages = list(payload.get("packages", []))
+        return ["choco", "install", "-y", *packages] if packages else []
+    return []
+
+
+def execute_system_install(group_id: str, *, manager: str, dry_run: bool = False) -> dict[str, Any]:
+    group = SYSTEM_PACKAGE_GROUPS.get(group_id, {})
+    payload = group.get(manager, {})
+    if not payload:
+        return {"ok": False, "group_id": group_id, "manager": manager, "reason": "manager_not_supported"}
+    if dry_run:
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "manager": manager,
+            "dry_run": True,
+            "command": build_system_install_command(group_id, manager=manager),
+        }
+    results: list[dict[str, object]] = []
+    if manager == "brew":
+        for command in filter(None, [payload.get("formula"), payload.get("cask")]):
+            if command == payload.get("formula"):
+                cmd = ["brew", "install", *list(command)]
+            else:
+                cmd = ["brew", "install", "--cask", *list(command)]
+            if len(cmd) > 2:
+                results.append(run_command(cmd, WORKSPACE_ROOT))
+    elif manager == "apt":
+        cmd = ["sudo", "apt-get", "install", "-y", *list(payload.get("packages", []))]
+        results.append(run_command(cmd, WORKSPACE_ROOT))
+    elif manager == "winget":
+        for package_id in payload.get("ids", []):
+            cmd = ["winget", "install", "--id", package_id, "--exact", "--accept-package-agreements", "--accept-source-agreements"]
+            results.append(run_command(cmd, WORKSPACE_ROOT))
+    elif manager == "choco":
+        cmd = ["choco", "install", "-y", *list(payload.get("packages", []))]
+        results.append(run_command(cmd, WORKSPACE_ROOT))
+    ok = all(int(item.get("returncode") or 0) == 0 for item in results)
+    return {"ok": ok, "group_id": group_id, "manager": manager, "results": results}
+
+
+def feature_doctor(feature: str, site: SiteConfig) -> dict[str, Any]:
+    normalized = str(feature or "").strip().lower()
+    if normalized not in FEATURE_SURFACES:
+        raise SystemExit(f"unknown feature: {feature}")
+    status = current_bootstrap_status(site)
+    surface = FEATURE_SURFACES[normalized]
+    checks: list[dict[str, object]] = []
+    ready = True
+    install_actions: list[str] = []
+
+    if normalized == "feishu":
+        summary = status.get("feishu_setup") if isinstance(status.get("feishu_setup"), dict) else {}
+        checks.extend(
+            [
+                {"name": "site_feishu_enabled", "ok": bool(site.feishu_enabled), "note": "site.yaml feishu_enabled"},
+                {"name": "lark_cli", "ok": bool(status["commands"].get("lark_cli")), "note": "official CLI installed"},
+                {"name": "lark_cli_configured", "ok": bool((status.get("feishu_cli") or {}).get("configured")), "note": "CLI config ready"},
+                {"name": "object_ops_ready", "ok": bool(summary.get("object_ops_ready")), "note": "Feishu object operations ready"},
+                {"name": "coco_bridge_ready", "ok": bool(summary.get("coco_bridge_ready")), "note": "assistant bridge credentials synced"},
+                {"name": "full_ready", "ok": bool(summary.get("full_ready")), "note": "full Feishu path ready"},
+            ]
+        )
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app")
+    elif normalized == "knowledge-base":
+        tools = (status.get("feature_tools") or {}).get("knowledge_base_pdf_ocr", {})
+        checks.append({"name": "ocr_tools_ready", "ok": bool(tools.get("ready")), "note": "tesseract / ocrmypdf / pdftoppm"})
+        kb = status.get("knowledge_base") if isinstance(status.get("knowledge_base"), dict) else {}
+        checks.append(
+            {
+                "name": "knowledge_bootstrap",
+                "ok": int(((kb.get("knowledge_bootstrap") or {}).get("returncode")) or 0) == 0,
+                "note": "knowledge intake bootstrap",
+            }
+        )
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-system-deps --group knowledge_base_pdf_ocr")
+    elif normalized == "opencli":
+        tools = (status.get("feature_tools") or {}).get("opencli_browser", {})
+        checks.append({"name": "browser_ready", "ok": bool(tools.get("ready")), "note": "Google Chrome / browser runtime"})
+        checks.append({"name": "opencli_bin", "ok": command_available("opencli"), "note": "opencli binary available"})
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-system-deps --group opencli_browser")
+    elif normalized == "weixin":
+        checks.append({"name": "node", "ok": bool(status["commands"].get("node")), "note": "node available"})
+        checks.append({"name": "voice_helper", "ok": (WORKSPACE_ROOT / "bridge" / "weixin_voice_to_wav.mjs").exists(), "note": "voice helper present"})
+        checks.append({"name": "openai_sdk", "ok": bool(status["python_modules"].get("openai")), "note": "voice transcription SDK"})
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature weixin")
+    elif normalized == "electron":
+        checks.append({"name": "node", "ok": bool(status["commands"].get("node")), "note": "node available"})
+        checks.append({"name": "npm", "ok": bool(status["commands"].get("npm")), "note": "npm available"})
+        checks.append({"name": "package_json", "ok": (WORKSPACE_ROOT / "apps" / "electron-console" / "package.json").exists(), "note": "electron package present"})
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature electron")
+
+    ready = all(bool(item.get("ok")) for item in checks)
+    return {
+        "feature": normalized,
+        "label": surface["label"],
+        "ready": ready,
+        "checks": checks,
+        "installer": surface.get("installer", ""),
+        "install_actions": install_actions,
+        "package_manager": detect_system_package_manager(),
+    }
+
+
+def install_feature(feature: str, site: SiteConfig, *, dry_run: bool = False) -> dict[str, Any]:
+    normalized = str(feature or "").strip().lower()
+    if normalized not in FEATURE_SURFACES:
+        raise SystemExit(f"unknown feature: {feature}")
+    manager = detect_system_package_manager()
+    if normalized == "feishu":
+        if dry_run:
+            return {
+                "feature": normalized,
+                "dry_run": True,
+                "installer": "setup-feishu-cli",
+                "command": ["python3", "ops/bootstrap_workspace_hub.py", "setup-feishu-cli", "--create-feishu-app"],
+                "ok": True,
+            }
+        payload = install_feishu_cli_tooling(force=False, install_skills=True)
+        ok = not result_failed(payload.get("cli")) and not result_failed(payload.get("skills"))
+        return {"feature": normalized, "installer": "install-feishu-cli", "result": payload, "ok": ok}
+    if normalized == "knowledge-base":
+        system_result = execute_system_install("knowledge_base_pdf_ocr", manager=manager, dry_run=dry_run)
+        return {"feature": normalized, "installer": "system-deps", "system_result": system_result, "ok": bool(system_result.get("ok", False))}
+    if normalized == "opencli":
+        system_result = execute_system_install("opencli_browser", manager=manager, dry_run=dry_run)
+        return {"feature": normalized, "installer": "system-deps", "system_result": system_result, "ok": bool(system_result.get("ok", False))}
+    if normalized == "weixin":
+        command = ["npm", "install"]
+        if dry_run:
+            return {
+                "feature": normalized,
+                "dry_run": True,
+                "command": command,
+                "cwd": str(WORKSPACE_ROOT / "bridge"),
+                "ok": True,
+            }
+        result = run_command(command, WORKSPACE_ROOT / "bridge")
+        return {"feature": normalized, "installer": "npm-install-bridge", "result": result, "ok": int(result.get("returncode") or 0) == 0}
+    if normalized == "electron":
+        command = ["npm", "install"]
+        cwd = WORKSPACE_ROOT / "apps" / "electron-console"
+        if dry_run:
+            return {
+                "feature": normalized,
+                "dry_run": True,
+                "command": command,
+                "cwd": str(cwd),
+                "ok": True,
+            }
+        result = run_command(command, cwd)
+        return {"feature": normalized, "installer": "npm-install-electron", "result": result, "ok": int(result.get("returncode") or 0) == 0}
+    return {"feature": normalized, "ok": False, "reason": "unsupported_feature"}
 
 
 def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
@@ -467,6 +706,16 @@ def _write_bootstrap_status(payload: dict[str, object]) -> None:
     )
 
 
+def _read_bootstrap_status() -> dict[str, object]:
+    if not BOOTSTRAP_STATUS_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(BOOTSTRAP_STATUS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _infer_local_ready(site: SiteConfig, payload: dict[str, object] | None = None) -> bool:
     candidate = payload or {}
     explicit = candidate.get("local_ready")
@@ -499,6 +748,15 @@ def _refresh_bootstrap_status(site: SiteConfig, payload: dict[str, object]) -> d
     if not refreshed.get("setup_phase") and refreshed["local_ready"]:
         refreshed["setup_phase"] = "complete"
     return refreshed
+
+
+def current_bootstrap_status(site: SiteConfig) -> dict[str, object]:
+    existing_payload = _read_bootstrap_status()
+    if existing_payload:
+        return _refresh_bootstrap_status(site, existing_payload)
+    payload = bootstrap_status_payload(site)
+    payload["manual_actions"] = build_manual_actions(site, payload)
+    return payload
 
 
 def _ensure_site_feishu_enabled() -> dict[str, object]:
@@ -959,13 +1217,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 def cmd_status(_: argparse.Namespace) -> int:
     site = load_site_config()
+    payload = current_bootstrap_status(site)
     if BOOTSTRAP_STATUS_PATH.exists():
-        payload = json.loads(BOOTSTRAP_STATUS_PATH.read_text(encoding="utf-8"))
-        payload = _refresh_bootstrap_status(site, payload)
         _write_bootstrap_status(payload)
-    else:
-        payload = bootstrap_status_payload(site)
-        payload["manual_actions"] = build_manual_actions(site, payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -1022,6 +1276,30 @@ def cmd_setup_feishu_cli(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor_feature(args: argparse.Namespace) -> int:
+    site = load_site_config()
+    payload = feature_doctor(args.feature, site)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if bool(payload.get("ready")) else 1
+
+
+def cmd_install_system_deps(args: argparse.Namespace) -> int:
+    detected_manager = detect_system_package_manager()
+    manager = str(args.manager or detected_manager).strip()
+    payload = execute_system_install(args.group, manager=manager, dry_run=args.dry_run)
+    payload["detected_manager"] = detected_manager
+    payload["resolved_manager"] = manager
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if bool(payload.get("ok")) else 1
+
+
+def cmd_install_feature(args: argparse.Namespace) -> int:
+    site = load_site_config()
+    payload = install_feature(args.feature, site, dry_run=args.dry_run)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if bool(payload.get("ok")) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bootstrap the portable Codex Hub product workspace.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1040,6 +1318,30 @@ def build_parser() -> argparse.ArgumentParser:
     install_feishu_cli_parser.add_argument("--force", action="store_true", help="Reinstall lark-cli even if it already exists.")
     install_feishu_cli_parser.add_argument("--skip-skills", action="store_true", help="Skip installing the official Lark skills bundle.")
     install_feishu_cli_parser.set_defaults(func=cmd_install_feishu_cli)
+
+    doctor_feature_parser = sub.add_parser(
+        "doctor-feature",
+        help="Check whether a specific feature surface is ready and show the next install action if it is not.",
+    )
+    doctor_feature_parser.add_argument("--feature", choices=sorted(FEATURE_SURFACES), required=True, help="Feature surface to inspect.")
+    doctor_feature_parser.set_defaults(func=cmd_doctor_feature)
+
+    install_system_deps_parser = sub.add_parser(
+        "install-system-deps",
+        help="Install the system package bundle behind a feature surface, with auto-detected package manager support.",
+    )
+    install_system_deps_parser.add_argument("--group", choices=sorted(SYSTEM_PACKAGE_GROUPS), required=True, help="System dependency group to install.")
+    install_system_deps_parser.add_argument("--manager", choices=SUPPORTED_PACKAGE_MANAGERS, help="Override the detected package manager.")
+    install_system_deps_parser.add_argument("--dry-run", action="store_true", help="Show the resolved install command without executing it.")
+    install_system_deps_parser.set_defaults(func=cmd_install_system_deps)
+
+    install_feature_parser = sub.add_parser(
+        "install-feature",
+        help="Install the primary prerequisites for a feature surface without running the full product bootstrap.",
+    )
+    install_feature_parser.add_argument("--feature", choices=sorted(FEATURE_SURFACES), required=True, help="Feature surface to install.")
+    install_feature_parser.add_argument("--dry-run", action="store_true", help="Show the resolved install action without executing it.")
+    install_feature_parser.set_defaults(func=cmd_install_feature)
 
     setup_feishu_cli_parser = sub.add_parser(
         "setup-feishu-cli",

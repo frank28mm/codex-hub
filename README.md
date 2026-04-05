@@ -654,6 +654,12 @@ npm run workspace
 4. 跑本地 + 微信私聊：
    - 在本地版基础上，执行一次微信扫码登录并安装 `weixin_bridge` 的 LaunchAgent
 
+如果你发现某个能力单独没 ready，不需要每次都重跑整套引导。进入 `workspace/` 目录后，公开版现在额外提供三类定点命令：
+
+- `python3 ops/bootstrap_workspace_hub.py doctor-feature --feature feishu`
+- `python3 ops/bootstrap_workspace_hub.py install-system-deps --group knowledge_base_pdf_ocr --dry-run`
+- `python3 ops/bootstrap_workspace_hub.py install-feature --feature electron --dry-run`
+
 ## Feishu 接入是不是最简便
 
 如果目标是同时保留这些能力：

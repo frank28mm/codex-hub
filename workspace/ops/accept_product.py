@@ -43,6 +43,22 @@ FEATURE_TOOL_GROUPS = {
         "apps": ("Google Chrome",),
     },
 }
+REQUIRED_BOOTSTRAP_COMMANDS = (
+    "doctor-feature",
+    "install-system-deps",
+    "install-feature",
+)
+REQUIRED_FEATURE_SURFACES = (
+    "feishu",
+    "knowledge-base",
+    "opencli",
+    "weixin",
+    "electron",
+)
+REQUIRED_SYSTEM_GROUPS = (
+    "knowledge_base_pdf_ocr",
+    "opencli_browser",
+)
 
 FORBIDDEN_PATTERNS = [
     "/workspace-hub-data/Codex-Workspace-Memory",
@@ -157,6 +173,40 @@ def check_feature_tools() -> list[tuple[str, bool, str]]:
             checks.append((command, shutil.which(command) is not None, f"optional for {label}"))
         for app in item.get("apps", ()):
             checks.append((app, (Path("/Applications") / f"{app}.app").exists(), f"optional for {label}"))
+    return checks
+
+
+def check_bootstrap_cli_contract() -> list[tuple[str, bool, str]]:
+    bootstrap_path = WORKSPACE_ROOT / "ops" / "bootstrap_workspace_hub.py"
+    spec = importlib.util.spec_from_file_location("_codex_hub_bootstrap_contract", bootstrap_path)
+    if spec is None or spec.loader is None:
+        return [("bootstrap-import", False, "unable to load bootstrap contract from file path")]
+    bootstrap_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bootstrap_module
+    try:
+        spec.loader.exec_module(bootstrap_module)
+    except Exception as exc:
+        sys.modules.pop(spec.name, None)
+        return [("bootstrap-import", False, f"unable to import bootstrap contract: {type(exc).__name__}")]
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    parser = bootstrap_module.build_parser()
+    commands: set[str] = set()
+    for action in getattr(parser, "_actions", []):
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            commands.update(str(name) for name in choices)
+    feature_surfaces = set(getattr(bootstrap_module, "FEATURE_SURFACES", {}).keys())
+    system_groups = set(getattr(bootstrap_module, "SYSTEM_PACKAGE_GROUPS", {}).keys())
+
+    checks: list[tuple[str, bool, str]] = []
+    for command in REQUIRED_BOOTSTRAP_COMMANDS:
+        checks.append((command, command in commands, "required bootstrap CLI command"))
+    for feature in REQUIRED_FEATURE_SURFACES:
+        checks.append((f"feature:{feature}", feature in feature_surfaces, "required feature-specific surface"))
+    for group in REQUIRED_SYSTEM_GROUPS:
+        checks.append((f"group:{group}", group in system_groups, "required system dependency bundle"))
     return checks
 
 
@@ -282,6 +332,10 @@ def write_report(results: dict[str, object]) -> None:
     for item in results.get("feature_tool_checks", []):
         name, ok, note = item
         lines.append(f"- {'OK' if ok else 'MISS'} `{name}`：{note}")
+    lines.extend(["", "## Bootstrap CLI Contract", ""])
+    for item in results.get("bootstrap_cli_checks", []):
+        name, ok, note = item
+        lines.append(f"- {'OK' if ok else 'FAIL'} `{name}`：{note}")
     lines.extend(["", "## Forbidden Pattern Scan", ""])
     forbidden_hits = results["forbidden_hits"]
     if forbidden_hits:
@@ -324,6 +378,7 @@ def cmd_run(_: argparse.Namespace) -> int:
     app_checks = check_apps()
     python_module_checks = check_python_modules()
     feature_tool_checks = check_feature_tools()
+    bootstrap_cli_checks = check_bootstrap_cli_contract()
     forbidden_hits = scan_forbidden(workspace_root)
     codex_auth_status = read_codex_auth_status()
     feishu_auth_status = read_feishu_auth_status(workspace_root) if feishu_enabled else {"status": {}}
@@ -345,6 +400,7 @@ def cmd_run(_: argparse.Namespace) -> int:
         and all(ok for _, ok, _ in command_checks)
         and bool(codex_auth_status.get("ready"))
         and all(ok for _, ok, _ in python_module_checks)
+        and all(ok for _, ok, _ in bootstrap_cli_checks)
         and not forbidden_hits
         and BOOTSTRAP_STATUS_PATH.exists()
         and bootstrap_local_ready
@@ -361,6 +417,7 @@ def cmd_run(_: argparse.Namespace) -> int:
         "codex_auth_status": codex_auth_status,
         "python_module_checks": python_module_checks,
         "feature_tool_checks": feature_tool_checks,
+        "bootstrap_cli_checks": bootstrap_cli_checks,
         "forbidden_hits": forbidden_hits,
         "bootstrap_status_exists": BOOTSTRAP_STATUS_PATH.exists(),
         "bootstrap_local_ready": bootstrap_local_ready,

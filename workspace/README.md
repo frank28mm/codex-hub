@@ -686,10 +686,19 @@ python3 ops/bootstrap_workspace_hub.py setup --install-launchagents
 python3 ops/bootstrap_workspace_hub.py install-python-deps
 python3 ops/bootstrap_workspace_hub.py install-feishu-cli
 python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
+python3 ops/bootstrap_workspace_hub.py doctor-feature --feature knowledge-base
+python3 ops/bootstrap_workspace_hub.py install-system-deps --group knowledge_base_pdf_ocr --dry-run
+python3 ops/bootstrap_workspace_hub.py install-feature --feature electron --dry-run
 python3 ops/bootstrap_workspace_hub.py init
 python3 ops/bootstrap_workspace_hub.py status
 python3 ops/accept_product.py run
 ```
+
+如果某个具体能力还没 ready，不需要重新跑整套 setup。可以先用下面三类命令定点排查：
+
+- `doctor-feature`：判断单个能力是否 ready，并给出下一步安装动作
+- `install-system-deps`：按当前系统包管理器安装某组系统依赖，支持 `--dry-run`
+- `install-feature`：只安装某个 feature 的主前置，比如 `electron / weixin / knowledge-base / opencli`
 
 ### 记忆与看板
 

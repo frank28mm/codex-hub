@@ -421,6 +421,172 @@ def test_bootstrap_status_payload_includes_auth_and_feature_tools(monkeypatch) -
     assert payload["feature_tools"]["knowledge_base_pdf_ocr"]["ready"] is True
 
 
+def test_detect_system_package_manager_prefers_priority_order(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(
+        bootstrap,
+        "command_available",
+        lambda name: name in {"brew", "apt-get", "winget", "choco"},
+    )
+
+    assert bootstrap.detect_system_package_manager() == "brew"
+
+
+def test_build_system_install_command_supports_supported_managers() -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+
+    assert bootstrap.build_system_install_command("knowledge_base_pdf_ocr", manager="brew") == [
+        "brew",
+        "install",
+        "tesseract",
+        "ocrmypdf",
+        "poppler",
+    ]
+    assert bootstrap.build_system_install_command("knowledge_base_pdf_ocr", manager="apt") == [
+        "sudo",
+        "apt-get",
+        "install",
+        "-y",
+        "tesseract-ocr",
+        "ocrmypdf",
+        "poppler-utils",
+    ]
+    assert bootstrap.build_system_install_command("knowledge_base_pdf_ocr", manager="winget") == [
+        "winget",
+        "install",
+        "--id",
+        "UB-Mannheim.TesseractOCR",
+        "--exact",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "&&",
+        "winget",
+        "install",
+        "--id",
+        "OCRmyPDF.OCRMYPDF",
+        "--exact",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "&&",
+        "winget",
+        "install",
+        "--id",
+        "oschwartz10612.Poppler",
+        "--exact",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ]
+    assert bootstrap.build_system_install_command("knowledge_base_pdf_ocr", manager="choco") == [
+        "choco",
+        "install",
+        "-y",
+        "tesseract",
+        "ocrmypdf",
+        "poppler",
+    ]
+
+
+def test_feature_doctor_uses_persisted_bootstrap_status_for_knowledge_base(monkeypatch, tmp_path: Path) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    status_path = tmp_path / "bootstrap-status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "knowledge_base": {
+                    "knowledge_bootstrap": {"returncode": 0},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BOOTSTRAP_STATUS_PATH", status_path)
+    monkeypatch.setattr(bootstrap, "_current_lark_cli_config", lambda: {"available": False, "configured": False})
+    monkeypatch.setattr(
+        bootstrap,
+        "feature_tool_status",
+        lambda: {
+            "knowledge_base_pdf_ocr": {
+                "label": "Knowledge Base PDF / OCR ingestion",
+                "commands": {"tesseract": True, "ocrmypdf": True, "pdftoppm": True},
+                "apps": {},
+                "ready": True,
+                "install_hint": "brew install tesseract ocrmypdf poppler",
+            },
+            "opencli_browser": {
+                "label": "OpenCLI browser execution",
+                "commands": {},
+                "apps": {"Google Chrome": True},
+                "ready": True,
+                "install_hint": "install Google Chrome",
+            },
+        },
+    )
+    monkeypatch.setattr(bootstrap, "command_available", lambda name: name == "python3")
+
+    payload = bootstrap.feature_doctor("knowledge-base", bootstrap.default_site_config())
+
+    assert payload["ready"] is True
+    assert [check["name"] for check in payload["checks"]] == ["ocr_tools_ready", "knowledge_bootstrap"]
+    assert all(check["ok"] for check in payload["checks"])
+
+
+def test_install_feature_knowledge_base_dry_run_uses_detected_manager(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "detect_system_package_manager", lambda: "apt")
+
+    payload = bootstrap.install_feature("knowledge-base", bootstrap.default_site_config(), dry_run=True)
+
+    assert payload["ok"] is True
+    assert payload["system_result"]["manager"] == "apt"
+    assert payload["system_result"]["command"] == [
+        "sudo",
+        "apt-get",
+        "install",
+        "-y",
+        "tesseract-ocr",
+        "ocrmypdf",
+        "poppler-utils",
+    ]
+
+
+def test_install_feature_electron_dry_run_returns_app_workspace(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "detect_system_package_manager", lambda: "brew")
+
+    payload = bootstrap.install_feature("electron", bootstrap.default_site_config(), dry_run=True)
+
+    assert payload["ok"] is True
+    assert payload["command"] == ["npm", "install"]
+    assert payload["cwd"] == str(bootstrap.WORKSPACE_ROOT / "apps" / "electron-console")
+
+
+def test_build_parser_exposes_feature_doctor_and_installers() -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    parser = bootstrap.build_parser()
+
+    doctor_args = parser.parse_args(["doctor-feature", "--feature", "knowledge-base"])
+    install_feature_args = parser.parse_args(["install-feature", "--feature", "electron", "--dry-run"])
+    install_group_args = parser.parse_args(["install-system-deps", "--group", "opencli_browser", "--dry-run"])
+
+    assert doctor_args.command == "doctor-feature"
+    assert install_feature_args.command == "install-feature"
+    assert install_feature_args.dry_run is True
+    assert install_group_args.command == "install-system-deps"
+    assert install_group_args.group == "opencli_browser"
+
+
 def test_build_manual_actions_requests_codex_login_when_auth_missing(monkeypatch) -> None:
     from ops import bootstrap_workspace_hub as bootstrap_module
 
