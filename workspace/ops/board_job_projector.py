@@ -343,24 +343,39 @@ def _generic_codex_exec_packet(
     packet_template: dict[str, Any],
     context: dict[str, Any],
 ) -> dict[str, Any]:
+    target_files = [str(item).strip() for item in context.get("target_files", []) if str(item).strip()]
+    execute_actions = [str(item).strip() for item in context.get("execute_actions", []) if str(item).strip()]
+    boundary_notes = [str(item).strip() for item in context.get("boundary_notes", []) if str(item).strip()]
     target_lines = str(context.get("target_files_joined", "")).strip() or "- 先自行定位最小必要改动面"
     action_lines = str(context.get("execute_actions_joined", "")).strip() or "- 围绕当前 track 推进最小必要改动"
     boundary_lines = str(context.get("boundary_notes_joined", "")).strip() or "- 保持板面、报告与真源一致"
+
+    def _compact_preview(values: list[str], *, fallback: str) -> str:
+        cleaned = [item for item in values if item]
+        if not cleaned:
+            return fallback
+        preview = " | ".join(cleaned[:3])
+        if len(cleaned) > 3:
+            preview += f" | +{len(cleaned) - 3} more"
+        return preview
+
+    compact_targets = _compact_preview(target_files, fallback="先自行定位最小必要改动面")
+    compact_actions = _compact_preview(execute_actions, fallback="围绕当前 track 推进最小必要改动")
+    compact_boundaries = _compact_preview(boundary_notes, fallback="保持板面、报告与真源一致")
     prompt = _render_template(
         packet_template.get(
             "prompt_template",
             (
-                "继续推进任务 `{task_id}`。\n"
-                "当前 track：{summary}\n"
-                "任务目标：{task_item}\n"
-                "当前下一步：{next_action}\n"
-                "目标文件：\n"
-                "{target_lines}\n"
-                "本轮动作：\n"
-                "{action_lines}\n"
-                "边界要求：\n"
-                "{boundary_lines}\n"
-                "要求：完成最小必要代码/测试/报告更新，并保留可验证的下一步。"
+                "[Packet]\n"
+                "- contract: compact.v1\n"
+                "- task_id: {task_id}\n"
+                "- track: {summary}\n"
+                "- next_action: {next_action}\n"
+                "- targets: {compact_targets}\n"
+                "- actions: {compact_actions}\n"
+                "- boundaries: {compact_boundaries}\n"
+                "- note: full target_files / execute_actions / boundary_notes already live in packet fields; use them only when needed.\n"
+                "- goal: 完成最小必要代码/测试/报告更新，并保留可验证的下一步。"
             ),
         ),
         {
@@ -368,6 +383,9 @@ def _generic_codex_exec_packet(
             "target_lines": target_lines,
             "action_lines": action_lines,
             "boundary_lines": boundary_lines,
+            "compact_targets": compact_targets,
+            "compact_actions": compact_actions,
+            "compact_boundaries": compact_boundaries,
         },
     )
     return {
@@ -379,6 +397,18 @@ def _generic_codex_exec_packet(
         "reasoning_effort": str(packet_template.get("reasoning_effort", "medium")).strip() or "medium",
         "timeout_seconds": int(packet_template.get("timeout_seconds", 900) or 900),
         "no_auto_resume": bool(packet_template.get("no_auto_resume", True)),
+        "packet_contract_version": "codex-hub.execution-packet.compact.v1",
+        "target_files": target_files,
+        "execute_actions": execute_actions,
+        "boundary_notes": boundary_notes,
+        "packet_outline": {
+            "task_id": str(context.get("task_id", "")).strip(),
+            "subgoal_id": str(context.get("subgoal_id", "")).strip(),
+            "summary": str(context.get("summary", "")).strip(),
+            "target_count": len(target_files),
+            "action_count": len(execute_actions),
+            "boundary_count": len(boundary_notes),
+        },
         "prompt": prompt,
     }
 
@@ -441,6 +471,9 @@ def _materialize_generic_tracks(
             "target_files_joined": "\n".join(f"- {item}" for item in target_files) or "- 先自行定位最小必要改动面",
             "execute_actions_joined": "\n".join(f"- {item}" for item in execute_actions) or "- 围绕当前 track 推进最小必要改动",
             "boundary_notes_joined": "\n".join(f"- {item}" for item in boundary_notes) or "- 保持板面、报告与真源一致",
+            "target_files": target_files,
+            "execute_actions": execute_actions,
+            "boundary_notes": boundary_notes,
         }
         packet_template = _coerce_family_dict(template.get("execution_packet_template"))
         execution_packets = [

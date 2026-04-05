@@ -14,13 +14,23 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from ops import codex_retrieval, gstack_automation, gstack_phase1_entry, runtime_state, workspace_hub_project
+    from ops import (
+        codex_memory,
+        codex_retrieval,
+        gstack_automation,
+        gstack_phase1_entry,
+        runtime_state,
+        workspace_hub_project,
+        workspace_job_schema,
+    )
 except ImportError:  # pragma: no cover
+    import codex_memory  # type: ignore
     import codex_retrieval  # type: ignore
     import gstack_automation  # type: ignore
     import gstack_phase1_entry  # type: ignore
     import runtime_state  # type: ignore
     import workspace_hub_project  # type: ignore
+    import workspace_job_schema  # type: ignore
 
 
 GLOBAL_RECOMMENDED = [
@@ -363,7 +373,118 @@ def build_gflow_runtime_summary(project_name: str) -> dict[str, Any]:
     return summary
 
 
-def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
+def _task_row_brief(row: dict[str, Any]) -> str:
+    task_id = str(row.get("ID", "")).strip()
+    item = str(row.get("事项", "")).strip()
+    if task_id and item:
+        return f"{task_id} {item}"
+    return task_id or item
+
+
+def build_project_runtime_snapshot(project_name: str) -> dict[str, Any]:
+    normalized_project = canonical_project_name(project_name)
+    if not normalized_project:
+        return {}
+    try:
+        board = codex_memory.load_project_board(normalized_project)
+    except Exception:
+        return {}
+    sections = codex_memory.select_project_focus_tasks(
+        board.get("project_rows", []),
+        board.get("rollup_rows", []),
+        board.get("gflow_rows", []),
+    )
+    focus_status = ""
+    focus_row: dict[str, Any] = {}
+    for status in ("doing", "todo", "blocked", "done"):
+        if sections.get(status):
+            focus_status = status
+            focus_row = sections[status][0]
+            break
+    summary_meta = codex_memory.summary_metadata(normalized_project)
+    next_action = codex_memory.project_board_next_action(
+        board.get("project_rows", []),
+        board.get("rollup_rows", []),
+        board.get("gflow_rows", []),
+    )
+    if not str(next_action).strip():
+        next_action = str(summary_meta.get("next_action", "")).strip() or str(board.get("frontmatter", {}).get("next_action", "")).strip()
+    return workspace_job_schema.project_runtime_snapshot_payload(
+        {
+            "project_name": normalized_project,
+            "task_id": str(focus_row.get("ID", "")).strip(),
+            "board_path": str(board["path"]),
+            "source_path": str(focus_row.get("指向", "")).strip(),
+            "task_status": focus_status or str(board.get("frontmatter", {}).get("status", "")).strip() or "todo",
+            "next_action": next_action,
+            "updated_at": str(board.get("frontmatter", {}).get("updated_at", "")).strip(),
+            "writeback_targets": [
+                str(board["path"]),
+                str(codex_memory.project_summary_path(normalized_project)),
+                str(codex_retrieval.vault_root() / "NEXT_ACTIONS.md"),
+            ],
+            "metadata": {
+                "project_status": str(board.get("frontmatter", {}).get("status", "")).strip(),
+                "priority": str(board.get("frontmatter", {}).get("priority", "")).strip(),
+                "doing_count": len(sections.get("doing", [])),
+                "todo_count": len(sections.get("todo", [])),
+                "blocked_count": len(sections.get("blocked", [])),
+                "doing_focus": [_task_row_brief(item) for item in sections.get("doing", [])[:2]],
+                "blocked_focus": [_task_row_brief(item) for item in sections.get("blocked", [])[:2]],
+                "last_writeback_at": str(summary_meta.get("last_writeback_at", "")).strip(),
+                "last_writeback_excerpt": str(summary_meta.get("last_writeback_excerpt", "")).strip(),
+            },
+        }
+    )
+
+
+def build_bridge_runtime_snapshot(launch_source: str) -> dict[str, Any]:
+    bridge = str(launch_source or "").strip().lower()
+    if bridge not in {"feishu", "weixin"}:
+        return {}
+    try:
+        return runtime_state.bridge_status_surface(bridge=bridge)
+    except Exception:
+        return {}
+
+
+def build_hot_window_summary(project_name: str) -> dict[str, Any]:
+    normalized_project = canonical_project_name(project_name)
+    if not normalized_project:
+        return {}
+    summary_meta = codex_memory.summary_metadata(normalized_project)
+    router = codex_memory.load_router().get("routes", {})
+    active_route = dict(router.get(normalized_project, {}) or {})
+    bindings_payload = codex_memory.load_bindings()
+    bindings = [
+        item
+        for item in codex_memory.unique_completed_bindings(bindings_payload.get("bindings", []), limit=50)
+        if str(item.get("project_name", "")).strip() == normalized_project
+    ]
+    recent_sessions = []
+    for item in bindings[:3]:
+        recent_sessions.append(
+            {
+                "last_active_at": str(item.get("last_active_at", "")).strip(),
+                "thread_name": str(item.get("thread_name") or item.get("prompt") or "").strip(),
+                "launch_source": str(item.get("launch_source", "")).strip(),
+                "summary_excerpt": str(item.get("summary_excerpt", "")).strip()[:160],
+            }
+        )
+    return {
+        "last_writeback_at": str(summary_meta.get("last_writeback_at", "")).strip(),
+        "last_writeback_excerpt": str(summary_meta.get("last_writeback_excerpt", "")).strip(),
+        "active_session": {
+            "session_id": str(active_route.get("last_session_id", "")).strip(),
+            "last_active_at": str(active_route.get("last_active_at", "")).strip(),
+            "thread_name": str(active_route.get("last_thread_name", "")).strip(),
+            "launch_source": str(active_route.get("last_launch_source", "")).strip(),
+        },
+        "recent_sessions": recent_sessions,
+    }
+
+
+def suggest_context(project_name: str = "", prompt: str = "", launch_source: str = "") -> dict[str, Any]:
     project_name = canonical_project_name(project_name) if project_name else ""
     payload: dict[str, Any] = {
         "project_name": project_name or "",
@@ -378,6 +499,9 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
         "workflow_recommendation": {},
         "gflow_recommendation": {},
         "gflow_runtime_summary": {},
+        "project_runtime_snapshot": {},
+        "bridge_runtime_snapshot": {},
+        "hot_window_summary": {},
     }
     recommendations: list[dict[str, str]] = []
     seen_paths: set[str] = set()
@@ -404,6 +528,12 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
             system_page = codex_retrieval.vault_root() / "03_semantic" / "systems" / "workspace-hub.md"
             if system_page.exists():
                 add_recommendation(recommendations, seen_paths, str(system_page), "系统运行规则")
+        payload["project_runtime_snapshot"] = build_project_runtime_snapshot(project_name)
+        payload["hot_window_summary"] = build_hot_window_summary(project_name)
+        if payload["project_runtime_snapshot"]:
+            payload["reasoning_tags"].append("runtime-snapshot")
+        if payload["hot_window_summary"]:
+            payload["reasoning_tags"].append("hot-window")
         try:
             from ops import review_plane
         except ImportError:  # pragma: no cover
@@ -451,6 +581,10 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
             payload["reasoning_tags"].append("gflow-runtime-active")
     else:
         payload["reasoning_tags"].append("general-mode")
+    bridge_runtime_snapshot = build_bridge_runtime_snapshot(launch_source)
+    if bridge_runtime_snapshot:
+        payload["bridge_runtime_snapshot"] = bridge_runtime_snapshot
+        payload["reasoning_tags"].append("bridge-runtime")
 
     queries: list[tuple[str, dict[str, str]]] = []
     if prompt.strip():
@@ -514,7 +648,16 @@ def suggest_context(project_name: str = "", prompt: str = "") -> dict[str, Any]:
 
 
 def cmd_suggest(args: argparse.Namespace) -> int:
-    print(json.dumps(suggest_context(project_name=args.project_name or "", prompt=args.prompt or ""), ensure_ascii=False))
+    print(
+        json.dumps(
+            suggest_context(
+                project_name=args.project_name or "",
+                prompt=args.prompt or "",
+                launch_source=args.launch_source or "",
+            ),
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -525,6 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     suggest = subparsers.add_parser("suggest")
     suggest.add_argument("--project-name", default="")
     suggest.add_argument("--prompt", default="")
+    suggest.add_argument("--launch-source", default="")
     suggest.set_defaults(func=cmd_suggest)
     return parser
 

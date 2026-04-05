@@ -393,3 +393,49 @@ def test_workspace_hub_health_check_collect_checks_uses_post_refresh_consistency
     assert checks["rebuild_all"]["status"] == "ok"
     assert checks["consistency"]["ok"] is True
     assert result["ok"] is True
+
+
+def test_workspace_hub_health_check_status_uses_result_cache(sample_env, monkeypatch) -> None:
+    from ops import workspace_hub_health_check as health_module
+
+    workspace_hub_health_check = importlib.reload(health_module)
+
+    monkeypatch.setattr(
+        workspace_hub_health_check,
+        "load_official_scheduler_status",
+        lambda: {
+            "configured": True,
+            "active": True,
+            "cwd_matches": True,
+            "run_count": 1,
+            "verified_run_count": 1,
+            "last_run_at": "2026-03-11T12:00:00+08:00",
+            "next_run_at": "2026-03-11T16:00:00+08:00",
+        },
+    )
+    monkeypatch.setattr(
+        workspace_hub_health_check,
+        "load_codex_automation_status",
+        lambda: {"configured": True, "active": False, "runtime_status": "PAUSED"},
+    )
+    monkeypatch.setattr(
+        workspace_hub_health_check.workspace_wake_broker,
+        "job_status",
+        lambda _job_id: {"harness_state": "ready", "next_wake_at": "", "blocked_reason": ""},
+    )
+    monkeypatch.setattr(workspace_hub_health_check, "active_health_pause", lambda: {})
+
+    calls = {"alerts": 0}
+
+    def fake_alerts():
+        calls["alerts"] += 1
+        return {}
+
+    monkeypatch.setattr(workspace_hub_health_check, "load_latest_alert_states", fake_alerts)
+
+    first = workspace_hub_health_check.load_status_payload()
+    second = workspace_hub_health_check.load_status_payload()
+
+    assert first["cache"]["hit"] is False
+    assert second["cache"]["hit"] is True
+    assert calls["alerts"] == 1

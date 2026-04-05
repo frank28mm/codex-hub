@@ -494,7 +494,15 @@ def test_board_job_projector_materializes_execution_packets_and_verify_commands_
 
     track = payload["implementation_tracks"][0]
     assert track["execution_packets"]
-    assert track["execution_packets"][0]["kind"] == "codex_exec"
+    packet = track["execution_packets"][0]
+    assert packet["kind"] == "codex_exec"
+    assert packet["packet_contract_version"] == "codex-hub.execution-packet.compact.v1"
+    assert packet["packet_outline"]["target_count"] >= 1
+    assert packet["target_files"]
+    assert packet["execute_actions"]
+    assert "[Packet]" in packet["prompt"]
+    assert "targets:" in packet["prompt"]
+    assert "目标文件：" not in packet["prompt"]
     assert track["verify_commands"]
     assert any("latest.md" in item["command"] for item in track["verify_commands"])
 

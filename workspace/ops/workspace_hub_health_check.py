@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 from ops import (
     codex_memory,
     project_pause,
+    result_cache,
     runtime_state,
     workspace_job_schema,
     workspace_hub_project,
@@ -31,6 +32,7 @@ from ops import (
 HEALTH_AGENT_NAME = "com.codexhub.workspace-hub-health-check"
 HEALTH_AUTOMATION_ID = "workspace-health"
 OFFICIAL_SCHEDULER_ID = HEALTH_AGENT_NAME
+STATUS_CACHE_NAMESPACE = "workspace-health-status"
 ALERT_CONFIRMATION_PASSES = 2
 HEALTH_INTERVAL_SECONDS = 4 * 3600
 WAKE_CATCHUP_GRACE_SECONDS = 30 * 60
@@ -1671,6 +1673,33 @@ def cmd_catch_up_if_stale(args: argparse.Namespace) -> int:
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
+    payload = load_status_payload()
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def build_status_cache_identity() -> dict[str, Any]:
+    latest = latest_report_path()
+    history = history_path()
+    alerts = alerts_path()
+    official_scheduler = load_official_scheduler_status()
+    codex_automation = load_codex_automation_status()
+    wake_status = workspace_wake_broker.job_status(HEALTH_AUTOMATION_ID)
+    pause = active_health_pause()
+    return {
+        "installed": launch_agent_plist_path().exists(),
+        "loaded": codex_memory.launch_agent_loaded(HEALTH_AGENT_NAME),
+        "latest_report_mtime": latest.stat().st_mtime if latest.exists() else 0,
+        "history_mtime": history.stat().st_mtime if history.exists() else 0,
+        "alerts_mtime": alerts.stat().st_mtime if alerts.exists() else 0,
+        "official_scheduler": official_scheduler,
+        "codex_automation": codex_automation,
+        "wake_broker": wake_status,
+        "pause": pause,
+    }
+
+
+def build_status_payload() -> dict[str, Any]:
     latest = latest_report_path()
     history = history_path()
     last_entry: dict[str, Any] = {}
@@ -1682,28 +1711,47 @@ def cmd_status(_args: argparse.Namespace) -> int:
     open_alerts = [item for item in latest_alerts.values() if item.get("status") == "open"]
     official_scheduler = load_official_scheduler_status()
     codex_automation = load_codex_automation_status()
-    print(
-        json.dumps(
-            {
-                "installed": launch_agent_plist_path().exists(),
-                "loaded": codex_memory.launch_agent_loaded(HEALTH_AGENT_NAME),
-                "plist": str(launch_agent_plist_path()),
-                "latest_report": str(latest) if latest.exists() else "",
-                "history_path": str(history),
-                "alerts_path": str(alerts_path()),
-                "last_entry": last_entry,
-                "open_alert_count": len(open_alerts),
-                "official_scheduler": official_scheduler,
-                "codex_automation": codex_automation,
-                "catchup_status": compute_catchup_status(scheduler_status=official_scheduler),
-                "wake_broker": workspace_wake_broker.job_status(HEALTH_AUTOMATION_ID),
-                "pause": active_health_pause(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    return {
+        "installed": launch_agent_plist_path().exists(),
+        "loaded": codex_memory.launch_agent_loaded(HEALTH_AGENT_NAME),
+        "plist": str(launch_agent_plist_path()),
+        "latest_report": str(latest) if latest.exists() else "",
+        "history_path": str(history),
+        "alerts_path": str(alerts_path()),
+        "last_entry": last_entry,
+        "open_alert_count": len(open_alerts),
+        "official_scheduler": official_scheduler,
+        "codex_automation": codex_automation,
+        "catchup_status": compute_catchup_status(scheduler_status=official_scheduler),
+        "wake_broker": workspace_wake_broker.job_status(HEALTH_AUTOMATION_ID),
+        "pause": active_health_pause(),
+    }
+
+
+def load_status_payload() -> dict[str, Any]:
+    identity = build_status_cache_identity()
+    cached = result_cache.recall(STATUS_CACHE_NAMESPACE, identity)
+    if cached and isinstance(cached.get("value"), dict):
+        payload = dict(cached["value"])
+        payload["cache"] = {
+            "hit": True,
+            "namespace": STATUS_CACHE_NAMESPACE,
+            "key": str(cached.get("key", "")).strip(),
+        }
+        return payload
+    payload = build_status_payload()
+    cache_entry = result_cache.remember(
+        STATUS_CACHE_NAMESPACE,
+        identity,
+        value=payload,
+        metadata={"open_alert_count": int(payload.get("open_alert_count", 0) or 0)},
     )
-    return 0
+    payload["cache"] = {
+        "hit": False,
+        "namespace": STATUS_CACHE_NAMESPACE,
+        "key": str(cache_entry.get("key", "")).strip(),
+    }
+    return payload
 
 
 def cmd_install_launchagent(args: argparse.Namespace) -> int:

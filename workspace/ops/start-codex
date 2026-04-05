@@ -335,10 +335,10 @@ PY
 
 load_context_suggestions() {
   if [[ -n "${1:-}" ]]; then
-    python3 "$MATERIAL_ROUTER_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}"
+    python3 "$MATERIAL_ROUTER_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}" --launch-source "${3:-}"
     return 0
   fi
-  python3 "$CONTEXT_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}"
+  python3 "$CONTEXT_TOOL" suggest --project-name "${1:-}" --prompt "${2:-}" --launch-source "${3:-}"
 }
 
 maybe_start_gflow_runtime() {
@@ -652,208 +652,243 @@ try:
 except Exception:
     context = {}
 
+def add_section(lines: list[str], title: str, rows: list[str]) -> None:
+    items = [item for item in rows if str(item).strip()]
+    if not items:
+        return
+    if lines:
+        lines.append("")
+    lines.append(f"[{title}]")
+    for item in items:
+        lines.append(f"- {item}")
+
+
+def compact_join(values: list[str], limit: int = 3) -> str:
+    cleaned = [str(item).strip() for item in values if str(item).strip()]
+    return " | ".join(cleaned[:limit])
+
+
+board_path = str(context.get("board_path") or binding_board_path).strip()
+thread_identity = str(source_thread_label or source_thread_name).strip()
+
+has_context = any(
+    [
+        launch_source,
+        project_name,
+        topic_name,
+        binding_scope,
+        board_path,
+        thread_identity,
+        execution_profile,
+        selected_model,
+        selected_reasoning_effort,
+        bool(context),
+    ]
+)
+
 lines = []
-if launch_source or project_name or source_thread_name or source_thread_label or source_chat_ref:
-    lines.append("你当前是通过 Codex Hub 的统一启动器进入这个工作区，不是普通的随手桌面对话。")
-    if launch_source == "feishu":
-        lines.append("来源渠道：Feishu 远程聊天线程。")
-    elif launch_source == "weixin":
-        lines.append("来源渠道：微信私聊线程。")
-    elif launch_source == "electron":
-        lines.append("来源渠道：Electron 桌面对话线程。")
-    elif launch_source:
-        lines.append(f"来源渠道：{launch_source}。")
+if has_context:
+    launch_rows = [
+        "routed_workspace=true",
+        f"mode={mode or 'new'}",
+    ]
+    if launch_source:
+        launch_rows.append(f"source={launch_source}")
     if project_name and project_name != "general":
-        lines.append(f"当前项目：{project_name}。")
+        launch_rows.append(f"project={project_name}")
     if topic_name:
-        lines.append(f"当前专题：{topic_name}。")
+        launch_rows.append(f"topic={topic_name}")
     if binding_scope and binding_scope != "chat":
-        lines.append(f"上下文范围：{binding_scope}。")
-    board_path = context.get("board_path") or binding_board_path
+        launch_rows.append(f"scope={binding_scope}")
     if board_path:
-        lines.append(f"关联板面：{board_path}。")
-    if source_thread_name:
-        lines.append(f"来源线程名称：{source_thread_name}。")
-    if source_thread_label and source_thread_label != source_thread_name:
-        lines.append(f"来源线程标签：{source_thread_label}。")
-    if source_chat_ref:
-        lines.append(f"来源聊天引用：{source_chat_ref}。")
-    if source_message_id:
-        lines.append(f"来源消息 ID：{source_message_id}。")
+        launch_rows.append(f"board={board_path}")
+    if thread_identity:
+        launch_rows.append(f"thread={thread_identity}")
     if attachment_type:
-        lines.append(f"当前消息附带附件类型：{attachment_type}。")
-    if attachment_path:
-        lines.append(f"本地附件路径：{attachment_path}。")
+        launch_rows.append(f"attachment={attachment_type}")
     if voice_transcript:
-        lines.append(f"语音转写：{voice_transcript}")
-    if launch_source == "weixin" and (source_thread_label == "CoCo 私聊" or source_thread_name == "CoCo 私聊") and not (project_name and project_name != "general"):
-        lines.append("这条微信私聊线程应视作 `CoCo 私聊` 的工作区级入口，默认不绑定单个项目。")
-        lines.append("只有当用户当前这条消息明确提到项目名，或明确要求续接上一个项目型会话时，才进入项目上下文。")
+        launch_rows.append("voice_input=transcribed")
+    if launch_source == "weixin" and thread_identity == "CoCo 私聊" and not (project_name and project_name != "general"):
+        launch_rows.append("workspace_entry=coco_private_dm")
+    if mode == "resume":
+        launch_rows.append("resume_session=true")
+    if execution_profile:
+        launch_rows.append(f"execution_profile={execution_profile}")
+    if selected_model:
+        launch_rows.append(f"model={selected_model}")
+    if selected_reasoning_effort:
+        launch_rows.append(f"reasoning_effort={selected_reasoning_effort}")
+    add_section(lines, "Launch", launch_rows)
+
     recommended = context.get("recommended_files") or []
-    if recommended:
-        lines.append("启动器建议你优先参考这些上下文文件：")
-        for item in recommended[:4]:
-            path = str(item.get("path", "")).strip()
-            reason = str(item.get("reason", "")).strip()
-            if path and reason:
-                lines.append(f"- {path}：{reason}")
-            elif path:
-                lines.append(f"- {path}")
+    recommended_paths = [str(item.get("path", "")).strip() for item in recommended if str(item.get("path", "")).strip()]
     retrieval_protocol = context.get("retrieval_protocol") or {}
+    context_rows: list[str] = []
+    if recommended_paths:
+        context_rows.append(f"recommended_files={compact_join(recommended_paths)}")
     if retrieval_protocol:
-        lines.append("当前检索协议固定遵循 search -> timeline -> detail。")
-        next_step = str(retrieval_protocol.get("next_step", "")).strip()
-        if next_step:
-            lines.append(f"下一步优先动作：{next_step}。")
-        timeline_paths = [str(path).strip() for path in retrieval_protocol.get("timeline_paths", []) if str(path).strip()]
-        detail_paths = [str(path).strip() for path in retrieval_protocol.get("detail_paths", []) if str(path).strip()]
-        if timeline_paths:
-            lines.append("可先浏览这些 timeline 入口：")
-            for path in timeline_paths[:3]:
-                lines.append(f"- {path}")
-        if detail_paths:
-            lines.append("需要细读时，优先展开这些 detail 入口：")
-            for path in detail_paths[:3]:
-                lines.append(f"- {path}")
+        next_step = str(retrieval_protocol.get("next_step", "")).strip() or "detail"
+        context_rows.append(f"retrieval=search -> timeline -> detail | next={next_step}")
+    add_section(lines, "Context", context_rows)
+
+    workflow_rows: list[str] = []
     gflow = context.get("gflow_recommendation") or {}
     if gflow:
-        lines.append("当前已命中 `GFlow` 显式强制流程模式。")
-        gflow_status = str(gflow.get("status", "")).strip()
-        if gflow_status:
-            lines.append(f"GFlow 当前状态：`{gflow_status}`。")
+        parts: list[str] = []
         invocation_mode = str(gflow.get("invocation_mode", "")).strip()
         if invocation_mode:
-            lines.append(f"GFlow 入口模式：`{invocation_mode}`。")
-        gflow_error = str(gflow.get("error", "")).strip()
-        if gflow_error:
-            lines.append(f"GFlow 预解析失败：{gflow_error}")
-        entry_prompt = str(gflow.get("entry_prompt", "")).strip()
-        if entry_prompt:
-            lines.append(f"GFlow 入口提示：{entry_prompt}")
-        suggested_path = [str(item).strip() for item in gflow.get("suggested_path", []) if str(item).strip()]
+            parts.append(f"mode={invocation_mode}")
+        suggested_path = compact_join([str(item).strip() for item in gflow.get("suggested_path", []) if str(item).strip()], limit=6)
         if suggested_path:
-            lines.append(f"GFlow 初始路径：`{' -> '.join(suggested_path)}`。")
+            parts.append(f"path={suggested_path}")
         initial_stage = str(gflow.get("initial_stage", "")).strip()
         if initial_stage:
-            lines.append(f"GFlow 初始阶段：`{initial_stage}`。")
-        template_id = str(gflow.get("template_id", "")).strip()
+            parts.append(f"stage={initial_stage}")
         template_label = str(gflow.get("template_label", "")).strip()
-        if template_id or template_label:
-            lines.append(f"GFlow 模板：`{template_id or 'unknown'}` | {template_label or '待补充'}")
-        project_scope_id = str(gflow.get("project_scope_id", "")).strip()
-        project_scope_label = str(gflow.get("project_scope_label", "")).strip()
-        if project_scope_id or project_scope_label:
-            lines.append(f"GFlow 代码范围：`{project_scope_id or 'unknown'}` | {project_scope_label or '待补充'}")
-        project_scope = gflow.get("project_scope") or {}
-        project_scope_reason = str(project_scope.get("reason", "")).strip()
-        if project_scope_reason:
-            lines.append(f"GFlow 范围说明：{project_scope_reason}")
-        project_scope_files = [str(item).strip() for item in (project_scope.get("files") or []) if str(item).strip()]
-        if project_scope_files:
-            lines.append("GFlow 默认审查文件：")
-            for path in project_scope_files[:12]:
-                lines.append(f"- {path}")
-        handoff_preview = str(gflow.get("handoff_preview", "")).strip()
-        if handoff_preview and not str(context.get("gflow_execution_contract", "")).strip():
-            lines.append("GFlow handoff 摘要：")
-            for preview_line in handoff_preview.splitlines()[:5]:
-                lines.append(f"- {preview_line}")
+        template_id = str(gflow.get("template_id", "")).strip()
+        if template_label or template_id:
+            parts.append(f"template={template_label or template_id}")
+        workflow_rows.append("gflow_trigger=" + " | ".join(parts))
+
     gflow_started = context.get("gflow_started_run") or {}
     if gflow_started:
-        run_id = str(gflow_started.get("run_id", "")).strip()
-        if run_id:
-            lines.append(f"本次请求已自动创建一条 GFlow 轻量记录：`{run_id}`。")
-    gflow_execution_contract = str(context.get("gflow_execution_contract", "")).strip()
-    if gflow_execution_contract:
-        lines.append("当前这次请求已锁定到这条 GFlow 显式流程链：")
-        for contract_line in gflow_execution_contract.splitlines():
-            lines.append(f"- {contract_line}")
+        started_run_id = str(gflow_started.get("run_id", "")).strip()
+        started_stage = str(gflow_started.get("current_stage", "")).strip()
+        started_template = str(gflow_started.get("template_label", "")).strip() or str(gflow_started.get("template_id", "")).strip()
+        if started_run_id or started_stage or started_template:
+            parts = []
+            if started_run_id:
+                parts.append(f"run_id={started_run_id}")
+            if started_stage:
+                parts.append(f"stage={started_stage}")
+            if started_template:
+                parts.append(f"template={started_template}")
+            workflow_rows.append("gflow_started=" + " | ".join(parts))
+
     gflow_runtime = context.get("gflow_runtime_summary") or {}
     if gflow_runtime:
-        lines.append("当前项目存在活跃的 GFlow 轻量运行记录。")
-        run_id = str(gflow_runtime.get("run_id", "")).strip()
-        if run_id:
-            lines.append(f"GFlow record_id：`{run_id}`。")
-        run_status = str(gflow_runtime.get("run_status", "")).strip()
-        if run_status:
-            lines.append(f"GFlow 当前状态：`{run_status}`。")
-        current_stage = str(gflow_runtime.get("current_stage", "")).strip()
-        if current_stage:
-            lines.append(f"GFlow 当前阶段：`{current_stage}`。")
-        template_id = str(gflow_runtime.get("template_id", "")).strip()
-        template_label = str(gflow_runtime.get("template_label", "")).strip()
-        if template_id or template_label:
-            lines.append(f"GFlow 当前模板：`{template_id or 'unknown'}` | {template_label or '待补充'}")
-        latest_summary = str(gflow_runtime.get("latest_summary", "")).strip()
-        if latest_summary:
-            lines.append(f"GFlow 当前摘要：{latest_summary}")
-        latest_next_action = str(gflow_runtime.get("latest_next_action", "")).strip()
-        if latest_next_action:
-            lines.append(f"GFlow 下一步：{latest_next_action}")
-        gate = gflow_runtime.get("gate") or {}
-        gate_type = str(gate.get("type", "")).strip()
-        gate_reason = str(gate.get("reason", "")).strip()
-        if gate_type or gate_reason:
-            lines.append(f"GFlow gate：`{gate_type or 'unknown'}` | {gate_reason or '待补充'}")
+        runtime_run_id = str(gflow_runtime.get("run_id", "")).strip()
+        runtime_status = str(gflow_runtime.get("run_status", "")).strip()
+        runtime_stage = str(gflow_runtime.get("current_stage", "")).strip()
+        runtime_template = str(gflow_runtime.get("template_label", "")).strip() or str(gflow_runtime.get("template_id", "")).strip()
+        next_action = str(gflow_runtime.get("latest_next_action", "")).strip()
+        parts = []
+        if runtime_run_id:
+            parts.append(f"run_id={runtime_run_id}")
+        if runtime_status:
+            parts.append(f"status={runtime_status}")
+        if runtime_stage:
+            parts.append(f"stage={runtime_stage}")
+        if runtime_template:
+            parts.append(f"template={runtime_template}")
+        if next_action:
+            parts.append(f"next={next_action}")
+        if parts:
+            workflow_rows.append("gflow_run=" + " | ".join(parts))
+
     workflow = context.get("workflow_recommendation") or {}
     if workflow:
-        suggested_path = [str(item).strip() for item in workflow.get("suggested_path", []) if str(item).strip()]
+        suggested_path = compact_join([str(item).strip() for item in workflow.get("suggested_path", []) if str(item).strip()], limit=6)
         if suggested_path:
-            lines.append(f"当前工作流建议：`{' -> '.join(suggested_path)}`。")
-        assistant_message = str(workflow.get("assistant_message", "")).strip()
-        if assistant_message:
-            lines.append(f"工作流建议说明：{assistant_message}")
-        plan = [str(item).strip() for item in workflow.get("initial_action_plan", []) if str(item).strip()]
-        if plan:
-            lines.append("建议的初始动作：")
-            for item in plan[:4]:
-                lines.append(f"- {item}")
+            workflow_rows.append(f"workflow={suggested_path}")
         second_opinion = workflow.get("second_opinion") or {}
         if second_opinion:
-            lines.append("如果这条请求要进入 second-opinion，先补齐这些字段：")
-            for field_name in second_opinion.get("required_fields", [])[:4]:
-                lines.append(f"- {field_name}")
+            fields = compact_join([str(item).strip() for item in second_opinion.get("required_fields", []) if str(item).strip()], limit=8)
             template_id = str(second_opinion.get("package_template_id", "")).strip()
+            source = str(second_opinion.get("source", "")).strip()
+            parts = [f"skill={str(second_opinion.get('skill', '')).strip() or 'unknown'}"]
+            if source:
+                parts.append(f"source={source}")
             if template_id:
-                lines.append(f"默认打包模板：`{template_id}`。")
-            material_source = str(second_opinion.get("material_source", "")).strip()
-            if material_source:
-                lines.append(f"当前取材来源：`{material_source}`。")
-            packaged_request = second_opinion.get("packaged_request") or {}
-            request = packaged_request.get("request") or {}
-            focus_question = str(request.get("question", "")).strip()
-            if focus_question:
-                lines.append(f"当前 second-opinion 焦点：{focus_question}")
-            current_judgment = str(request.get("current_judgment", "")).strip()
-            if current_judgment:
-                lines.append(f"当前主线程判断：{current_judgment}")
-            artifact_preview = str(
-                (second_opinion.get("main_thread_execution") or {}).get("artifact_preview", "")
-            ).strip()
-            if artifact_preview:
-                lines.append("当前已打包的证据摘要：")
-                for preview_line in artifact_preview.splitlines()[:5]:
-                    lines.append(f"- {preview_line}")
-            execution = second_opinion.get("main_thread_execution") or {}
-            entrypoint = str(execution.get("entrypoint", "")).strip()
-            if entrypoint:
-                lines.append(f"推荐调用入口：`{entrypoint}`。")
-            suggested_command = str(execution.get("suggested_command", "")).strip()
-            if suggested_command:
-                lines.append(f"推荐命令：`{suggested_command}`")
-    lines.append("当前工作区还提供飞书对象操作能力，可直接完成消息、用户、文档、多维表格、日历、任务、视频会议等操作。")
-    lines.append("飞书资源注册表通常位于当前 workspace 的 `control/feishu_resources.yaml`。")
-    lines.append("飞书相关 skills 可通过 bootstrap 安装到 `~/.agents/skills/`，或直接使用 repo 内置的 Feishu/Lark 操作层。")
-    lines.append("如果用户要求操作飞书对象，优先使用 local_broker.py feishu-op 或对应 repo skill，不要只做口头解释。")
-    lines.append("请把这次任务当成上述来源线程的持续上下文，先按当前项目记忆和工作区协议理解，再执行用户请求。")
-if mode == "resume":
-    lines.append("这是续接会话，不要把它当成全新的陌生线程。")
-if execution_profile:
-    lines.append(f"当前执行档：{execution_profile}。")
-if selected_model:
-    lines.append(f"当前模型：{selected_model}。")
-if selected_reasoning_effort:
-    lines.append(f"当前推理强度：{selected_reasoning_effort}。")
+                parts.append(f"template={template_id}")
+            if fields:
+                parts.append(f"fields={fields}")
+            workflow_rows.append("second_opinion=" + " | ".join(parts))
+    add_section(lines, "Workflow", workflow_rows)
+
+    project_runtime = context.get("project_runtime_snapshot") or {}
+    project_metadata = project_runtime.get("metadata") or {}
+    bridge_runtime = context.get("bridge_runtime_snapshot") or {}
+    runtime_rows: list[str] = []
+    if project_runtime:
+        project_state = str(project_metadata.get("project_status", "")).strip()
+        if project_state:
+            runtime_rows.append(f"project_state={project_state}")
+        task_status = str(project_runtime.get("task_status", "")).strip()
+        if task_status:
+            runtime_rows.append(f"focus_status={task_status}")
+        next_action = str(project_runtime.get("next_action", "")).strip()
+        if next_action:
+            runtime_rows.append(f"next_action={next_action}")
+        doing_focus = compact_join(project_metadata.get("doing_focus") or [], limit=2)
+        if doing_focus:
+            runtime_rows.append(f"doing={doing_focus}")
+        blocked_focus = compact_join(project_metadata.get("blocked_focus") or [], limit=2)
+        if blocked_focus:
+            runtime_rows.append(f"blocked={blocked_focus}")
+    if bridge_runtime:
+        bridge_bits = [f"bridge={str(bridge_runtime.get('bridge', '')).strip() or 'unknown'}"]
+        connection_status = str(bridge_runtime.get("connection_status", "")).strip()
+        if connection_status:
+            bridge_bits.append(f"status={connection_status}")
+        transport = str(bridge_runtime.get("transport", "")).strip()
+        if transport:
+            bridge_bits.append(f"transport={transport}")
+        if bridge_runtime.get("stale") is not None:
+            bridge_bits.append(f"stale={'true' if bool(bridge_runtime.get('stale')) else 'false'}")
+        runtime_rows.append("bridge_runtime=" + " | ".join(bridge_bits))
+    add_section(lines, "Runtime", runtime_rows)
+
+    hot_window = context.get("hot_window_summary") or {}
+    history_rows: list[str] = []
+    if hot_window:
+        last_writeback_at = str(hot_window.get("last_writeback_at", "")).strip()
+        last_writeback_excerpt = str(hot_window.get("last_writeback_excerpt", "")).strip()
+        if last_writeback_at or last_writeback_excerpt:
+            parts = []
+            if last_writeback_at:
+                parts.append(f"at={last_writeback_at}")
+            if last_writeback_excerpt:
+                parts.append(f"excerpt={last_writeback_excerpt}")
+            history_rows.append("last_writeback=" + " | ".join(parts))
+        active_session = hot_window.get("active_session") or {}
+        active_parts = []
+        if str(active_session.get("session_id", "")).strip():
+            active_parts.append(f"session={str(active_session.get('session_id', '')).strip()}")
+        if str(active_session.get("thread_name", "")).strip():
+            active_parts.append(f"thread={str(active_session.get('thread_name', '')).strip()}")
+        if str(active_session.get("launch_source", "")).strip():
+            active_parts.append(f"source={str(active_session.get('launch_source', '')).strip()}")
+        if active_parts:
+            history_rows.append("active_session=" + " | ".join(active_parts))
+        recent_sessions = hot_window.get("recent_sessions") or []
+        if recent_sessions:
+            rendered_recent = []
+            for item in recent_sessions[:2]:
+                thread_name = str(item.get("thread_name", "")).strip()
+                summary_excerpt = str(item.get("summary_excerpt", "")).strip()
+                launch_source = str(item.get("launch_source", "")).strip()
+                parts = []
+                if thread_name:
+                    parts.append(thread_name)
+                if launch_source:
+                    parts.append(f"source={launch_source}")
+                if summary_excerpt:
+                    parts.append(summary_excerpt)
+                if parts:
+                    rendered_recent.append(" | ".join(parts))
+            if rendered_recent:
+                history_rows.append("recent_sessions=" + " || ".join(rendered_recent))
+    add_section(lines, "History", history_rows)
+
+    workspace_rows = [
+        "object_ops=feishu_available",
+        "guidance=prefer_structured_context_then_expand_dynamic_evidence_on_demand",
+    ]
+    add_section(lines, "Workspace", workspace_rows)
+
+    lines.append("")
+    lines.append("请把这次任务当成上述来源线程的持续上下文，优先依据这些结构化信号理解请求，不要回退成普通陌生对话。")
 print("\n".join(lines).strip())
 PY
 }
@@ -1287,7 +1322,7 @@ export CODEX_VAULT_PATH="$VAULT_ROOT"
 export CODEX_MEMORY_MODE="strict-minimal"
 SELECTED_MODEL="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str(payload.get("model","")).strip())' <<<"$(resolve_codex_settings)")"
 SELECTED_REASONING_EFFORT="$(python3 -c 'import json,sys; payload=json.loads(sys.stdin.read() or "{}"); print(str(payload.get("reasoning_effort","")).strip())' <<<"$(resolve_codex_settings)")"
-CONTEXT_JSON="$(load_context_suggestions "${PROJECT:-}" "$PROMPT")"
+CONTEXT_JSON="$(load_context_suggestions "${PROJECT:-}" "$PROMPT" "$LAUNCH_SOURCE")"
 if [[ "$DRY_RUN" != "1" && -n "$PROMPT" ]]; then
   if [[ -z "$PROJECT_PAUSE_JSON" || "$(pause_active "$PROJECT_PAUSE_JSON")" != "1" ]]; then
     CONTEXT_JSON="$(maybe_start_gflow_runtime "$CONTEXT_JSON" "${PROJECT:-}" "$PROMPT" "$SESSION_ID")"

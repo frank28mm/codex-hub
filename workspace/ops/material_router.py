@@ -250,9 +250,9 @@ def inspect_material_route(project_name: str) -> dict[str, Any]:
     return load_material_route(project_name)
 
 
-def suggest_material_route(project_name: str, prompt: str) -> dict[str, Any]:
+def suggest_material_route(project_name: str, prompt: str, launch_source: str = "") -> dict[str, Any]:
     target = canonical_project_name(project_name)
-    context = codex_context.suggest_context(project_name=target, prompt=prompt)
+    context = codex_context.suggest_context(project_name=target, prompt=prompt, launch_source=launch_source)
     config = load_material_route(target)
     payload: dict[str, Any] = {
         **config,
@@ -266,6 +266,9 @@ def suggest_material_route(project_name: str, prompt: str) -> dict[str, Any]:
         "workflow_recommendation": context.get("workflow_recommendation", {}),
         "gflow_recommendation": context.get("gflow_recommendation", {}),
         "gflow_runtime_summary": context.get("gflow_runtime_summary", {}),
+        "project_runtime_snapshot": context.get("project_runtime_snapshot", {}),
+        "bridge_runtime_snapshot": context.get("bridge_runtime_snapshot", {}),
+        "hot_window_summary": context.get("hot_window_summary", {}),
         "fallback_used": not config["config_present"],
         "material_hits": [],
         "report_hits": [],
@@ -301,7 +304,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_suggest(args: argparse.Namespace) -> int:
-    print(json.dumps(suggest_material_route(args.project_name, args.prompt or ""), ensure_ascii=False))
+    print(json.dumps(suggest_material_route(args.project_name, args.prompt or "", args.launch_source or ""), ensure_ascii=False))
     return 0
 
 
@@ -316,6 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     suggest_cmd = subparsers.add_parser("suggest")
     suggest_cmd.add_argument("--project-name", required=True)
     suggest_cmd.add_argument("--prompt", default="")
+    suggest_cmd.add_argument("--launch-source", default="")
     suggest_cmd.set_defaults(func=cmd_suggest)
     return parser
 

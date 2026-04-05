@@ -205,6 +205,80 @@ def test_codex_context_includes_active_gflow_runtime_summary(sample_env) -> None
     assert "gflow-runtime-active" in payload["reasoning_tags"]
 
 
+def test_codex_context_includes_project_runtime_snapshot_and_hot_window_summary(sample_env) -> None:
+    codex_retrieval.build_index()
+    bindings = codex_memory.load_bindings()
+    bindings["bindings"].append(
+        {
+            "project_name": "SampleProj",
+            "status": "completed",
+            "mode": "new",
+            "session_id": "sess-hot-window-1",
+            "started_at": "2026-03-11T04:50:00Z",
+            "last_active_at": "2026-03-11T05:00:00Z",
+            "thread_name": "继续看看当前状态",
+            "prompt": "继续看看当前状态",
+            "launch_source": "feishu",
+            "source_chat_ref": "oc_demo_chat",
+            "summary_excerpt": "最近完成了需求梳理，并收口了下一步。",
+        }
+    )
+    codex_memory.save_bindings(bindings)
+    router = codex_memory.load_router()
+    router["routes"]["SampleProj"] = {
+        "project_name": "SampleProj",
+        "last_session_id": "sess-hot-window-1",
+        "last_active_at": "2026-03-11T05:00:00Z",
+        "last_thread_name": "继续看看当前状态",
+        "last_launch_source": "feishu",
+    }
+    codex_memory.save_router(router)
+    summary_path = codex_memory.project_summary_path("SampleProj")
+    frontmatter, body = codex_memory.parse_frontmatter(codex_memory.read_text(summary_path))
+    frontmatter["last_writeback_at"] = "2026-03-11T13:00:00+08:00"
+    frontmatter["last_writeback_excerpt"] = "最近完成了需求梳理，并收口了下一步。"
+    codex_memory.write_text(summary_path, f"{codex_memory.render_frontmatter(frontmatter)}\n\n{body.lstrip()}")
+
+    payload = codex_context.suggest_context(project_name="SampleProj", prompt="继续看看当前状态。")
+
+    snapshot = payload["project_runtime_snapshot"]
+    hot_window = payload["hot_window_summary"]
+    assert snapshot["project_name"] == "SampleProj"
+    assert snapshot["board_path"].endswith("SampleProj-项目板.md")
+    assert snapshot["task_status"] in {"doing", "todo", "blocked", "done", "active"}
+    assert snapshot["next_action"]
+    assert snapshot["metadata"]["doing_count"] >= 0
+    assert hot_window["last_writeback_excerpt"] == "最近完成了需求梳理，并收口了下一步。"
+    assert hot_window["active_session"]["session_id"] == "sess-hot-window-1"
+    assert hot_window["recent_sessions"][0]["summary_excerpt"] == "最近完成了需求梳理，并收口了下一步。"
+    assert "runtime-snapshot" in payload["reasoning_tags"]
+    assert "hot-window" in payload["reasoning_tags"]
+
+
+def test_codex_context_includes_bridge_runtime_snapshot_for_launch_source(sample_env, monkeypatch) -> None:
+    codex_retrieval.build_index()
+    monkeypatch.setattr(
+        codex_context.runtime_state,
+        "bridge_status_surface",
+        lambda bridge="feishu": {
+            "bridge": bridge,
+            "connection_status": "connected",
+            "transport": "fixture",
+            "stale": False,
+        },
+    )
+
+    payload = codex_context.suggest_context(
+        project_name="SampleProj",
+        prompt="继续看看当前状态。",
+        launch_source="feishu",
+    )
+
+    assert payload["bridge_runtime_snapshot"]["bridge"] == "feishu"
+    assert payload["bridge_runtime_snapshot"]["connection_status"] == "connected"
+    assert "bridge-runtime" in payload["reasoning_tags"]
+
+
 def test_codex_context_reconciles_missing_gflow_board_rows_for_active_runtime(sample_env) -> None:
     codex_retrieval.build_index()
     started = gstack_automation.start_workflow_run_from_prompt(
@@ -493,8 +567,9 @@ def test_start_codex_dry_run_prints_launch_source_context(sample_env) -> None:
     assert '"launch_source": "feishu"' in result.stdout
     assert '"source_chat_ref": "oc_demo_chat"' in result.stdout
     assert "launcher_prompt_preview=" in result.stdout
-    assert "来源渠道：Feishu 远程聊天线程" in result.stdout
-    assert "来源线程标签：CoCo 私聊" in result.stdout
+    assert "[Launch]" in result.stdout
+    assert "source=feishu" in result.stdout
+    assert "thread=CoCo 私聊" in result.stdout
     assert "context_retrieval_next_step=" in result.stdout
     assert "context_retrieval_counts=" in result.stdout
     assert "feishu_resources.yaml" in result.stdout
@@ -533,8 +608,9 @@ def test_start_codex_dry_run_prints_weixin_launch_source_context(sample_env) -> 
     assert "chat_ref=weixin:default:wx-user" in result.stdout
     assert "thread_label=CoCo 私聊" in result.stdout
     assert '"launch_source": "weixin"' in result.stdout
-    assert "来源渠道：微信私聊线程" in result.stdout
-    assert "来源线程名称：CoCo 私聊" in result.stdout
+    assert "[Launch]" in result.stdout
+    assert "source=weixin" in result.stdout
+    assert "thread=CoCo 私聊" in result.stdout
 
 
 def test_start_codex_dry_run_marks_weixin_private_dm_as_workspace_entry(sample_env) -> None:
@@ -564,9 +640,9 @@ def test_start_codex_dry_run_marks_weixin_private_dm_as_workspace_entry(sample_e
     )
 
     assert "mode=general" in result.stdout
-    assert "来源渠道：微信私聊线程" in result.stdout
-    assert "来源线程名称：CoCo 私聊" in result.stdout
-    assert "工作区级入口" in result.stdout
+    assert "[Launch]" in result.stdout
+    assert "source=weixin" in result.stdout
+    assert "workspace_entry=coco_private_dm" in result.stdout
 
 
 def test_start_codex_dry_run_includes_attachment_context(sample_env) -> None:
@@ -608,6 +684,7 @@ def test_start_codex_dry_run_includes_attachment_context(sample_env) -> None:
     assert '"attachment_path": "/tmp/weixin-image.png"' in result.stdout
     assert '"attachment_type": "image"' in result.stdout
     assert "launcher_prompt_preview=" in result.stdout
+    assert "attachment=image" in result.stdout
 
 
 def test_start_codex_dry_run_does_not_auto_resume_bridge_session_from_source_less_entry(sample_env) -> None:
@@ -1002,15 +1079,15 @@ def test_start_codex_non_dry_run_auto_starts_gflow_and_passes_project_scope(samp
 
     captured_args = json.loads(capture_path.read_text(encoding="utf-8"))
     final_prompt = captured_args[-1]
-    assert "本次请求已自动创建一条 GFlow 轻量记录：" in final_prompt
-    assert "当前这次请求已锁定到这条 GFlow 显式流程链：" in final_prompt
-    assert "Review -> Fix -> QA -> Writeback" in final_prompt
-    assert "GFlow 默认审查文件：" in final_prompt
-    assert str(REPO_ROOT / "ops" / "gstack_automation.py") in final_prompt
-    assert str(REPO_ROOT / "ops" / "gstack_phase1_entry.py") in final_prompt
-    assert str(REPO_ROOT / "ops" / "claude_code_runner.py") in final_prompt
-    assert str(REPO_ROOT / "ops" / "start-codex") in final_prompt
-    assert "- run_id:" in final_prompt
+    assert "[Launch]" in final_prompt
+    assert "[Runtime]" in final_prompt
+    assert "[Workflow]" in final_prompt
+    assert "next_action=" in final_prompt
+    assert "gflow_started=run_id=" in final_prompt
+    assert "gflow_run=run_id=" in final_prompt
+    assert "template=Review -> Fix -> QA -> Writeback" in final_prompt
+    assert str(REPO_ROOT / "ops" / "gstack_automation.py") not in final_prompt
+    assert str(REPO_ROOT / "ops" / "start-codex") not in final_prompt
 
     board_text = (
         sample_env["vault_root"] / "01_working" / "SampleProj-项目板.md"
