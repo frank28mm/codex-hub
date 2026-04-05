@@ -1,0 +1,4 @@
+interface:
+  display_name: "Promote Flagship"
+  short_description: "Migrate pending flagship commits into the public Codex Hub repo safely"
+  default_prompt: "Use $promote-flagship-to-public to migrate the pending private flagship commit range into the public Codex Hub repo with strict accounting."
