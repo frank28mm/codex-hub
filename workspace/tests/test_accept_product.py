@@ -54,5 +54,6 @@ def test_check_bootstrap_cli_contract_requires_new_feature_surfaces() -> None:
     assert check_map["feature:opencli"] is True
     assert check_map["feature:weixin"] is True
     assert check_map["feature:electron"] is True
+    assert check_map["group:node_runtime"] is True
     assert check_map["group:knowledge_base_pdf_ocr"] is True
     assert check_map["group:opencli_browser"] is True

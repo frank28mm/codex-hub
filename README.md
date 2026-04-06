@@ -660,6 +660,21 @@ npm run workspace
 - `python3 ops/bootstrap_workspace_hub.py install-system-deps --group knowledge_base_pdf_ocr --dry-run`
 - `python3 ops/bootstrap_workspace_hub.py install-feature --feature electron --dry-run`
 
+另外，从这一版开始，在 macOS 上直接执行 `setup` 时，系统会默认尽量自动补齐非授权类依赖，比如：
+
+- `Homebrew`
+- `node / npm`
+- OCR 工具
+- `Google Chrome`
+- `opencli`
+- `electron / weixin` 的本地 npm 依赖
+- `Feishu` 官方 CLI/tooling
+
+仍然保留人工边界的只有：
+
+- `codex login`
+- `Feishu` 的浏览器授权、OAuth、scope 审核/发布
+
 ## Feishu 接入是不是最简便
 
 如果目标是同时保留这些能力：

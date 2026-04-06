@@ -40,6 +40,7 @@ FEATURE_TOOL_GROUPS = {
     },
     "opencli_browser": {
         "label": "OpenCLI browser execution",
+        "commands": ("opencli",),
         "apps": ("Google Chrome",),
     },
 }
@@ -56,6 +57,7 @@ REQUIRED_FEATURE_SURFACES = (
     "electron",
 )
 REQUIRED_SYSTEM_GROUPS = (
+    "node_runtime",
     "knowledge_base_pdf_ocr",
     "opencli_browser",
 )

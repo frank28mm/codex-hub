@@ -106,6 +106,7 @@ def test_perform_init_bootstraps_knowledge_base_before_sync(monkeypatch) -> None
     monkeypatch.setattr(bootstrap, "maybe_sync", lambda site, skip_sync: {"verify_consistency": {"returncode": 0}})
     monkeypatch.setattr(bootstrap, "maybe_install_launchagents", lambda site, install: {"installed": False, "skipped": True})
     monkeypatch.setattr(bootstrap, "maybe_install_feishu_bridge", lambda site, install: {"installed": False, "skipped": True})
+    monkeypatch.setattr(bootstrap, "maybe_auto_install_macos_features", lambda site, install: {"installed": True, "results": {}, "features": []})
     monkeypatch.setattr(bootstrap, "build_manual_actions", lambda site, payload: [])
     monkeypatch.setattr(bootstrap, "_current_lark_cli_config", lambda: {"available": False, "configured": False})
     monkeypatch.setattr(bootstrap, "_run_feishu_auth_status", lambda: {"status": {}})
@@ -118,7 +119,7 @@ def test_perform_init_bootstraps_knowledge_base_before_sync(monkeypatch) -> None
 
     monkeypatch.setattr(bootstrap, "run_command", fake_run_command)
     site = bootstrap.default_site_config()
-    args = argparse.Namespace(skip_sync=False, install_launchagents=False, install_feishu_bridge=False)
+    args = argparse.Namespace(skip_sync=False, install_launchagents=False, install_feishu_bridge=False, skip_macos_auto_install=False)
 
     payload = bootstrap.perform_init(site, args)
 
@@ -152,6 +153,7 @@ def test_setup_runs_acceptance_after_bootstrap(monkeypatch, capsys) -> None:
         setup_feishu_cli=False,
         create_feishu_app=False,
         skip_acceptance=False,
+        skip_macos_auto_install=False,
     )
     rc = bootstrap.cmd_setup(args)
     payload = capsys.readouterr().out
@@ -541,6 +543,7 @@ def test_install_feature_knowledge_base_dry_run_uses_detected_manager(monkeypatc
 
     bootstrap = importlib.reload(bootstrap_module)
     monkeypatch.setattr(bootstrap, "detect_system_package_manager", lambda: "apt")
+    monkeypatch.setattr(bootstrap, "is_macos", lambda: False)
 
     payload = bootstrap.install_feature("knowledge-base", bootstrap.default_site_config(), dry_run=True)
 
@@ -562,12 +565,76 @@ def test_install_feature_electron_dry_run_returns_app_workspace(monkeypatch) -> 
 
     bootstrap = importlib.reload(bootstrap_module)
     monkeypatch.setattr(bootstrap, "detect_system_package_manager", lambda: "brew")
+    monkeypatch.setattr(bootstrap, "install_system_group", lambda group_id, *, manager="", dry_run=False: {"ok": True, "group_id": group_id, "manager": manager or "brew", "dry_run": dry_run})
 
     payload = bootstrap.install_feature("electron", bootstrap.default_site_config(), dry_run=True)
 
     assert payload["ok"] is True
     assert payload["command"] == ["npm", "install"]
     assert payload["cwd"] == str(bootstrap.WORKSPACE_ROOT / "apps" / "electron-console")
+    assert payload["runtime_result"]["group_id"] == "node_runtime"
+
+
+def test_install_feature_opencli_dry_run_installs_runtime_browser_and_cli(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "detect_system_package_manager", lambda: "brew")
+    monkeypatch.setattr(bootstrap, "install_system_group", lambda group_id, *, manager="", dry_run=False: {"ok": True, "group_id": group_id, "manager": manager or "brew", "dry_run": dry_run})
+    monkeypatch.setattr(bootstrap, "install_npm_global_package", lambda package_name, *, dry_run=False: {"ok": True, "package": package_name, "dry_run": dry_run, "command": ["npm", "install", "-g", package_name]})
+
+    payload = bootstrap.install_feature("opencli", bootstrap.default_site_config(), dry_run=True)
+
+    assert payload["ok"] is True
+    assert payload["runtime_result"]["group_id"] == "node_runtime"
+    assert payload["browser_result"]["group_id"] == "opencli_browser"
+    assert payload["cli_result"]["package"] == bootstrap.OPENCLI_NPM_PACKAGE
+
+
+def test_install_homebrew_dry_run_reports_official_command(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "is_macos", lambda: True)
+    monkeypatch.setattr(bootstrap, "command_available", lambda name: False)
+
+    payload = bootstrap.install_homebrew(dry_run=True)
+
+    assert payload["ok"] is True
+    assert payload["manager"] == "brew"
+    assert payload["command"] == ["/bin/bash", "-lc", bootstrap.HOMEBREW_INSTALL_SHELL]
+
+
+def test_install_system_group_skips_node_runtime_when_commands_exist(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "node_runtime_ready", lambda: True)
+
+    payload = bootstrap.install_system_group("node_runtime", manager="brew", dry_run=False)
+
+    assert payload["ok"] is True
+    assert payload["skipped"] is True
+    assert payload["group_id"] == "node_runtime"
+
+
+def test_maybe_auto_install_macos_features_runs_default_features(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    monkeypatch.setattr(bootstrap, "is_macos", lambda: True)
+    observed: list[str] = []
+
+    def fake_install_feature(feature, site, *, dry_run=False):
+        observed.append(feature)
+        return {"feature": feature, "ok": True}
+
+    monkeypatch.setattr(bootstrap, "install_feature", fake_install_feature)
+
+    payload = bootstrap.maybe_auto_install_macos_features(bootstrap.default_site_config(), install=True)
+
+    assert payload["installed"] is True
+    assert observed == list(bootstrap.MACOS_AUTO_INSTALL_FEATURES)
 
 
 def test_build_parser_exposes_feature_doctor_and_installers() -> None:

@@ -694,6 +694,24 @@ python3 ops/bootstrap_workspace_hub.py status
 python3 ops/accept_product.py run
 ```
 
+在 macOS 上，`setup` 现在会默认尝试自动补齐非授权类依赖：
+
+- Homebrew 包管理器
+- `node / npm / npx`
+- `knowledge-base` 所需 OCR 工具
+- `opencli` 所需 `Google Chrome` 与 `opencli` binary
+- `weixin / electron` 的本地 npm 依赖
+- `feishu` 所需的官方 CLI/tooling
+
+这条自动安装链仍然保留边界：
+
+- `codex login` 仍然需要你自己做
+- `Feishu` 的 app 创建、OAuth、scope 审核/发布仍然需要人工完成
+
+如果你只想先跳过这批机器依赖自动安装，可以加：
+
+- `python3 ops/bootstrap_workspace_hub.py setup --skip-macos-auto-install`
+
 如果某个具体能力还没 ready，不需要重新跑整套 setup。可以先用下面三类命令定点排查：
 
 - `doctor-feature`：判断单个能力是否 ready，并给出下一步安装动作

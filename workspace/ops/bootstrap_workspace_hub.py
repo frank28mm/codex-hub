@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -42,16 +43,23 @@ FEATURE_TOOL_GROUPS = {
     "knowledge_base_pdf_ocr": {
         "label": "Knowledge Base PDF / OCR ingestion",
         "commands": ("tesseract", "ocrmypdf", "pdftoppm"),
-        "install_hint": "brew install tesseract ocrmypdf poppler",
+        "install_hint": "python3 ops/bootstrap_workspace_hub.py install-feature --feature knowledge-base",
     },
     "opencli_browser": {
         "label": "OpenCLI browser execution",
+        "commands": ("opencli",),
         "apps": ("Google Chrome",),
-        "install_hint": "install Google Chrome",
+        "install_hint": "python3 ops/bootstrap_workspace_hub.py install-feature --feature opencli",
     },
 }
 SUPPORTED_PACKAGE_MANAGERS = ("brew", "apt", "winget", "choco")
 SYSTEM_PACKAGE_GROUPS: dict[str, dict[str, dict[str, list[str]]]] = {
+    "node_runtime": {
+        "brew": {"formula": ["node"], "cask": []},
+        "apt": {"packages": ["nodejs", "npm"]},
+        "winget": {"ids": ["OpenJS.NodeJS.LTS"]},
+        "choco": {"packages": ["nodejs-lts"]},
+    },
     "knowledge_base_pdf_ocr": {
         "brew": {"formula": ["tesseract", "ocrmypdf", "poppler"], "cask": []},
         "apt": {"packages": ["tesseract-ocr", "ocrmypdf", "poppler-utils"]},
@@ -73,30 +81,41 @@ FEATURE_SURFACES = {
     "knowledge-base": {
         "label": "Knowledge Base intake and OCR",
         "system_group": "knowledge_base_pdf_ocr",
-        "installer": "install-system-deps",
+        "installer": "install-feature",
     },
     "opencli": {
         "label": "OpenCLI browser execution",
         "system_group": "opencli_browser",
-        "installer": "install-system-deps",
+        "installer": "install-feature",
     },
     "weixin": {
         "label": "Weixin bridge",
-        "installer": "npm-install-bridge",
+        "installer": "install-feature",
     },
     "electron": {
         "label": "Electron desktop shell",
-        "installer": "npm-install-electron",
+        "installer": "install-feature",
     },
 }
 LARK_CLI_PACKAGE = "@larksuite/cli"
 LARK_CLI_SKILLS_REPO = "https://github.com/larksuite/cli"
 LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
 LARK_CLI_SKILLS_ROOT = Path.home() / ".agents" / "skills"
+OPENCLI_NPM_PACKAGE = "@jackwener/opencli"
 DEFAULT_FEISHU_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
 FEISHU_BRIDGE_ENV_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.local"
 FEISHU_BRIDGE_ENV_EXAMPLE_PATH = WORKSPACE_ROOT / "ops" / "feishu_bridge.env.example"
 LAUNCHAGENT_INSTALL_TIMEOUT_SECONDS = 45
+HOMEBREW_INSTALL_TIMEOUT_SECONDS = 1800
+HOMEBREW_INSTALL_SHELL = 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+DEFAULT_COMMAND_PATH_HINTS = (
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    str(Path.home() / ".local" / "bin"),
+)
+MACOS_AUTO_INSTALL_FEATURES = ("feishu", "knowledge-base", "opencli", "weixin", "electron")
 
 
 @dataclass
@@ -124,6 +143,20 @@ def app_installed(name: str) -> bool:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def host_platform() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform.startswith("win"):
+        return "windows"
+    return sys.platform
+
+
+def is_macos() -> bool:
+    return host_platform() == "macos"
 
 
 def resolve_root(raw: object, default: Path) -> Path:
@@ -280,7 +313,18 @@ def write_codex_config(site: SiteConfig) -> None:
 
 
 def command_available(name: str) -> bool:
-    return shutil.which(name) is not None
+    return shutil.which(name, path=command_env()["PATH"]) is not None
+
+
+def command_env() -> dict[str, str]:
+    env = dict(os.environ)
+    existing = [segment for segment in str(env.get("PATH") or "").split(os.pathsep) if segment]
+    merged: list[str] = []
+    for segment in [*DEFAULT_COMMAND_PATH_HINTS, *existing]:
+        if segment not in merged:
+            merged.append(segment)
+    env["PATH"] = os.pathsep.join(merged)
+    return env
 
 
 def detect_system_package_manager() -> str:
@@ -323,6 +367,10 @@ def python_module_status() -> dict[str, bool]:
 def missing_python_packages() -> list[str]:
     status = python_module_status()
     return [package for module, package in PYTHON_DEPENDENCIES if not status.get(module, False)]
+
+
+def node_runtime_ready() -> bool:
+    return all(command_available(name) for name in ("node", "npm", "npx"))
 
 
 def feature_tool_status() -> dict[str, object]:
@@ -378,6 +426,19 @@ def build_system_install_command(group_id: str, *, manager: str) -> list[str]:
     return []
 
 
+def install_homebrew(*, dry_run: bool = False) -> dict[str, Any]:
+    if not is_macos():
+        return {"ok": False, "skipped": True, "reason": "not_macos"}
+    if command_available("brew"):
+        return {"ok": True, "installed": False, "skipped": True, "manager": "brew"}
+    command = ["/bin/bash", "-lc", HOMEBREW_INSTALL_SHELL]
+    if dry_run:
+        return {"ok": True, "installed": False, "dry_run": True, "manager": "brew", "command": command}
+    result = run_command_with_timeout(command, WORKSPACE_ROOT, timeout_seconds=HOMEBREW_INSTALL_TIMEOUT_SECONDS)
+    ok = int(result.get("returncode") or 0) == 0 and command_available("brew")
+    return {"ok": ok, "installed": ok, "manager": "brew", "result": result}
+
+
 def execute_system_install(group_id: str, *, manager: str, dry_run: bool = False) -> dict[str, Any]:
     group = SYSTEM_PACKAGE_GROUPS.get(group_id, {})
     payload = group.get(manager, {})
@@ -414,6 +475,40 @@ def execute_system_install(group_id: str, *, manager: str, dry_run: bool = False
     return {"ok": ok, "group_id": group_id, "manager": manager, "results": results}
 
 
+def install_system_group(group_id: str, *, manager: str = "", dry_run: bool = False) -> dict[str, Any]:
+    if group_id == "node_runtime" and not dry_run and node_runtime_ready():
+        return {"ok": True, "group_id": group_id, "manager": str(manager or detect_system_package_manager()).strip(), "skipped": True}
+    resolved_manager = str(manager or detect_system_package_manager()).strip()
+    bootstrap_result: dict[str, Any] = {"skipped": True}
+    if not resolved_manager and is_macos():
+        bootstrap_result = install_homebrew(dry_run=dry_run)
+        if bool(bootstrap_result.get("ok")):
+            resolved_manager = "brew"
+    if not resolved_manager:
+        return {
+            "ok": False,
+            "group_id": group_id,
+            "manager": "",
+            "reason": "package_manager_unavailable",
+            "package_manager_bootstrap": bootstrap_result,
+        }
+    payload = execute_system_install(group_id, manager=resolved_manager, dry_run=dry_run)
+    payload["package_manager_bootstrap"] = bootstrap_result
+    return payload
+
+
+def install_npm_global_package(package_name: str, *, dry_run: bool = False) -> dict[str, Any]:
+    command = ["npm", "install", "-g", package_name]
+    if dry_run:
+        return {"ok": True, "dry_run": True, "command": command, "package": package_name}
+    result = run_command(command, WORKSPACE_ROOT)
+    return {
+        "ok": int(result.get("returncode") or 0) == 0,
+        "package": package_name,
+        "result": result,
+    }
+
+
 def feature_doctor(feature: str, site: SiteConfig) -> dict[str, Any]:
     normalized = str(feature or "").strip().lower()
     if normalized not in FEATURE_SURFACES:
@@ -448,21 +543,23 @@ def feature_doctor(feature: str, site: SiteConfig) -> dict[str, Any]:
                 "note": "knowledge intake bootstrap",
             }
         )
-        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-system-deps --group knowledge_base_pdf_ocr")
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature knowledge-base")
     elif normalized == "opencli":
         tools = (status.get("feature_tools") or {}).get("opencli_browser", {})
-        checks.append({"name": "browser_ready", "ok": bool(tools.get("ready")), "note": "Google Chrome / browser runtime"})
-        checks.append({"name": "opencli_bin", "ok": command_available("opencli"), "note": "opencli binary available"})
-        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-system-deps --group opencli_browser")
+        checks.append({"name": "browser_ready", "ok": bool(tools.get("ready")), "note": "opencli + Google Chrome runtime"})
+        install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature opencli")
     elif normalized == "weixin":
         checks.append({"name": "node", "ok": bool(status["commands"].get("node")), "note": "node available"})
+        checks.append({"name": "npm", "ok": bool(status["commands"].get("npm")), "note": "npm available"})
         checks.append({"name": "voice_helper", "ok": (WORKSPACE_ROOT / "bridge" / "weixin_voice_to_wav.mjs").exists(), "note": "voice helper present"})
+        checks.append({"name": "bridge_dependencies", "ok": (WORKSPACE_ROOT / "bridge" / "node_modules").exists(), "note": "bridge npm dependencies installed"})
         checks.append({"name": "openai_sdk", "ok": bool(status["python_modules"].get("openai")), "note": "voice transcription SDK"})
         install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature weixin")
     elif normalized == "electron":
         checks.append({"name": "node", "ok": bool(status["commands"].get("node")), "note": "node available"})
         checks.append({"name": "npm", "ok": bool(status["commands"].get("npm")), "note": "npm available"})
         checks.append({"name": "package_json", "ok": (WORKSPACE_ROOT / "apps" / "electron-console" / "package.json").exists(), "note": "electron package present"})
+        checks.append({"name": "electron_dependencies", "ok": (WORKSPACE_ROOT / "apps" / "electron-console" / "node_modules").exists(), "note": "electron npm dependencies installed"})
         install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature electron")
 
     ready = all(bool(item.get("ok")) for item in checks)
@@ -483,49 +580,93 @@ def install_feature(feature: str, site: SiteConfig, *, dry_run: bool = False) ->
         raise SystemExit(f"unknown feature: {feature}")
     manager = detect_system_package_manager()
     if normalized == "feishu":
+        runtime_result = install_system_group("node_runtime", manager=manager, dry_run=dry_run)
+        if not bool(runtime_result.get("ok")):
+            return {"feature": normalized, "installer": "install-feishu-cli", "runtime_result": runtime_result, "ok": False}
         if dry_run:
             return {
                 "feature": normalized,
                 "dry_run": True,
                 "installer": "setup-feishu-cli",
+                "runtime_result": runtime_result,
                 "command": ["python3", "ops/bootstrap_workspace_hub.py", "setup-feishu-cli", "--create-feishu-app"],
                 "ok": True,
             }
         payload = install_feishu_cli_tooling(force=False, install_skills=True)
         ok = not result_failed(payload.get("cli")) and not result_failed(payload.get("skills"))
-        return {"feature": normalized, "installer": "install-feishu-cli", "result": payload, "ok": ok}
+        return {"feature": normalized, "installer": "install-feishu-cli", "runtime_result": runtime_result, "result": payload, "ok": ok}
     if normalized == "knowledge-base":
-        system_result = execute_system_install("knowledge_base_pdf_ocr", manager=manager, dry_run=dry_run)
+        tools = (feature_tool_status().get("knowledge_base_pdf_ocr") or {}) if not dry_run else {}
+        if bool(tools.get("ready")):
+            return {"feature": normalized, "installer": "system-deps", "skipped": True, "ok": True}
+        system_result = install_system_group("knowledge_base_pdf_ocr", manager=manager, dry_run=dry_run)
         return {"feature": normalized, "installer": "system-deps", "system_result": system_result, "ok": bool(system_result.get("ok", False))}
     if normalized == "opencli":
-        system_result = execute_system_install("opencli_browser", manager=manager, dry_run=dry_run)
-        return {"feature": normalized, "installer": "system-deps", "system_result": system_result, "ok": bool(system_result.get("ok", False))}
+        tools = (feature_tool_status().get("opencli_browser") or {}) if not dry_run else {}
+        if bool(tools.get("ready")):
+            return {"feature": normalized, "installer": "opencli-runtime", "skipped": True, "ok": True}
+        runtime_result = install_system_group("node_runtime", manager=manager, dry_run=dry_run)
+        browser_result = install_system_group("opencli_browser", manager=manager or str(runtime_result.get("manager") or ""), dry_run=dry_run)
+        cli_result = install_npm_global_package(OPENCLI_NPM_PACKAGE, dry_run=dry_run) if runtime_result.get("ok") else {"ok": False, "reason": "node_runtime_failed"}
+        ok = bool(runtime_result.get("ok")) and bool(browser_result.get("ok")) and bool(cli_result.get("ok"))
+        return {
+            "feature": normalized,
+            "installer": "opencli-runtime",
+            "runtime_result": runtime_result,
+            "browser_result": browser_result,
+            "cli_result": cli_result,
+            "ok": ok,
+        }
     if normalized == "weixin":
         command = ["npm", "install"]
+        if not dry_run and (WORKSPACE_ROOT / "bridge" / "node_modules").exists():
+            return {"feature": normalized, "installer": "npm-install-bridge", "skipped": True, "ok": True}
+        runtime_result = install_system_group("node_runtime", manager=manager, dry_run=dry_run)
+        if not bool(runtime_result.get("ok")):
+            return {"feature": normalized, "installer": "npm-install-bridge", "runtime_result": runtime_result, "ok": False}
         if dry_run:
             return {
                 "feature": normalized,
                 "dry_run": True,
                 "command": command,
                 "cwd": str(WORKSPACE_ROOT / "bridge"),
+                "runtime_result": runtime_result,
                 "ok": True,
             }
         result = run_command(command, WORKSPACE_ROOT / "bridge")
-        return {"feature": normalized, "installer": "npm-install-bridge", "result": result, "ok": int(result.get("returncode") or 0) == 0}
+        return {"feature": normalized, "installer": "npm-install-bridge", "runtime_result": runtime_result, "result": result, "ok": int(result.get("returncode") or 0) == 0}
     if normalized == "electron":
         command = ["npm", "install"]
         cwd = WORKSPACE_ROOT / "apps" / "electron-console"
+        if not dry_run and (cwd / "node_modules").exists():
+            return {"feature": normalized, "installer": "npm-install-electron", "skipped": True, "ok": True}
+        runtime_result = install_system_group("node_runtime", manager=manager, dry_run=dry_run)
+        if not bool(runtime_result.get("ok")):
+            return {"feature": normalized, "installer": "npm-install-electron", "runtime_result": runtime_result, "ok": False}
         if dry_run:
             return {
                 "feature": normalized,
                 "dry_run": True,
                 "command": command,
                 "cwd": str(cwd),
+                "runtime_result": runtime_result,
                 "ok": True,
             }
         result = run_command(command, cwd)
-        return {"feature": normalized, "installer": "npm-install-electron", "result": result, "ok": int(result.get("returncode") or 0) == 0}
+        return {"feature": normalized, "installer": "npm-install-electron", "runtime_result": runtime_result, "result": result, "ok": int(result.get("returncode") or 0) == 0}
     return {"feature": normalized, "ok": False, "reason": "unsupported_feature"}
+
+
+def maybe_auto_install_macos_features(site: SiteConfig, *, install: bool) -> dict[str, Any]:
+    if not install:
+        return {"installed": False, "skipped": True}
+    if not is_macos():
+        return {"installed": False, "skipped": True, "reason": "not_macos"}
+    results: dict[str, Any] = {}
+    for feature in MACOS_AUTO_INSTALL_FEATURES:
+        results[feature] = install_feature(feature, site, dry_run=False)
+    ok = all(bool((results.get(feature) or {}).get("ok")) for feature in MACOS_AUTO_INSTALL_FEATURES)
+    return {"installed": ok, "results": results, "features": list(MACOS_AUTO_INSTALL_FEATURES)}
 
 
 def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
@@ -535,6 +676,7 @@ def run_command(cmd: list[str], cwd: Path) -> dict[str, object]:
         text=True,
         capture_output=True,
         check=False,
+        env=command_env(),
     )
     return {
         "command": cmd,
@@ -553,6 +695,7 @@ def run_command_with_timeout(cmd: list[str], cwd: Path, *, timeout_seconds: int)
             capture_output=True,
             check=False,
             timeout=timeout_seconds,
+            env=command_env(),
         )
     except subprocess.TimeoutExpired as exc:
         stdout = str(exc.stdout or "").strip()
@@ -801,6 +944,7 @@ def bootstrap_status_payload(site: SiteConfig) -> dict[str, object]:
         "memory_template_root": str(MEMORY_TEMPLATE_ROOT),
         "operator_name": site.operator_name,
         "timezone": site.timezone,
+        "host_platform": host_platform(),
         "launchagent_prefix": site.launchagent_prefix,
         "feishu_enabled": site.feishu_enabled,
         "electron_enabled": site.electron_enabled,
@@ -879,6 +1023,10 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
         install_hint = str(item.get("install_hint", "")).strip()
         if install_hint:
             actions.append(f"Optional for `{label}`: {install_hint}.")
+    if is_macos():
+        macos_auto_installs = payload.get("macos_auto_installs") if isinstance(payload.get("macos_auto_installs"), dict) else {}
+        if macos_auto_installs and not macos_auto_installs.get("installed"):
+            actions.append("macOS automatic dependency install did not fully finish; rerun `python3 ops/bootstrap_workspace_hub.py setup` or use `doctor-feature` to inspect the missing surface.")
     if site.feishu_enabled:
         feishu_setup = payload.get("feishu_setup") if isinstance(payload.get("feishu_setup"), dict) else {}
         actions.append("Fill `control/feishu_resources.yaml` with your app, calendar, table, and alias defaults.")
@@ -1105,6 +1253,12 @@ def perform_init(site: SiteConfig, args: argparse.Namespace) -> dict[str, object
     payload["memory_template"] = memory_template
     payload["site_updates"] = {"feishu_enabled": site_update}
     payload["setup_phase"] = "initializing"
+    _write_bootstrap_status(payload)
+    payload["macos_auto_installs"] = maybe_auto_install_macos_features(
+        site,
+        install=not bool(getattr(args, "skip_macos_auto_install", False)),
+    )
+    payload["setup_phase"] = "macos_dependency_install_complete"
     _write_bootstrap_status(payload)
     payload["knowledge_base"] = maybe_bootstrap_knowledge_base(site)
     payload["setup_phase"] = "knowledge_bootstrap_complete"
@@ -1374,6 +1528,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip refresh-index / rebuild-all / verify-consistency during bootstrap.",
     )
     init_parser.add_argument(
+        "--skip-macos-auto-install",
+        action="store_true",
+        help="On macOS, skip the default Homebrew/npm dependency auto-install stage.",
+    )
+    init_parser.add_argument(
         "--install-launchagents",
         action="store_true",
         help="Install launchd tasks for watcher, dashboard sync, health check, and Feishu projection.",
@@ -1418,6 +1577,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-sync",
         action="store_true",
         help="Skip refresh-index / rebuild-all / verify-consistency during bootstrap.",
+    )
+    setup_parser.add_argument(
+        "--skip-macos-auto-install",
+        action="store_true",
+        help="On macOS, skip the default Homebrew/npm dependency auto-install stage.",
     )
     setup_parser.add_argument(
         "--install-launchagents",
