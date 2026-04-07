@@ -46,6 +46,7 @@ DEFAULT_OAUTH_REDIRECT_URI = "http://127.0.0.1:14589/feishu-auth/callback"
 DEFAULT_OAUTH_PORT = 14589
 DEFAULT_OAUTH_PATH = "/feishu-auth/callback"
 DEFAULT_TOKEN_STORE_NAME = "feishu_user_token.json"
+DEFAULT_DYNAMIC_REGISTRY_NAME = "feishu_resources.dynamic.yaml"
 DEFAULT_LAUNCH_AGENT_NAME = "com.codexhub.coco-feishu-bridge.plist"
 DEFAULT_LARK_CLI_DOMAINS = "event,im,docs,drive,base,task,calendar,vc,minutes,contact,wiki,sheets,mail"
 DEFAULT_LARK_CLI_CONFIG_PATH = Path.home() / ".lark-cli" / "config.json"
@@ -72,6 +73,14 @@ def default_registry_path(env: dict[str, str] | None = None) -> Path:
     if explicit:
         return Path(explicit)
     return _control_root(source) / "feishu_resources.yaml"
+
+
+def default_dynamic_registry_path(env: dict[str, str] | None = None) -> Path:
+    source = env or os.environ
+    explicit = str(source.get("WORKSPACE_HUB_FEISHU_DYNAMIC_RESOURCES_PATH", "")).strip()
+    if explicit:
+        return Path(explicit)
+    return _runtime_root(source) / DEFAULT_DYNAMIC_REGISTRY_NAME
 
 
 def _workspace_root(env: dict[str, str] | None = None) -> Path:
@@ -148,91 +157,178 @@ def _load_bootstrap_env() -> dict[str, str]:
     return values
 
 
-def load_registry(path: str | Path | None = None) -> dict[str, Any]:
-    target = Path(path) if path else default_registry_path()
-    if not target.exists():
-        return {
-            "version": 1,
-            "defaults": {
-                "owner_open_id": "",
+def _default_registry_payload() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "defaults": {
+            "owner_open_id": "",
+            "calendar_id": "",
+            "doc_folder_token": "",
+            "oauth_scopes": [
+                "contact:contact.base:readonly",
+                "task:task:write",
+                "task:tasklist:read",
+                "task:tasklist:write",
+            ],
+            "meeting": {
                 "calendar_id": "",
-                "doc_folder_token": "",
-                "oauth_scopes": [
-                    "contact:contact.base:readonly",
-                    "task:task:write",
-                    "task:tasklist:read",
-                    "task:tasklist:write",
+                "timezone": DEFAULT_TIMEZONE,
+                "duration_minutes": 30,
+                "attendee_ability": "can_modify_event",
+                "visibility": "default",
+            },
+        },
+        "projection": {
+            "app": {
+                "alias": "codex_hub_projection",
+                "name": "Codex Hub 项目任务看板",
+                "app_token": "",
+                "folder_token": "",
+            },
+            "tables": {
+                "projects_overview": {
+                    "alias": "codex_hub_projects_overview",
+                    "name": "项目总览",
+                    "table_id": "",
+                    "default_view_name": "全部项目",
+                },
+                "tasks_current": {
+                    "alias": "codex_hub_tasks_current",
+                    "name": "当前任务",
+                    "table_id": "",
+                    "default_view_name": "全部任务",
+                },
+            },
+            "views": {
+                "projects_overview": [
+                    {"name": "全部项目", "type": "grid"},
+                    {"name": "按状态看板", "type": "kanban"},
+                    {"name": "按优先级", "type": "grid"},
+                    {"name": "最近更新", "type": "grid"},
+                    {"name": "需关注项目", "type": "grid"},
                 ],
-                "meeting": {
-                    "calendar_id": "",
-                    "timezone": DEFAULT_TIMEZONE,
-                    "duration_minutes": 30,
-                    "attendee_ability": "can_modify_event",
-                    "visibility": "default",
-                },
+                "tasks_current": [
+                    {"name": "全部任务", "type": "grid"},
+                    {"name": "按状态看板", "type": "kanban"},
+                    {"name": "按项目分组", "type": "kanban"},
+                    {"name": "阻塞项", "type": "grid"},
+                    {"name": "最近更新任务", "type": "grid"},
+                ],
             },
-            "projection": {
-                "app": {
-                    "alias": "codex_hub_projection",
-                    "name": "Codex Hub 项目任务看板",
-                    "app_token": "",
-                    "folder_token": "",
-                },
-                "tables": {
-                    "projects_overview": {
-                        "alias": "codex_hub_projects_overview",
-                        "name": "项目总览",
-                        "table_id": "",
-                        "default_view_name": "全部项目",
-                    },
-                    "tasks_current": {
-                        "alias": "codex_hub_tasks_current",
-                        "name": "当前任务",
-                        "table_id": "",
-                        "default_view_name": "全部任务",
-                    },
-                },
-                "views": {
-                    "projects_overview": [
-                        {"name": "全部项目", "type": "grid"},
-                        {"name": "按状态看板", "type": "kanban"},
-                        {"name": "按优先级", "type": "grid"},
-                        {"name": "最近更新", "type": "grid"},
-                        {"name": "需关注项目", "type": "grid"},
-                    ],
-                    "tasks_current": [
-                        {"name": "全部任务", "type": "grid"},
-                        {"name": "按状态看板", "type": "kanban"},
-                        {"name": "按项目分组", "type": "kanban"},
-                        {"name": "阻塞项", "type": "grid"},
-                        {"name": "最近更新任务", "type": "grid"},
-                    ],
-                },
-            },
-            "aliases": {
-                "chats": {},
-                "users": {},
-                "calendars": {},
-                "doc_folders": {},
-                "tables": {},
-                "tasklists": {},
-            },
-        }
+        },
+        "aliases": {
+            "chats": {},
+            "users": {},
+            "calendars": {},
+            "doc_folders": {},
+            "tables": {},
+            "tasklists": {},
+        },
+    }
+
+
+def _json_clone(payload: Any) -> Any:
+    return json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _load_registry_file(target: Path, *, default_payload: dict[str, Any]) -> dict[str, Any]:
+    if not target.exists():
+        return _json_clone(default_payload)
     with target.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
-    return payload
+    return payload if isinstance(payload, dict) else _json_clone(default_payload)
 
 
-def save_registry(payload: dict[str, Any], path: str | Path | None = None) -> Path:
-    target = Path(path) if path else default_registry_path()
+def _deep_merge_registry(base: Any, overlay: Any) -> Any:
+    if not isinstance(base, dict) or not isinstance(overlay, dict):
+        return _json_clone(overlay)
+    merged = _json_clone(base)
+    for key, value in overlay.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_registry(merged[key], value)
+        else:
+            merged[key] = _json_clone(value)
+    return merged
+
+
+def load_static_registry(path: str | Path | None = None, *, env: dict[str, str] | None = None) -> dict[str, Any]:
+    target = Path(path) if path else default_registry_path(env)
+    return _load_registry_file(target, default_payload=_default_registry_payload())
+
+
+def load_dynamic_registry(path: str | Path | None = None, *, env: dict[str, str] | None = None) -> dict[str, Any]:
+    target = Path(path) if path else default_dynamic_registry_path(env)
+    return _load_registry_file(target, default_payload={})
+
+
+def load_registry(path: str | Path | None = None, *, env: dict[str, str] | None = None) -> dict[str, Any]:
+    target = Path(path) if path else default_registry_path(env)
+    static_payload = load_static_registry(target, env=env)
+    default_target = default_registry_path(env)
+    try:
+        should_merge_dynamic = target.resolve() == default_target.resolve()
+    except FileNotFoundError:
+        should_merge_dynamic = str(target) == str(default_target)
+    if not should_merge_dynamic:
+        return static_payload
+    dynamic_payload = load_dynamic_registry(env=env)
+    if not dynamic_payload:
+        return static_payload
+    return _deep_merge_registry(static_payload, dynamic_payload)
+
+
+def save_registry(payload: dict[str, Any], path: str | Path | None = None, *, env: dict[str, str] | None = None) -> Path:
+    target = Path(path) if path else default_registry_path(env)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, allow_unicode=True, sort_keys=False)
     return target
 
 
-def _json_clone(payload: Any) -> Any:
-    return json.loads(json.dumps(payload, ensure_ascii=False))
+def save_dynamic_registry(payload: dict[str, Any], path: str | Path | None = None, *, env: dict[str, str] | None = None) -> Path:
+    target = Path(path) if path else default_dynamic_registry_path(env)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, allow_unicode=True, sort_keys=False)
+    return target
+
+
+def registry_dynamic_overlay(payload: dict[str, Any]) -> dict[str, Any]:
+    projection = payload.get("projection") if isinstance(payload.get("projection"), dict) else {}
+    projection_app = projection.get("app") if isinstance(projection.get("app"), dict) else {}
+    projection_tables = projection.get("tables") if isinstance(projection.get("tables"), dict) else {}
+    aliases = payload.get("aliases") if isinstance(payload.get("aliases"), dict) else {}
+    tables_aliases = aliases.get("tables") if isinstance(aliases.get("tables"), dict) else {}
+    overlay: dict[str, Any] = {"projection": {"app": {}, "tables": {}}, "aliases": {"tables": {}}}
+    if str(projection_app.get("app_token") or "").strip():
+        overlay["projection"]["app"]["app_token"] = str(projection_app.get("app_token") or "").strip()
+    if str(projection_app.get("folder_token") or "").strip():
+        overlay["projection"]["app"]["folder_token"] = str(projection_app.get("folder_token") or "").strip()
+    for table_key, table_cfg in projection_tables.items():
+        if not isinstance(table_cfg, dict):
+            continue
+        entry: dict[str, Any] = {}
+        if str(table_cfg.get("table_id") or "").strip():
+            entry["table_id"] = str(table_cfg.get("table_id") or "").strip()
+        if entry:
+            overlay["projection"]["tables"][str(table_key)] = entry
+    for alias, value in tables_aliases.items():
+        if not isinstance(value, dict):
+            continue
+        entry: dict[str, Any] = {}
+        for key in ("app_token", "table_id"):
+            if str(value.get(key) or "").strip():
+                entry[key] = str(value.get(key) or "").strip()
+        view_ids = value.get("view_ids_by_name")
+        if isinstance(view_ids, dict) and view_ids:
+            entry["view_ids_by_name"] = {
+                str(name): str(view_id)
+                for name, view_id in view_ids.items()
+                if str(name).strip() and str(view_id).strip()
+            }
+        if entry:
+            overlay["aliases"]["tables"][str(alias)] = entry
+    return overlay
 
 
 def _parse_dt(text: str, *, timezone: str = DEFAULT_TIMEZONE) -> dict[str, str]:
@@ -279,6 +375,22 @@ def _ensure_list(payload: Any, *, code: str = "invalid_list") -> list[Any]:
     if isinstance(payload, list):
         return payload
     raise FeishuAgentError("payload must be a JSON array", code=code)
+
+
+def _bitable_fields_need_user_fallback(fields: list[dict[str, Any]]) -> bool:
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_type = field.get("type")
+        ui_type = str(field.get("ui_type") or "").strip().lower()
+        is_single_select = field_type in {3, "3", "select"} or ui_type == "singleselect"
+        if not is_single_select:
+            continue
+        options = _ensure_dict(field.get("property")).get("options")
+        if isinstance(options, list) and options:
+            continue
+        return True
+    return False
 
 
 def _bool_flag(payload: dict[str, Any], key: str, *, default: bool = False) -> bool:
@@ -359,7 +471,8 @@ class FeishuAgent:
             runtime_env.update(env)
         self.env = runtime_env
         self.registry_path = Path(registry_path) if registry_path else default_registry_path(self.env)
-        self.registry = load_registry(self.registry_path)
+        self.dynamic_registry_path = default_dynamic_registry_path(self.env)
+        self.registry = load_registry(self.registry_path, env=self.env)
         self.base_url = base_url
         self.app_id = str(self.env.get("FEISHU_APP_ID", "")).strip()
         self.app_secret = str(self.env.get("FEISHU_APP_SECRET", "")).strip()
@@ -857,6 +970,21 @@ class FeishuAgent:
             return self.default_calendar_id()
         return target
 
+    def _default_personal_calendar_id(self) -> str:
+        return str(self._defaults().get("personal_calendar_id") or "").strip()
+
+    def _default_personal_reminder_target(self) -> str:
+        return str(self._defaults().get("personal_reminder_target") or "").strip().lower()
+
+    @staticmethod
+    def _is_group_calendar_id(calendar_id: str) -> bool:
+        return str(calendar_id or "").strip().endswith("@group.calendar.feishu.cn")
+
+    def _should_use_user_calendar_identity(self, calendar_id: str) -> bool:
+        target = str(calendar_id or "").strip()
+        personal_calendar_id = self._default_personal_calendar_id()
+        return bool(personal_calendar_id and target == personal_calendar_id)
+
     def resolve_folder_token(self, value: str = "") -> str:
         target = str(value or "").strip()
         if not target:
@@ -892,10 +1020,13 @@ class FeishuAgent:
     def resolve_table_refs(self, app: str = "", table: str = "") -> tuple[str, str]:
         app_ref = str(app or "").strip()
         table_ref = str(table or "").strip()
-        alias_value = self._match_alias(self._aliases("tables"), table_ref or app_ref)
-        if isinstance(alias_value, dict):
-            app_ref = str(alias_value.get("app_token") or alias_value.get("app") or app_ref).strip()
-            table_ref = str(alias_value.get("table_id") or alias_value.get("table") or table_ref).strip()
+        app_alias_value = self._match_alias(self._aliases("tables"), app_ref)
+        if isinstance(app_alias_value, dict):
+            app_ref = str(app_alias_value.get("app_token") or app_alias_value.get("app") or app_ref).strip()
+        table_alias_value = self._match_alias(self._aliases("tables"), table_ref)
+        if isinstance(table_alias_value, dict):
+            app_ref = str(table_alias_value.get("app_token") or table_alias_value.get("app") or app_ref).strip()
+            table_ref = str(table_alias_value.get("table_id") or table_alias_value.get("table") or table_ref).strip()
         app_token = _extract_by_patterns(
             app_ref,
             [r"/base/([A-Za-z0-9]+)", r"app_token=([A-Za-z0-9]+)"],
@@ -927,7 +1058,10 @@ class FeishuAgent:
             raise FeishuAgentError(f"cannot decode json payload: {text}", code=code) from exc
 
     def save_registry(self) -> Path:
-        return save_registry(self.registry, self.registry_path)
+        return save_registry(self.registry, self.registry_path, env=self.env)
+
+    def save_dynamic_registry(self, payload: dict[str, Any]) -> Path:
+        return save_dynamic_registry(payload, self.dynamic_registry_path, env=self.env)
 
     def _normalize_bitable_fields(self, raw: Any) -> list[dict[str, Any]]:
         loaded = self._load_json_payload(raw, default=[], code="invalid_table_fields")
@@ -965,7 +1099,16 @@ class FeishuAgent:
 
     def _default_meeting_settings(self) -> dict[str, Any]:
         defaults = self._defaults().get("meeting", {})
-        return defaults if isinstance(defaults, dict) else {}
+        if not isinstance(defaults, dict):
+            defaults = {}
+        merged = dict(defaults)
+        if not str(merged.get("calendar_id") or "").strip():
+            personal_calendar_id = self._default_personal_calendar_id()
+            if personal_calendar_id:
+                merged["calendar_id"] = personal_calendar_id
+        if not str(merged.get("timezone") or "").strip():
+            merged["timezone"] = DEFAULT_TIMEZONE
+        return merged
 
     def _default_calendar_create_route(self) -> str:
         return str(self._defaults().get("calendar_create_default_route") or "").strip().lower()
@@ -2335,13 +2478,15 @@ class FeishuAgent:
                     limit=int(payload.get("limit") or 100),
                     offset=int(payload.get("offset") or 0),
                 )
-                return {
-                    "app_token": app_token,
-                    "table_id": table_id,
-                    "fields": list(result.get("fields") or []),
-                    "total": result.get("total"),
-                    "backend": result.get("backend"),
-                }
+                fields = list(result.get("fields") or [])
+                if not _bitable_fields_need_user_fallback(fields):
+                    return {
+                        "app_token": app_token,
+                        "table_id": table_id,
+                        "fields": fields,
+                        "total": result.get("total"),
+                        "backend": result.get("backend"),
+                    }
             except lark_cli_backend.LarkCliBackendError:
                 pass
         result = self.api(
@@ -2714,6 +2859,7 @@ class FeishuAgent:
         else:
             end = _parse_dt(end_value, timezone=timezone)
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
+        use_user_identity = self._should_use_user_calendar_identity(calendar_id)
         event_data: dict[str, Any] = {
             "summary": title,
             "start_time": start,
@@ -2750,7 +2896,7 @@ class FeishuAgent:
             if not vchat.get("vc_type"):
                 vchat["vc_type"] = "vc"
             event_data["vchat"] = _json_clone(vchat)
-        if self._can_use_lark_cli_backend("calendar"):
+        if self._can_use_lark_cli_backend("calendar") and not use_user_identity:
             try:
                 result = lark_cli_backend.api_call(
                     "POST",
@@ -2761,11 +2907,18 @@ class FeishuAgent:
             except lark_cli_backend.LarkCliBackendError:
                 result = self._http("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data, token=self._token())
         else:
-            result = self.api("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data)
+            if use_user_identity:
+                result = self.user_api("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data)
+            else:
+                result = self.api("POST", f"/calendar/v4/calendars/{calendar_id}/events", data=event_data)
         event = _ensure_dict(result.get("event"))
         event_id = str(event.get("event_id") or "").strip()
         attendees = self._normalize_attendees(list(payload.get("attendees") or []))
-        if self.owner_open_id and not any(item["type"] == "user" and item["id"] == self.owner_open_id for item in attendees):
+        if (
+            with_vchat
+            and self.owner_open_id
+            and not any(item["type"] == "user" and item["id"] == self.owner_open_id for item in attendees)
+        ):
             attendees.append({"type": "user", "id": self.owner_open_id})
         attendee_warning = ""
         if attendees and event_id:
@@ -2783,7 +2936,7 @@ class FeishuAgent:
                     row["third_party_email"] = item["id"]
                 attendee_data.append(row)
             try:
-                if self._can_use_lark_cli_backend("calendar"):
+                if self._can_use_lark_cli_backend("calendar") and not use_user_identity:
                     lark_cli_backend.api_call(
                         "POST",
                         f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
@@ -2792,12 +2945,20 @@ class FeishuAgent:
                         identity="bot",
                     )
                 else:
-                    self.api(
-                        "POST",
-                        f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
-                        data={"attendees": attendee_data, "need_notification": True},
-                        params={"user_id_type": "open_id"},
-                    )
+                    if use_user_identity:
+                        self.user_api(
+                            "POST",
+                            f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+                            data={"attendees": attendee_data, "need_notification": True},
+                            params={"user_id_type": "open_id"},
+                        )
+                    else:
+                        self.api(
+                            "POST",
+                            f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+                            data={"attendees": attendee_data, "need_notification": True},
+                            params={"user_id_type": "open_id"},
+                        )
             except FeishuAgentError as exc:
                 attendee_warning = str(exc)
             except lark_cli_backend.LarkCliBackendError as exc:
@@ -2817,9 +2978,10 @@ class FeishuAgent:
 
     def cal_list(self, payload: dict[str, Any]) -> dict[str, Any]:
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
+        use_user_identity = self._should_use_user_calendar_identity(calendar_id)
         now_ts = int(time.time())
         days = int(payload.get("days") or 7)
-        if self._can_use_lark_cli_backend("calendar"):
+        if self._can_use_lark_cli_backend("calendar") and not use_user_identity:
             start_iso = datetime.fromtimestamp(now_ts, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             end_iso = datetime.fromtimestamp(now_ts + days * 86400, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             try:
@@ -2850,11 +3012,18 @@ class FeishuAgent:
                 }
             except lark_cli_backend.LarkCliBackendError:
                 pass
-        result = self.api(
-            "GET",
-            f"/calendar/v4/calendars/{calendar_id}/events",
-            params={"start_time": str(now_ts), "end_time": str(now_ts + days * 86400), "page_size": 50},
-        )
+        if use_user_identity:
+            result = self.user_api(
+                "GET",
+                f"/calendar/v4/calendars/{calendar_id}/events",
+                params={"start_time": str(now_ts), "end_time": str(now_ts + days * 86400), "page_size": 50},
+            )
+        else:
+            result = self.api(
+                "GET",
+                f"/calendar/v4/calendars/{calendar_id}/events",
+                params={"start_time": str(now_ts), "end_time": str(now_ts + days * 86400), "page_size": 50},
+            )
         events = []
         for event in result.get("items", []):
             events.append(
@@ -2899,8 +3068,25 @@ class FeishuAgent:
             if result.get("warning"):
                 response["warning"] = result["warning"]
             return response
+        if not explicit_calendar:
+            personal_calendar_id = self._default_personal_calendar_id()
+            if personal_calendar_id:
+                payload = dict(payload)
+                payload["calendar_id"] = personal_calendar_id
+            else:
+                default_calendar_id = self.resolve_calendar_id("")
+                if (
+                    self._default_personal_reminder_target() == "task"
+                    and self._is_group_calendar_id(default_calendar_id)
+                ):
+                    raise FeishuAgentError(
+                        "implicit personal reminder calendar is not configured; refusing to use group calendar default",
+                        code="implicit_group_calendar_blocked",
+                        details={"calendar_id": default_calendar_id, "suggested_target": "task"},
+                    )
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
-        if self._can_use_lark_cli_backend("calendar"):
+        use_user_identity = self._should_use_user_calendar_identity(calendar_id)
+        if self._can_use_lark_cli_backend("calendar") and not use_user_identity:
             timezone = str(payload.get("timezone") or DEFAULT_TIMEZONE)
             try:
                 start = _parse_dt(str(payload.get("start") or payload.get("start_time") or ""), timezone=timezone)
@@ -2931,10 +3117,11 @@ class FeishuAgent:
 
     def cal_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
+        use_user_identity = self._should_use_user_calendar_identity(calendar_id)
         event_id = str(payload.get("id") or payload.get("event_id") or "").strip()
         if not event_id:
             raise FeishuAgentError("event id is required", code="missing_event_id")
-        if self._can_use_lark_cli_backend("calendar"):
+        if self._can_use_lark_cli_backend("calendar") and not use_user_identity:
             try:
                 result = lark_cli_backend.calendar_delete(
                     calendar_id=calendar_id,
@@ -2949,7 +3136,10 @@ class FeishuAgent:
                 }
             except lark_cli_backend.LarkCliBackendError:
                 pass
-        self.api("DELETE", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
+        if use_user_identity:
+            self.user_api("DELETE", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
+        else:
+            self.api("DELETE", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
         return {"ok": True, "calendar_id": calendar_id, "event_id": event_id}
 
     def task_list(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3062,10 +3252,11 @@ class FeishuAgent:
 
     def _meeting_event(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         calendar_id = self.resolve_calendar_id(str(payload.get("calendar") or payload.get("calendar_id") or ""))
+        use_user_identity = self._should_use_user_calendar_identity(calendar_id)
         event_id = str(payload.get("id") or payload.get("meeting_id") or payload.get("event_id") or "").strip()
         if not event_id:
             raise FeishuAgentError("meeting id is required", code="missing_meeting_id")
-        if self._can_use_lark_cli_backend("calendar"):
+        if self._can_use_lark_cli_backend("calendar") and not use_user_identity:
             try:
                 result = lark_cli_backend.calendar_get(
                     calendar_id=calendar_id,
@@ -3075,7 +3266,10 @@ class FeishuAgent:
             except lark_cli_backend.LarkCliBackendError:
                 result = {"event": self._http("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}", token=self._token()).get("event")}
         else:
-            result = self.api("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
+            if use_user_identity:
+                result = self.user_api("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
+            else:
+                result = self.api("GET", f"/calendar/v4/calendars/{calendar_id}/events/{event_id}")
         return calendar_id, _ensure_dict(result.get("event"))
 
     def meeting_get(self, payload: dict[str, Any]) -> dict[str, Any]:

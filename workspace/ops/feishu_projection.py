@@ -287,7 +287,7 @@ def load_projection_registry() -> dict[str, Any]:
 
 def save_projection_registry(payload: dict[str, Any]) -> Path:
     normalized = _merge_projection_defaults(payload)
-    return feishu_agent.save_registry(normalized)
+    return feishu_agent.save_dynamic_registry(feishu_agent.registry_dynamic_overlay(normalized))
 
 
 def projection_contract() -> dict[str, Any]:
@@ -673,6 +673,29 @@ def _field_name_map(fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     }
 
 
+def _field_type_value(value: Any) -> int:
+    text = _text(value).lower()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    aliases = {
+        "text": 1,
+        "number": 2,
+        "select": 3,
+        "single_select": 3,
+        "single-select": 3,
+        "multi_select": 4,
+        "multi-select": 4,
+        "date": 5,
+        "checkbox": 7,
+        "attachment": 17,
+    }
+    return aliases.get(text, 0)
+
+
 def _table_rebuild_reasons(table_key: str, *, table_name: str, fields: list[dict[str, Any]], desired_name: str) -> list[str]:
     reasons: list[str] = []
     if _text(table_name) != desired_name:
@@ -711,7 +734,7 @@ def _build_view_property(view: dict[str, Any], field_map: dict[str, dict[str, An
                 parsed = value
         else:
             parsed = _clone_json(value)
-        field_type = int(field_meta.get("type") or 0)
+        field_type = _field_type_value(field_meta.get("type"))
         if field_type == 3:
             option_by_name = {
                 _text(option.get("name", "")): _text(option.get("id", ""))
@@ -866,7 +889,7 @@ def _ensure_table_views(
 def _find_table_by_name(tables: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     target = _text(name)
     for item in tables:
-        if _text(item.get("name", "")) == target:
+        if _text(item.get("name", "")) == target or _text(item.get("table_name", "")) == target:
             return item
     return None
 
@@ -879,6 +902,36 @@ def _delete_table_if_exists(agent: feishu_agent.FeishuAgent, *, app_token: str, 
         agent.table_delete_table({"app": app_token, "table": target})
     except Exception:
         return
+
+
+def _create_or_reuse_table(
+    agent: feishu_agent.FeishuAgent,
+    *,
+    app_token: str,
+    desired_name: str,
+    default_view_name: str,
+    fields: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    try:
+        created = agent.table_create(
+            {
+                "app": app_token,
+                "name": desired_name,
+                "default_view_name": default_view_name,
+                "fields": fields,
+            }
+        )
+        table_id = _text(created.get("table_id", ""))
+        return table_id, {"table_id": table_id, "name": desired_name}
+    except Exception as exc:
+        if "TableNameDuplicated" not in str(exc):
+            raise
+        tables = list(agent.table_tables({"app": app_token}).get("tables", []))
+        table_meta = _find_table_by_name(tables, desired_name)
+        if table_meta is None:
+            raise
+        table_id = _text(table_meta.get("table_id", ""))
+        return table_id, table_meta
 
 
 def ensure_projection_resources() -> dict[str, Any]:
@@ -917,7 +970,7 @@ def ensure_projection_resources() -> dict[str, Any]:
             fields = _table_fields(agent, app_token=app_token, table_id=table_id)
             rebuild_reasons = _table_rebuild_reasons(
                 table_key,
-                table_name=_text(table_meta.get("name", "")),
+                table_name=_text(table_meta.get("name", "")) or _text(table_meta.get("table_name", "")),
                 fields=fields,
                 desired_name=desired_name,
             )
@@ -925,16 +978,13 @@ def ensure_projection_resources() -> dict[str, Any]:
             if table_meta is not None and table_id:
                 _delete_table_if_exists(agent, app_token=app_token, table_id=table_id)
                 tables = list(agent.table_tables({"app": app_token}).get("tables", []))
-            created = agent.table_create(
-                {
-                    "app": app_token,
-                    "name": desired_name,
-                    "default_view_name": _text(table_cfg[table_key].get("default_view_name", "")),
-                    "fields": _table_field_defs(table_key),
-                }
+            table_id, table_meta = _create_or_reuse_table(
+                agent,
+                app_token=app_token,
+                desired_name=desired_name,
+                default_view_name=_text(table_cfg[table_key].get("default_view_name", "")),
+                fields=_table_field_defs(table_key),
             )
-            table_id = _text(created.get("table_id", ""))
-            table_meta = {"table_id": table_id, "name": desired_name}
             tables = list(agent.table_tables({"app": app_token}).get("tables", []))
             changed = True
         table_cfg[table_key]["table_id"] = table_id

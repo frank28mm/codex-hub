@@ -259,18 +259,41 @@ def _parse_doctor_result(result: subprocess.CompletedProcess[str], *, version: s
 
 def _wake_browser_bridge() -> dict[str, Any]:
     script = f'tell application "Google Chrome" to open location "{BROWSER_BRIDGE_WAKE_URL}"'
-    result = _run_command(["osascript", "-e", script], timeout_seconds=15)
-    if result.returncode != 0:
+    attempts: list[dict[str, Any]] = []
+    commands = [
+        ("osascript", ["osascript", "-e", script]),
+        ("open", ["open", "-a", "Google Chrome", BROWSER_BRIDGE_WAKE_URL]),
+    ]
+    result: subprocess.CompletedProcess[str] | None = None
+    method = ""
+    for label, argv in commands:
+        current = _run_command(argv, timeout_seconds=15)
+        attempts.append(
+            {
+                "method": label,
+                "argv": argv,
+                "returncode": current.returncode,
+                "stdout": str(current.stdout or "").strip(),
+                "stderr": str(current.stderr or "").strip(),
+            }
+        )
+        if current.returncode == 0:
+            result = current
+            method = label
+            break
+    if result is None:
         raise OpenCLIAgentError(
             "failed to wake OpenCLI Browser Bridge",
             code="browser_bridge_wake_failed",
-            details={"stdout": str(result.stdout or "").strip(), "stderr": str(result.stderr or "").strip()},
+            details={"attempts": attempts},
         )
     return {
         "ok": True,
+        "method": method,
         "wake_url": BROWSER_BRIDGE_WAKE_URL,
         "stdout": str(result.stdout or "").strip(),
         "stderr": str(result.stderr or "").strip(),
+        "attempts": attempts,
     }
 
 

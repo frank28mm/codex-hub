@@ -774,6 +774,44 @@ def test_table_read_operations_prefer_lark_cli_base_shortcuts(sample_env, monkey
     assert agent.calls == []
 
 
+def test_table_fields_falls_back_to_user_api_when_lark_cli_omits_select_options(sample_env, monkeypatch) -> None:
+    agent = build_agent(sample_env)
+    monkeypatch.setattr(feishu_agent.lark_cli_backend, "backend_enabled", lambda domain, env=None: domain == "table")
+    monkeypatch.setattr(
+        feishu_agent.lark_cli_backend,
+        "base_field_list",
+        lambda **kwargs: {
+            "fields": [
+                {"field_id": "fld_status", "field_name": "状态", "type": "select"},
+                {"field_id": "fld_name", "field_name": "项目名", "type": "text"},
+            ],
+            "total": 2,
+            "backend": "lark-cli",
+        },
+    )
+
+    def fake_api(method, path, *, data=None, params=None):
+        assert method == "GET"
+        assert path == "/bitable/v1/apps/app_book/tables/tbl_book/fields"
+        return {
+            "items": [
+                {
+                    "field_id": "fld_status",
+                    "field_name": "状态",
+                    "type": 3,
+                    "property": {"options": [{"id": "opt_blocked", "name": "blocked"}]},
+                }
+            ],
+            "total": 1,
+        }
+
+    monkeypatch.setattr(agent, "api", fake_api)
+
+    payload = agent.table_fields({"app": "书单", "table": "tbl_book"})
+
+    assert payload["fields"][0]["property"]["options"][0]["id"] == "opt_blocked"
+
+
 def test_table_write_operations_prefer_lark_cli_record_upsert(sample_env, monkeypatch) -> None:
     agent = build_agent(sample_env)
     monkeypatch.setattr(feishu_agent.lark_cli_backend, "backend_enabled", lambda domain, env=None: domain == "table")
@@ -972,7 +1010,8 @@ def test_table_advanced_operations_prefer_explicit_lark_cli_backend(sample_env, 
 def test_calendar_event_creation_uses_defaults_and_owner(sample_env) -> None:
     agent = build_agent(sample_env)
     payload = agent.cal_add({"title": "产品评审会", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00", "location": "3楼"})
-    assert payload["calendar_id"] == "cal_default"
+    assert payload["route"] == "invite_meeting"
+    assert payload["calendar_id"] == "cal_meeting"
     assert payload["event"]["event_id"] == "evt_123"
     attendee_calls = [call for call in agent.calls if call[1].endswith("/attendees")]
     assert attendee_calls
@@ -983,6 +1022,15 @@ def test_calendar_default_alias_uses_default_calendar(sample_env) -> None:
     payload = agent.cal_list({"calendar": "default"})
     assert payload["calendar_id"] == "cal_default"
     assert payload["events"][0]["id"] == "evt_123"
+
+
+def test_calendar_event_creation_prefers_personal_calendar_when_configured(sample_env) -> None:
+    agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_id"] = "feishu.cn_coco@group.calendar.feishu.cn"
+    agent.registry["defaults"]["personal_calendar_id"] = "cal_personal"
+    agent.registry["defaults"]["meeting"]["calendar_id"] = "cal_personal"
+    payload = agent.cal_add({"title": "个人提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00"})
+    assert payload["calendar_id"] == "cal_personal"
 
 
 def test_calendar_event_creation_can_default_to_invite_meeting_route(sample_env) -> None:
@@ -996,19 +1044,169 @@ def test_calendar_event_creation_can_default_to_invite_meeting_route(sample_env)
     assert any(item["type"] == "user" and item["id"] == "ou_owner" for item in payload["attendees"])
 
 
-def test_calendar_event_creation_explicit_calendar_bypasses_invite_default(sample_env) -> None:
+def test_calendar_invite_default_can_use_personal_calendar_and_still_add_owner_attendee(sample_env, monkeypatch) -> None:
     agent = build_agent(sample_env)
     agent.registry["defaults"]["calendar_create_default_route"] = "invite_meeting"
+    agent.registry["defaults"]["personal_calendar_id"] = "cal_personal"
+    agent.registry["defaults"]["meeting"] = {
+        "calendar_id": "",
+        "timezone": "Asia/Shanghai",
+        "duration_minutes": 30,
+        "attendee_ability": "can_modify_event",
+        "visibility": "default",
+    }
+
+    user_calls = []
+
+    def _user_api(method, path, *, data=None, params=None):
+        user_calls.append((method, path, data, params))
+        if path == "/calendar/v4/calendars/cal_personal/events" and method == "POST":
+            return {
+                "event": {
+                    "event_id": "evt_personal_invite",
+                    "summary": (data or {}).get("summary", ""),
+                    "app_link": "https://feishu.cn/calendar/event/evt_personal_invite",
+                    "start_time": (data or {}).get("start_time"),
+                    "end_time": (data or {}).get("end_time"),
+                    "vchat": (data or {}).get("vchat", {}),
+                }
+            }
+        if path == "/calendar/v4/calendars/cal_personal/events/evt_personal_invite/attendees" and method == "POST":
+            return {"ok": True}
+        raise AssertionError(f"Unexpected user_api call: {method} {path}")
+
+    monkeypatch.setattr(agent, "user_api", _user_api)
+
+    payload = agent.cal_add({"title": "邀请型提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00"})
+
+    assert payload["route"] == "invite_meeting"
+    assert payload["calendar_id"] == "cal_personal"
+    assert payload["event"]["event_id"] == "evt_personal_invite"
+    assert payload["event"]["vchat"]["vc_type"] == "vc"
+    assert any(item["type"] == "user" and item["id"] == "ou_owner" for item in payload["attendees"])
+    assert [call[:2] for call in user_calls] == [
+        ("POST", "/calendar/v4/calendars/cal_personal/events"),
+        ("POST", "/calendar/v4/calendars/cal_personal/events/evt_personal_invite/attendees"),
+    ]
+
+
+def test_calendar_event_creation_explicit_calendar_bypasses_invite_default(sample_env, monkeypatch) -> None:
+    agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_create_default_route"] = "invite_meeting"
+    agent.registry["defaults"]["personal_calendar_id"] = "cal_personal"
+
+    user_calls = []
+
+    def _user_api(method, path, *, data=None, params=None):
+        user_calls.append((method, path, data, params))
+        if path == "/calendar/v4/calendars/cal_personal/events" and method == "POST":
+            return {
+                "event": {
+                    "event_id": "evt_personal",
+                    "summary": (data or {}).get("summary", ""),
+                    "app_link": "https://feishu.cn/calendar/event/evt_personal",
+                    "start_time": (data or {}).get("start_time"),
+                    "end_time": (data or {}).get("end_time"),
+                    "vchat": {},
+                }
+            }
+        if path == "/calendar/v4/calendars/cal_personal/events/evt_personal/attendees" and method == "POST":
+            return {"ok": True}
+        raise AssertionError(f"Unexpected user_api call: {method} {path}")
+
+    monkeypatch.setattr(agent, "user_api", _user_api)
+
     payload = agent.cal_add(
-        {"title": "个人提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00", "calendar_id": "cal_default"}
+        {"title": "个人提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00", "calendar_id": "cal_personal"}
     )
-    assert payload["calendar_id"] == "cal_default"
-    assert payload["event"]["event_id"] == "evt_123"
+
+    assert payload["calendar_id"] == "cal_personal"
+    assert payload["event"]["event_id"] == "evt_personal"
     assert "route" not in payload
+    assert [call[:2] for call in user_calls] == [
+        ("POST", "/calendar/v4/calendars/cal_personal/events"),
+    ]
+
+
+def test_personal_calendar_operations_use_user_api(sample_env, monkeypatch) -> None:
+    agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_id"] = "feishu.cn_coco@group.calendar.feishu.cn"
+    agent.registry["defaults"]["personal_calendar_id"] = "cal_personal"
+    agent.registry["defaults"]["meeting"]["calendar_id"] = "cal_personal"
+
+    user_calls = []
+
+    def _user_api(method, path, *, data=None, params=None):
+        user_calls.append((method, path, data, params))
+        if path == "/calendar/v4/calendars/cal_personal/events" and method == "GET":
+            return {
+                "items": [
+                    {
+                        "event_id": "evt_personal",
+                        "summary": "个人提醒",
+                        "start_time": {"timestamp": "1710000000", "timezone": "Asia/Shanghai"},
+                        "end_time": {"timestamp": "1710003600", "timezone": "Asia/Shanghai"},
+                    }
+                ]
+            }
+        if path == "/calendar/v4/calendars/cal_personal/events" and method == "POST":
+            return {
+                "event": {
+                    "event_id": "evt_personal",
+                    "summary": (data or {}).get("summary", ""),
+                    "app_link": "https://feishu.cn/calendar/event/evt_personal",
+                    "start_time": (data or {}).get("start_time"),
+                    "end_time": (data or {}).get("end_time"),
+                    "vchat": {},
+                }
+            }
+        if path == "/calendar/v4/calendars/cal_personal/events/evt_personal/attendees" and method == "POST":
+            return {"ok": True}
+        if path == "/calendar/v4/calendars/cal_personal/events/evt_personal" and method == "DELETE":
+            return {"ok": True}
+        raise AssertionError(f"Unexpected user_api call: {method} {path}")
+
+    def _api(method, path, *, data=None, params=None):
+        raise AssertionError(f"tenant api should not be used for personal calendar ops: {method} {path}")
+
+    monkeypatch.setattr(agent, "user_api", _user_api)
+    monkeypatch.setattr(agent, "api", _api)
+
+    list_payload = agent.cal_list({"calendar_id": "cal_personal"})
+    add_payload = agent.cal_add({"title": "个人提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00"})
+    delete_payload = agent.cal_delete({"calendar_id": "cal_personal", "id": "evt_personal"})
+
+    assert list_payload["calendar_id"] == "cal_personal"
+    assert list_payload["events"][0]["id"] == "evt_personal"
+    assert add_payload["calendar_id"] == "cal_personal"
+    assert add_payload["event"]["event_id"] == "evt_personal"
+    assert delete_payload["ok"] is True
+    assert [call[:2] for call in user_calls] == [
+        ("GET", "/calendar/v4/calendars/cal_personal/events"),
+        ("POST", "/calendar/v4/calendars/cal_personal/events"),
+        ("POST", "/calendar/v4/calendars/cal_personal/events/evt_personal/attendees"),
+        ("DELETE", "/calendar/v4/calendars/cal_personal/events/evt_personal"),
+    ]
+
+
+def test_calendar_event_creation_blocks_implicit_group_calendar_default_for_personal_reminders(sample_env) -> None:
+    agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_id"] = "feishu.cn_coco@group.calendar.feishu.cn"
+    agent.registry["defaults"]["personal_calendar_id"] = ""
+    agent.registry["defaults"]["personal_reminder_target"] = "task"
+    agent.registry["defaults"]["calendar_create_default_route"] = ""
+    try:
+        agent.cal_add({"title": "个人提醒", "start": "2026-03-18 15:00", "end": "2026-03-18 16:00"})
+    except feishu_agent.FeishuAgentError as exc:
+        assert exc.code == "implicit_group_calendar_blocked"
+        assert exc.details["suggested_target"] == "task"
+    else:
+        raise AssertionError("expected implicit group calendar reminder creation to be blocked")
 
 
 def test_calendar_operations_prefer_lark_cli_backend(sample_env, monkeypatch) -> None:
     agent = build_agent(sample_env)
+    agent.registry["defaults"]["calendar_create_default_route"] = ""
     monkeypatch.setattr(feishu_agent.lark_cli_backend, "backend_enabled", lambda domain, env=None: domain == "calendar")
     monkeypatch.setattr(
         feishu_agent.lark_cli_backend,

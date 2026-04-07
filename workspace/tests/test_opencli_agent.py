@@ -92,6 +92,26 @@ def test_ensure_browser_bridge_connected_returns_without_wake_when_extension_is_
     assert result["woke"] is False
 
 
+def test_wake_browser_bridge_falls_back_to_open_when_osascript_fails(monkeypatch) -> None:
+    from ops import opencli_agent
+
+    def fake_run(argv: list[str], *, timeout_seconds: int = 90) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "osascript":
+            return subprocess.CompletedProcess(argv, 1, "", "Apple event timed out")
+        if argv[:3] == ["open", "-a", "Google Chrome"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(opencli_agent, "_run_command", fake_run)
+
+    result = opencli_agent._wake_browser_bridge()
+
+    assert result["ok"] is True
+    assert result["method"] == "open"
+    assert result["attempts"][0]["returncode"] == 1
+    assert result["attempts"][1]["returncode"] == 0
+
+
 def test_opencli_list_filters_site(monkeypatch) -> None:
     from ops import opencli_agent
 

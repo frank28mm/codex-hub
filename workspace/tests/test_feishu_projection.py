@@ -360,6 +360,8 @@ def test_ensure_projection_resources_creates_app_tables_fields_views_and_persist
 
     result = feishu_projection.ensure_projection_resources()
     registry = feishu_projection.load_projection_registry()
+    dynamic_registry = feishu_projection.feishu_agent.load_dynamic_registry()
+    static_registry = feishu_projection.feishu_agent.load_static_registry()
 
     assert result["app_token"] == "app_projection"
     assert registry["projection"]["app"]["app_token"] == "app_projection"
@@ -369,6 +371,8 @@ def test_ensure_projection_resources_creates_app_tables_fields_views_and_persist
     assert registry["aliases"]["tables"]["codex_hub_projects_overview"]["table_id"] == registry["projection"]["tables"]["projects_overview"]["table_id"]
     assert registry["aliases"]["tables"]["codex_hub_tasks_current"]["table_id"] == registry["projection"]["tables"]["tasks_current"]["table_id"]
     assert registry["aliases"]["tables"]["codex_hub_operations_overview"]["table_id"] == registry["projection"]["tables"]["operations_overview"]["table_id"]
+    assert dynamic_registry["projection"]["app"]["app_token"] == "app_projection"
+    assert "doc_folder_token" in static_registry["defaults"]
 
     projects_table = fake_agent.tables[registry["projection"]["tables"]["projects_overview"]["table_id"]]
     tasks_table = fake_agent.tables[registry["projection"]["tables"]["tasks_current"]["table_id"]]
