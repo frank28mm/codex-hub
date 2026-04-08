@@ -19,6 +19,11 @@ try:
 except ImportError:  # pragma: no cover - bootstrap must be able to install its own deps
     yaml = None  # type: ignore
 
+try:
+    from ops import feishu_capabilities
+except ImportError:  # pragma: no cover
+    import feishu_capabilities  # type: ignore
+
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 SITE_CONFIG_PATH = WORKSPACE_ROOT / "control" / "site.yaml"
@@ -521,6 +526,11 @@ def feature_doctor(feature: str, site: SiteConfig) -> dict[str, Any]:
 
     if normalized == "feishu":
         summary = status.get("feishu_setup") if isinstance(status.get("feishu_setup"), dict) else {}
+        if not summary and command_available("python3"):
+            refreshed = _run_feishu_auth_status()
+            candidate = refreshed.get("status")
+            if isinstance(candidate, dict):
+                summary = candidate
         checks.extend(
             [
                 {"name": "site_feishu_enabled", "ok": bool(site.feishu_enabled), "note": "site.yaml feishu_enabled"},
@@ -529,8 +539,27 @@ def feature_doctor(feature: str, site: SiteConfig) -> dict[str, Any]:
                 {"name": "object_ops_ready", "ok": bool(summary.get("object_ops_ready")), "note": "Feishu object operations ready"},
                 {"name": "coco_bridge_ready", "ok": bool(summary.get("coco_bridge_ready")), "note": "assistant bridge credentials synced"},
                 {"name": "full_ready", "ok": bool(summary.get("full_ready")), "note": "full Feishu path ready"},
+                {
+                    "name": "auth_plan_ready",
+                    "ok": bool(summary.get("auth_plan_ready")),
+                    "note": "requested Feishu authorization bundle satisfied",
+                    "blocking": False,
+                },
             ]
         )
+        capabilities = summary.get("capabilities") if isinstance(summary.get("capabilities"), dict) else {}
+        for capability_id, capability_payload in capabilities.items():
+            if not isinstance(capability_payload, dict):
+                continue
+            checks.append(
+                {
+                    "name": f"capability:{capability_id}",
+                    "ok": bool(capability_payload.get("ready")),
+                    "note": str(capability_payload.get("label") or capability_id),
+                    "blocking": False,
+                    "missing_scopes": list(capability_payload.get("missing_scopes") or []),
+                }
+            )
         install_actions.append("python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app")
     elif normalized == "knowledge-base":
         tools = (status.get("feature_tools") or {}).get("knowledge_base_pdf_ocr", {})
@@ -562,7 +591,7 @@ def feature_doctor(feature: str, site: SiteConfig) -> dict[str, Any]:
         checks.append({"name": "electron_dependencies", "ok": (WORKSPACE_ROOT / "apps" / "electron-console" / "node_modules").exists(), "note": "electron npm dependencies installed"})
         install_actions.append("python3 ops/bootstrap_workspace_hub.py install-feature --feature electron")
 
-    ready = all(bool(item.get("ok")) for item in checks)
+    ready = all(bool(item.get("ok")) for item in checks if bool(item.get("blocking", True)))
     return {
         "feature": normalized,
         "label": surface["label"],
@@ -1034,6 +1063,36 @@ def build_manual_actions(site: SiteConfig, payload: dict[str, object]) -> list[s
             actions.append(
                 "Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app` to install the official Feishu CLI, create/configure the app, sync bridge credentials, and complete login."
             )
+        missing_requested_scopes = list(feishu_setup.get("missing_requested_scopes") or [])
+        if missing_requested_scopes:
+            actions.append(
+                "Core Feishu capability scopes are still missing. Run `lark-cli auth login --scope \""
+                + " ".join(str(item) for item in missing_requested_scopes)
+                + "\"` once the app scopes are approved."
+            )
+        capabilities = feishu_setup.get("capabilities") if isinstance(feishu_setup.get("capabilities"), dict) else {}
+        pending_capabilities = []
+        for capability_id in feishu_setup.get("feature_specific_pending_capabilities") or []:
+            capability_payload = capabilities.get(capability_id) if isinstance(capabilities, dict) else None
+            if isinstance(capability_payload, dict):
+                pending_capabilities.append(
+                    {
+                        "label": str(capability_payload.get("label") or capability_id).strip(),
+                        "auth_command": str(capability_payload.get("auth_command") or "").strip(),
+                    }
+                )
+        if pending_capabilities:
+            actions.append(
+                "Some Feishu feature-specific capabilities may still require extra authorization: "
+                + "；".join(
+                    (
+                        f"{item['label']} -> `{item['auth_command']}`"
+                        if item["auth_command"]
+                        else item["label"]
+                    )
+                    for item in pending_capabilities[:3]
+                )
+            )
         if feishu_setup.get("object_ops_ready") and not feishu_setup.get("coco_bridge_ready"):
             actions.append(
                 "Feishu object operations are ready, but the assistant bridge credentials are still incomplete. Finish the bridge app secret sync before enabling the live Feishu bridge."
@@ -1129,7 +1188,9 @@ def setup_feishu_cli(
     login_user: bool = True,
     run_doctor: bool = False,
 ) -> dict[str, object]:
+    auth_plan = feishu_capabilities.build_auth_plan()
     results: dict[str, object] = {
+        "auth_plan": auth_plan,
         "install": {"skipped": True},
         "config_init": {"skipped": True},
         "credentials_sync": {"skipped": True},
@@ -1169,6 +1230,7 @@ def setup_feishu_cli(
 
 def install_feishu_cli_only(*, install_skills: bool) -> dict[str, object]:
     results: dict[str, object] = {
+        "auth_plan": feishu_capabilities.build_auth_plan(),
         "install": install_feishu_cli_tooling(force=False, install_skills=install_skills),
         "config_init": {"skipped": True},
         "credentials_sync": {"skipped": True},

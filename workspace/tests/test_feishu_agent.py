@@ -1383,6 +1383,7 @@ def test_auth_status_reports_lark_cli_readiness(sample_env, monkeypatch) -> None
             "user_name": "Operator",
             "user_open_id": "ou_test",
             "token_status": "needs_refresh",
+            "scope": "minutes:minutes:readonly vc:note:read",
         },
     )
 
@@ -1394,6 +1395,12 @@ def test_auth_status_reports_lark_cli_readiness(sample_env, monkeypatch) -> None
     assert payload["object_ops_ready"] is True
     assert payload["coco_bridge_ready"] is False
     assert payload["full_ready"] is False
+    assert payload["auth_plan"]["requested_scopes"]
+    assert payload["capabilities"]["minutes_artifacts"]["ready"] is False
+    assert payload["capabilities"]["minutes_artifacts"]["missing_scopes"] == [
+        "minutes:minutes.artifacts:read",
+        "minutes:minutes.transcript:export",
+    ]
 
 
 def test_auth_login_falls_back_to_lark_cli_when_bridge_credentials_missing(sample_env, monkeypatch) -> None:
@@ -1600,6 +1607,40 @@ def test_vc_and_minutes_operations_prefer_lark_cli_backend(sample_env, monkeypat
     assert agent.calls == []
 
 
+def test_vc_notes_preserves_missing_scope_guidance(sample_env, monkeypatch) -> None:
+    agent = build_agent(sample_env)
+    monkeypatch.setattr(feishu_agent.lark_cli_backend, "backend_enabled", lambda domain, env=None: domain == "vc")
+
+    def _fail(**_kwargs):
+        raise feishu_agent.lark_cli_backend.LarkCliBackendError(
+            "missing required scope(s): minutes:minutes.artifacts:read, minutes:minutes.transcript:export",
+            code="command_failed",
+            details={
+                "error_type": "missing_scope",
+                "missing_scopes": [
+                    "minutes:minutes.artifacts:read",
+                    "minutes:minutes.transcript:export",
+                ],
+                "authorization_hint": 'lark-cli auth login --scope "minutes:minutes.artifacts:read minutes:minutes.transcript:export"',
+            },
+        )
+
+    monkeypatch.setattr(feishu_agent.lark_cli_backend, "vc_notes", _fail)
+
+    try:
+        agent.vc_notes({"minute_tokens": ["obcnwk74ms31j78u58cofv4g"]})
+    except feishu_agent.FeishuAgentError as exc:
+        assert exc.code == "command_failed"
+        assert exc.details["error_type"] == "missing_scope"
+        assert exc.details["missing_scopes"] == [
+            "minutes:minutes.artifacts:read",
+            "minutes:minutes.transcript:export",
+        ]
+        assert "lark-cli auth login --scope" in exc.details["authorization_hint"]
+    else:
+        raise AssertionError("expected missing scope guidance")
+
+
 def test_sheet_wiki_mail_and_whiteboard_operations_prefer_lark_cli_backend(sample_env, monkeypatch) -> None:
     agent = build_agent(sample_env)
     monkeypatch.setattr(
@@ -1740,3 +1781,41 @@ def test_broker_feishu_op_returns_structured_result(sample_env, monkeypatch, cap
     assert payload["domain"] == "doc"
     assert payload["action"] == "create"
     assert payload["result"]["result"]["document_id"] == "doc_123"
+
+
+def test_broker_feishu_op_exposes_authorization_guidance_for_missing_scope(sample_env, monkeypatch, capsys) -> None:
+    from ops import local_broker
+
+    def _fail(domain, action, payload):
+        raise local_broker.feishu_agent.FeishuAgentError(
+            "missing required scope(s): minutes:minutes.artifacts:read, minutes:minutes.transcript:export",
+            code="command_failed",
+            details={
+                "error_type": "missing_scope",
+                "missing_scopes": [
+                    "minutes:minutes.artifacts:read",
+                    "minutes:minutes.transcript:export",
+                ],
+                "authorization_hint": 'lark-cli auth login --scope "minutes:minutes.artifacts:read minutes:minutes.transcript:export"',
+            },
+        )
+
+    monkeypatch.setattr(local_broker.feishu_agent, "perform_operation", _fail)
+
+    exit_code = local_broker.cmd_feishu_op(
+        argparse.Namespace(
+            domain="vc",
+            action="notes",
+            payload_json=json.dumps({"minute_tokens": ["obcnwk74ms31j78u58cofv4g"]}),
+        )
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["ok"] is False
+    assert payload["authorization_guidance"]["kind"] == "feishu_scope_authorization"
+    assert payload["authorization_guidance"]["missing_scopes"] == [
+        "minutes:minutes.artifacts:read",
+        "minutes:minutes.transcript:export",
+    ]
+    assert "lark-cli auth login --scope" in payload["authorization_guidance"]["authorization_hint"]

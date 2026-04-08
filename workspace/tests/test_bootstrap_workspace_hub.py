@@ -206,6 +206,7 @@ def test_setup_feishu_cli_runs_unified_login_flow_by_default(monkeypatch) -> Non
     assert observed[2] == ["lark-cli", "config", "init", "--new"]
     assert observed[3] == [bootstrap.sys.executable, "ops/feishu_agent.py", "auth", "login"]
     assert len(observed) == 4
+    assert "minutes:minutes.artifacts:read" in payload["auth_plan"]["requested_scopes"]
     assert payload["credentials_sync"]["bridge_credentials_ready"] is True
     assert payload["auth_login"]["returncode"] == 0
     assert payload["summary"]["full_ready"] is True
@@ -720,3 +721,94 @@ def test_cmd_setup_feishu_cli_requires_full_ready(monkeypatch) -> None:
     rc = bootstrap.cmd_setup_feishu_cli(args)
 
     assert rc == 1
+
+
+def test_build_manual_actions_surfaces_missing_capability_scope_hints(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    site = bootstrap.SiteConfig(
+        product_name="Codex Hub",
+        workspace_root=bootstrap.WORKSPACE_ROOT,
+        memory_root=bootstrap.WORKSPACE_ROOT.parent / "memory",
+        operator_name="",
+        timezone="Asia/Shanghai",
+        launchagent_prefix="com.codexhub",
+        feishu_enabled=True,
+        electron_enabled=True,
+    )
+    payload = {
+        "commands": {"codex": True, "lark_cli": True},
+        "auth": {"codex_cli_logged_in": True},
+        "python_modules": {module: True for module, _package in bootstrap.PYTHON_DEPENDENCIES},
+        "apps": {"codex_desktop": True, "obsidian": True},
+        "feature_tools": {},
+        "feishu_setup": {
+            "full_ready": True,
+            "object_ops_ready": True,
+            "coco_bridge_ready": True,
+            "missing_requested_scopes": [
+                "minutes:minutes.artifacts:read",
+                "minutes:minutes.transcript:export",
+            ],
+            "capabilities": {
+                "minutes_artifacts": {
+                    "label": "Minutes artifacts and transcript export",
+                    "auth_command": 'lark-cli auth login --scope "minutes:minutes.artifacts:read minutes:minutes.transcript:export"',
+                }
+            },
+            "feature_specific_pending_capabilities": ["minutes_artifacts"],
+        },
+    }
+
+    actions = bootstrap.build_manual_actions(site, payload)
+
+    assert any("minutes:minutes.artifacts:read" in action for action in actions)
+    assert any("Minutes artifacts and transcript export" in action for action in actions)
+
+
+def test_feature_doctor_feishu_surfaces_capabilities_even_when_site_disabled(monkeypatch) -> None:
+    from ops import bootstrap_workspace_hub as bootstrap_module
+
+    bootstrap = importlib.reload(bootstrap_module)
+    site = bootstrap.default_site_config()
+    monkeypatch.setattr(
+        bootstrap,
+        "current_bootstrap_status",
+        lambda _site: {
+            "commands": {"lark_cli": True},
+            "feishu_cli": {"configured": True},
+            "feishu_setup": {},
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_run_feishu_auth_status",
+        lambda: {
+            "status": {
+                "object_ops_ready": True,
+                "coco_bridge_ready": False,
+                "full_ready": False,
+                "capabilities": {
+                    "minutes_artifacts": {
+                        "label": "Minutes artifacts and transcript export",
+                        "ready": False,
+                        "missing_scopes": [
+                            "minutes:minutes.artifacts:read",
+                            "minutes:minutes.transcript:export",
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    payload = bootstrap.feature_doctor("feishu", site)
+
+    checks = {item["name"]: item for item in payload["checks"]}
+    assert checks["site_feishu_enabled"]["ok"] is False
+    assert checks["capability:minutes_artifacts"]["ok"] is False
+    assert checks["capability:minutes_artifacts"]["missing_scopes"] == [
+        "minutes:minutes.artifacts:read",
+        "minutes:minutes.transcript:export",
+    ]

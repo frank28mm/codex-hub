@@ -34,6 +34,11 @@ except ImportError:  # pragma: no cover
     certifi = None
 
 try:
+    from ops import feishu_capabilities
+except ImportError:  # pragma: no cover
+    import feishu_capabilities  # type: ignore
+
+try:
     from ops import lark_cli_backend
 except ImportError:  # pragma: no cover
     import lark_cli_backend  # type: ignore
@@ -565,6 +570,9 @@ class FeishuAgent:
             raise FeishuAgentError("lark-cli is not installed", code="lark_cli_missing")
         domains = payload.get("domains") or payload.get("domain") or DEFAULT_LARK_CLI_DOMAINS
         scope = str(payload.get("scope") or "").strip()
+        if not scope:
+            auth_plan = feishu_capabilities.build_auth_plan()
+            scope = str(auth_plan.get("requested_scope_string") or "").strip()
         command = ["lark-cli", "auth", "login"]
         if scope:
             command.extend(["--scope", scope])
@@ -1869,6 +1877,12 @@ class FeishuAgent:
         effective_user_auth_ready = bool(access_token or lark_cli_user_logged_in)
         bridge_credentials_ready = bool(self.app_id and self.app_secret)
         object_ops_ready = bool(lark_cli_config.get("configured") and effective_user_auth_ready)
+        capability_state = feishu_capabilities.evaluate_capabilities(
+            granted_scopes=lark_cli_auth.get("scope"),
+            lark_cli_configured=bool(lark_cli_config.get("configured")),
+            user_auth_ready=effective_user_auth_ready,
+            bridge_credentials_ready=bridge_credentials_ready,
+        )
         next_steps: list[str] = []
         if not lark_cli_config.get("configured"):
             next_steps.append("Run `python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app`.")
@@ -1876,6 +1890,17 @@ class FeishuAgent:
             next_steps.append("Complete the Feishu user login flow until `object_ops_ready=true`.")
         if object_ops_ready and not bridge_credentials_ready:
             next_steps.append("Sync `FEISHU_APP_SECRET` into `ops/feishu_bridge.env.local` and rerun setup.")
+        if capability_state["missing_requested_scopes"]:
+            next_steps.append(
+                "Core Feishu capability scopes are still missing. Run `lark-cli auth login --scope \""
+                + " ".join(capability_state["missing_requested_scopes"])
+                + "\"`."
+            )
+        for capability_id in capability_state["feature_specific_pending_capabilities"][:3]:
+            capability_payload = capability_state["capabilities"].get(capability_id) or {}
+            auth_command = str(capability_payload.get("auth_command") or "").strip()
+            if auth_command:
+                next_steps.append(f"{capability_payload.get('label')}: run `{auth_command}`.")
         return {
             "configured": bridge_credentials_ready,
             "bridge_credentials_ready": bridge_credentials_ready,
@@ -1895,6 +1920,11 @@ class FeishuAgent:
             "object_ops_ready": object_ops_ready,
             "coco_bridge_ready": bridge_credentials_ready,
             "full_ready": bool(object_ops_ready and bridge_credentials_ready),
+            "auth_plan": capability_state["auth_plan"],
+            "auth_plan_ready": capability_state["auth_plan_ready"],
+            "missing_requested_scopes": capability_state["missing_requested_scopes"],
+            "capabilities": capability_state["capabilities"],
+            "feature_specific_pending_capabilities": capability_state["feature_specific_pending_capabilities"],
             "next_steps": next_steps,
         }
 
@@ -1929,7 +1959,14 @@ class FeishuAgent:
         state = str(payload.get("state") or f"codex-hub-{int(time.time())}").strip()
         event = threading.Event()
         auth_result: dict[str, str] = {}
-        configured_scopes = payload.get("scopes") or self._defaults().get("oauth_scopes") or []
+        auth_plan = feishu_capabilities.build_auth_plan()
+        configured_scopes = (
+            payload.get("scope")
+            or payload.get("scopes")
+            or auth_plan.get("requested_scopes")
+            or self._defaults().get("oauth_scopes")
+            or []
+        )
         if isinstance(configured_scopes, str):
             scopes = [item.strip() for item in configured_scopes.replace(",", " ").split() if item.strip()]
         elif isinstance(configured_scopes, list):
@@ -2014,6 +2051,7 @@ class FeishuAgent:
             "authorize_url": authorize_url,
             "redirect_uri": redirect_uri,
             "scopes": scopes,
+            "auth_plan": auth_plan,
             "token_store_path": str(self._user_token_store_path),
             "profile": profile,
             "access_token_expire_at": stored.get("access_token_expire_at", ""),

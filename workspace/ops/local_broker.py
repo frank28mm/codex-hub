@@ -1717,6 +1717,16 @@ def cmd_feishu_op(args: argparse.Namespace) -> int:
             status="error",
             summary=str(exc),
         )
+        details = exc.details if isinstance(exc.details, dict) else {}
+        authorization_guidance: dict[str, Any] = {}
+        if str(details.get("error_type") or "").strip() == "missing_scope":
+            authorization_guidance = {
+                "kind": "feishu_scope_authorization",
+                "missing_scopes": list(details.get("missing_scopes") or []),
+                "authorization_hint": str(details.get("authorization_hint") or details.get("hint") or "").strip(),
+                "console_url": str(details.get("console_url") or "").strip(),
+                "message": "This Feishu capability is blocked by missing authorization scopes, not by an unsupported product path.",
+            }
         return _print(
             _response(
                 "feishu_op",
@@ -1726,7 +1736,8 @@ def cmd_feishu_op(args: argparse.Namespace) -> int:
                 result_status="error",
                 error=str(exc),
                 error_code=exc.code,
-                details=exc.details,
+                details=details,
+                authorization_guidance=authorization_guidance,
                 operation_event=event,
             )
         )

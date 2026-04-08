@@ -369,6 +369,23 @@ def write_report(results: dict[str, object]) -> None:
                 lines.append(
                     f"- {'OK' if status.get('full_ready') else 'FAIL'} Feishu 完整可用：full_ready=`{status.get('full_ready')}`"
                 )
+                lines.append(
+                    f"- {'OK' if status.get('auth_plan_ready') else 'WARN'} Feishu 核心授权包：auth_plan_ready=`{status.get('auth_plan_ready')}`"
+                )
+                missing_scopes = list(status.get("missing_requested_scopes") or [])
+                if missing_scopes:
+                    lines.append(f"- WARN 仍缺核心 scopes：`{' '.join(str(item) for item in missing_scopes)}`")
+                capabilities = status.get("capabilities") if isinstance(status.get("capabilities"), dict) else {}
+                if capabilities:
+                    lines.extend(["", "## Feishu Capability Checks", ""])
+                    for capability_id, capability_payload in capabilities.items():
+                        if not isinstance(capability_payload, dict):
+                            continue
+                        label = str(capability_payload.get("label") or capability_id).strip()
+                        ready = bool(capability_payload.get("ready"))
+                        missing = list(capability_payload.get("missing_scopes") or [])
+                        note = f"missing_scopes=`{' '.join(str(item) for item in missing)}`" if missing else "ready"
+                        lines.append(f"- {'OK' if ready else 'WARN'} {label}：{note}")
     REPORT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

@@ -138,6 +138,28 @@ def _run_lark_cli(args: list[str], *, input_text: str | None = None) -> dict[str
         payload = details.get("stdout_payload")
         if isinstance(payload, dict):
             hint = str(payload.get("error", {}).get("hint") or "").strip()
+            error_payload = payload.get("error")
+            if isinstance(error_payload, dict):
+                error_type = str(error_payload.get("type") or "").strip()
+                if error_type:
+                    details["error_type"] = error_type
+                console_url = str(error_payload.get("console_url") or "").strip()
+                if console_url:
+                    details["console_url"] = console_url
+                message = str(error_payload.get("message") or "").strip()
+                if error_type == "missing_scope":
+                    match = re.search(r"missing required scope\(s\):\s*(.+)$", message)
+                    missing_scopes = []
+                    if match:
+                        missing_scopes = [
+                            item.strip()
+                            for item in str(match.group(1) or "").split(",")
+                            if item.strip()
+                        ]
+                    details["missing_scopes"] = missing_scopes
+                    details["authorization_hint"] = hint or (
+                        f'lark-cli auth login --scope "{" ".join(missing_scopes)}"' if missing_scopes else ""
+                    )
         message = hint or stderr_text or stdout_text or f"lark-cli exited with code {result.returncode}"
         raise LarkCliBackendError(message, code="command_failed", details=details)
     return _parse_json_output(result.stdout)

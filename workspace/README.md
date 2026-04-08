@@ -480,6 +480,7 @@ python3 ops/bootstrap_workspace_hub.py setup-feishu-cli --create-feishu-app
 - 自动同步公开版运行时需要的 `app_id`
 - 自动执行公开版统一的 Feishu 登录链
 - 最后输出当前 `object_ops_ready / coco_bridge_ready / full_ready` 状态
+- 同时输出 capability-aware 授权计划与缺口摘要，明确哪些 feature-specific 能力仍需单独授权
 - 公开版不再把系统钥匙串验证当成默认登录前置步骤
 
 2. 打开 [control/feishu_resources.yaml](./control/feishu_resources.yaml)
@@ -500,6 +501,13 @@ python3 ops/feishu_agent.py auth status
 - `object_ops_ready=true`：官方 CLI 对象能力已经可用
 - `coco_bridge_ready=true`：`CoCo` bridge 凭据也已经齐
 - `full_ready=true`：Feishu 完整可用
+- `auth_plan_ready=true`：当前默认 Feishu 核心授权包已经授齐
+
+另外从当前版本开始，还要额外关注 capability 级结果：
+
+- 例如 `minutes_basic_ready` 与 `minutes_artifacts_ready` 不是同一回事
+- 某些功能即使完成过通用登录，也仍可能因为 feature-specific scope 缺失而第一次调用时失败
+- 遇到这类情况，不要把它理解成“做不到”，而要按提示补授权
 
 也就是说，只有 `full_ready=true` 才算这条 Feishu 接入真正做完。
 

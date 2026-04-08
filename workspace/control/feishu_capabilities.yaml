@@ -1,0 +1,249 @@
+version: 1
+
+auth_plan:
+  label: Feishu core authorization bundle
+  capability_ids:
+    - assistant_bridge_runtime
+    - im_basic
+    - contact_directory
+    - docs_content
+    - drive_management
+    - base_crud
+    - calendar_ops
+    - task_ops
+    - vc_notes
+    - minutes_basic
+    - minutes_artifacts
+    - wiki_ops
+    - sheets_ops
+    - mail_ops
+  extra_scopes:
+    - auth:user.id:read
+    - offline_access
+
+capabilities:
+  assistant_bridge_runtime:
+    label: CoCo bridge runtime
+    description: Assistant bridge credentials and runtime wiring for CoCo inbound/outbound execution.
+    bootstrap_core: true
+    requires_bridge_credentials: true
+    required_scopes: []
+    user_auth_required: false
+    notes:
+      - Requires FEISHU_APP_ID and FEISHU_APP_SECRET to be synced into ops/feishu_bridge.env.local.
+
+  im_basic:
+    label: IM and rich message operations
+    description: Feishu chats, replies, reactions, pins, media resources, and bridge message transport.
+    bootstrap_core: true
+    required_scopes:
+      - im:chat:read
+      - im:chat:update
+      - im:chat.members:read
+      - im:chat.members:write_only
+      - im:message:readonly
+      - im:message:recall
+      - im:message.group_msg:get_as_user
+      - im:message.p2p_msg:get_as_user
+      - im:message.reactions:read
+      - im:message.reactions:write_only
+      - im:message.pins:read
+      - im:message.pins:write_only
+      - im:resource
+    notes:
+      - Group history and rich media retrieval still depend on the granted user scopes.
+
+  contact_directory:
+    label: Contacts and user resolution
+    description: User lookup, people search, and chat/user alias resolution.
+    bootstrap_core: true
+    required_scopes:
+      - contact:contact.base:readonly
+      - contact:user.base:readonly
+      - contact:user.basic_profile:readonly
+      - contact:user:search
+
+  docs_content:
+    label: Docs and document content
+    description: Create, fetch, search, and edit Feishu docs plus inline media operations.
+    bootstrap_core: true
+    required_scopes:
+      - docs:document:copy
+      - docs:document.media:download
+      - docs:document.media:upload
+      - docs:document:export
+      - docx:document:create
+      - docx:document:readonly
+      - docx:document:write_only
+      - search:docs:read
+
+  drive_management:
+    label: Drive file management
+    description: File metadata, comments, sharing permissions, subscriptions, and downloads.
+    bootstrap_core: true
+    required_scopes:
+      - drive:file:download
+      - drive:drive.metadata:readonly
+      - docs:document.comment:create
+      - docs:document.comment:read
+      - docs:document.comment:update
+      - docs:document.comment:delete
+      - docs:permission.member:auth
+      - docs:permission.member:create
+      - docs:permission.member:transfer
+      - docs:event:subscribe
+    feature_specific: true
+    notes:
+      - Advanced comment and permission APIs may still require explicit document-side access even after app scopes are granted.
+
+  base_crud:
+    label: Bitable and Base operations
+    description: Base app creation, tables, fields, records, views, forms, roles, dashboards, and workflows.
+    bootstrap_core: true
+    required_scopes:
+      - bitable:app
+      - base:app:copy
+      - base:app:create
+      - base:app:read
+      - base:app:update
+      - base:dashboard:create
+      - base:dashboard:delete
+      - base:dashboard:read
+      - base:dashboard:update
+      - base:field:create
+      - base:field:delete
+      - base:field:read
+      - base:field:update
+      - base:form:create
+      - base:form:delete
+      - base:form:read
+      - base:form:update
+      - base:record:create
+      - base:record:delete
+      - base:record:read
+      - base:record:update
+      - base:role:create
+      - base:role:delete
+      - base:role:read
+      - base:role:update
+      - base:table:create
+      - base:table:delete
+      - base:table:read
+      - base:table:update
+      - base:view:read
+      - base:view:write_only
+      - base:workflow:create
+      - base:workflow:delete
+      - base:workflow:read
+      - base:workflow:update
+      - base:workspace:list
+
+  calendar_ops:
+    label: Calendar and meeting scheduling
+    description: Calendar lookup, event CRUD, attendee changes, freebusy, and meeting invitation routes.
+    bootstrap_core: true
+    required_scopes:
+      - calendar:calendar:create
+      - calendar:calendar:delete
+      - calendar:calendar:read
+      - calendar:calendar:update
+      - calendar:calendar.event:create
+      - calendar:calendar.event:delete
+      - calendar:calendar.event:read
+      - calendar:calendar.event:update
+      - calendar:calendar.free_busy:read
+
+  task_ops:
+    label: Tasks and tasklists
+    description: Task CRUD, tasklist CRUD, assignees, comments, and standup workflows.
+    bootstrap_core: true
+    required_scopes:
+      - task:comment:write
+      - task:task:read
+      - task:task:write
+      - task:tasklist:read
+      - task:tasklist:write
+
+  vc_notes:
+    label: Video conference notes
+    description: Meeting search, meeting note lookup, and VC note surfaces.
+    bootstrap_core: true
+    required_scopes:
+      - vc:meeting.search:read
+      - vc:meeting.meetingevent:read
+      - vc:note:read
+
+  minutes_basic:
+    label: Minutes basic metadata
+    description: Minute title, duration, owner, and URL retrieval.
+    bootstrap_core: true
+    required_scopes:
+      - minutes:minutes:readonly
+
+  minutes_artifacts:
+    label: Minutes artifacts and transcript export
+    description: AI summary, todos, chapter artifacts, and transcript export via vc +notes.
+    bootstrap_core: true
+    feature_specific: true
+    required_scopes:
+      - vc:note:read
+      - minutes:minutes:readonly
+      - minutes:minutes.artifacts:read
+      - minutes:minutes.transcript:export
+    notes:
+      - This capability is frequently missing even after a generic Feishu login.
+      - If missing, remind the user that it is an authorization gap, not a product limitation.
+
+  wiki_ops:
+    label: Wiki node operations
+    description: Wiki node lookup and knowledge space traversal.
+    bootstrap_core: true
+    required_scopes:
+      - wiki:node:read
+
+  sheets_ops:
+    label: Spreadsheet operations
+    description: Spreadsheet create/read/write/meta operations.
+    bootstrap_core: true
+    required_scopes:
+      - sheets:spreadsheet:create
+      - sheets:spreadsheet:read
+      - sheets:spreadsheet:write_only
+      - sheets:spreadsheet.meta:read
+      - sheets:spreadsheet.meta:write_only
+
+  mail_ops:
+    label: Mailbox operations
+    description: Mail read/search, draft, send, reply, folders, labels, contacts, and mail events.
+    bootstrap_core: true
+    feature_specific: true
+    required_scopes:
+      - mail:event
+      - mail:user_mailbox:readonly
+      - mail:user_mailbox.folder:read
+      - mail:user_mailbox.folder:write
+      - mail:user_mailbox.mail_contact:read
+      - mail:user_mailbox.mail_contact:write
+      - mail:user_mailbox.message.address:read
+      - mail:user_mailbox.message.body:read
+      - mail:user_mailbox.message.subject:read
+      - mail:user_mailbox.message:readonly
+      - mail:user_mailbox.message:modify
+      - mail:user_mailbox.message:send
+    notes:
+      - Besides scopes, the user mailbox product itself must be enabled in the tenant/account.
+
+  whiteboard_ops:
+    label: Whiteboard operations
+    description: Whiteboard node read/write through the whiteboard CLI toolchain.
+    bootstrap_core: false
+    feature_specific: true
+    required_scopes:
+      - board:whiteboard:node:create
+      - board:whiteboard:node:delete
+      - board:whiteboard:node:read
+    extra_dependencies:
+      - "@larksuite/whiteboard-cli"
+    notes:
+      - Whiteboard is not part of the default core auth bundle.
+      - It may require both extra scopes and the separate whiteboard CLI dependency.
