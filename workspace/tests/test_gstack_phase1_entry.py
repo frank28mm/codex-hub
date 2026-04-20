@@ -65,6 +65,26 @@ def test_review_prompt_gets_execution_recommendation() -> None:
     assert payload["suggested_path"] == ["review"]
 
 
+def test_review_prompt_includes_superpowers_execution_assist(monkeypatch, tmp_path) -> None:
+    clone_path = tmp_path / ".codex" / "superpowers"
+    discovery_path = tmp_path / ".agents" / "skills" / "superpowers"
+    (clone_path / "skills").mkdir(parents=True)
+    discovery_path.parent.mkdir(parents=True)
+    discovery_path.symlink_to(clone_path / "skills", target_is_directory=True)
+    monkeypatch.setattr(gstack_phase1_entry, "SUPERPOWERS_CLONE_PATH", clone_path)
+    monkeypatch.setattr(gstack_phase1_entry, "SUPERPOWERS_DISCOVERY_PATH", discovery_path)
+
+    payload = gstack_phase1_entry.detect_workflow_path("帮我审一下这次改动有没有问题。")
+
+    assert payload["external_execution_assists"]
+    assist = payload["external_execution_assists"][0]
+    assert assist["layer"] == "superpowers"
+    assert assist["available"] is True
+    assert assist["matched_workflow_skills"] == ["review"]
+    assert "requesting-code-review" in assist["recommended_skills"]
+    assert "verification-before-completion" in assist["recommended_skills"]
+
+
 def test_qa_prompt_gets_execution_recommendation() -> None:
     payload = gstack_phase1_entry.detect_workflow_path("已经改好了，帮我测一下并验收。")
     assert payload["recognized_stage"] == "execution"

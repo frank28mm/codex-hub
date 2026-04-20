@@ -115,6 +115,12 @@
    - `Feishu / Electron / broker` 的职责固定为只拉起 `Codex` 主线程，不直接调用 `Claude Code`
    - 当自然语言命中第二意见层时，是否进入 `claude-review / claude-challenge / claude-consult` 由 `Codex` 主线程内部判断，再由 `Codex` 内部通过 `python3 ops/claude_code_runner.py` 调用 `Claude Code`
    - `~/.codex/skills/claude-*` 安装副本只作为本机原生发现增强项，不再作为 `Feishu / Electron` 路径或 `Phase 4` 可用性的前置条件
+   - `superpowers` 当前允许作为编程任务的外部执行层接入，但定位固定为“编程方法层”，不是 `Codex Hub` 的系统真源：
+     - 官方 clone 路径固定为：`~/.codex/superpowers`
+     - 官方发现路径固定为：`~/.agents/skills/superpowers`
+     - 只在编程实现、代码 review、测试验证、开发收口时调用；典型 skill 包括：`writing-plans`、`executing-plans`、`systematic-debugging`、`requesting-code-review`、`test-driven-development`、`verification-before-completion`、`finishing-a-development-branch`
+     - `Codex Hub` 继续负责项目板、记忆、bridge、harness、writeback、跨平台调度；不要让 `superpowers` 接管这些系统层职责
+     - 如果 `superpowers` 未安装或发现链断开，不要把它当作阻塞；应回退到 `Codex Hub` 自带的工作流与 skill
    - 当前 second-opinion 的正式执行 contract 固定为：由 `python3 ops/gstack_phase1_entry.py` 统一打包 `question / artifact / current_judgment / extra_context`，形成 `codex-hub.second-opinion.request.v1`；结果统一回收到 `codex-hub.second-opinion.response.v1` 的标准 `structured_output`，并同时产出可直接复用的 `main_thread_handoff`
    - 默认入口仍然是自然语言，不要求用户先知道 skill 名、工作流名或内部系统结构
    - 这条规则当前只适用于 `gstack -> Codex` 这条岗位型工作流框架，不泛化为系统内所有已有或未来 skills 的统一默认行为

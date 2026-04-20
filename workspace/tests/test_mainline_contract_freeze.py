@@ -2933,6 +2933,76 @@ def test_refresh_index_refreshes_project_rollups(sample_env) -> None:
     assert "WH-FS-01" in next_actions
 
 
+def test_refresh_index_syncs_retrieval_after_modification_and_deletion(sample_env) -> None:
+    _dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, _local_broker, _watcher = reload_modules()
+    from ops import codex_retrieval as codex_retrieval_module
+
+    codex_retrieval = importlib.reload(codex_retrieval_module)
+
+    topic_path = write_topic_board(
+        codex_memory,
+        project_name="SampleProj",
+        topic_name="旧方案",
+        topic_key="legacy",
+        rows=[
+            {
+                "ID": "SP-LEGACY-01",
+                "模块": "归档候选",
+                "事项": "Legacy Opportunity Marker",
+                "状态": "done",
+                "交付物": "",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "归档",
+                "更新时间": "2026-03-12T00:00:00Z",
+                "阻塞/依赖": "",
+                "上卷ID": "",
+            }
+        ],
+    )
+    summary_path = codex_memory.project_summary_path("SampleProj")
+    codex_memory.write_text(
+        summary_path,
+        "---\n"
+        "project_name: SampleProj\n"
+        "status: active\n"
+        "priority: high\n"
+        "path: /tmp/SampleProj\n"
+        "updated_at: 2026-03-11\n"
+        "summary: stale summary marker\n"
+        "---\n\n"
+        "# SampleProj\n\n"
+        "Stale Retrieval Summary Marker\n",
+    )
+    codex_retrieval.build_index()
+
+    codex_memory.write_text(
+        summary_path,
+        "---\n"
+        "project_name: SampleProj\n"
+        "status: active\n"
+        "priority: high\n"
+        "path: /tmp/SampleProj\n"
+        "updated_at: 2026-03-12\n"
+        "summary: refreshed summary marker with archive routing\n"
+        "---\n\n"
+        "# SampleProj\n\n"
+        "Refreshed Retrieval Summary Marker\n",
+    )
+    updated_stat = summary_path.stat()
+    os.utime(summary_path, (updated_stat.st_atime, updated_stat.st_mtime + 5))
+    topic_path.unlink()
+
+    assert codex_memory.cmd_refresh_index(argparse.Namespace()) == 0
+
+    refreshed = codex_retrieval.search_index("Refreshed Retrieval Summary Marker", limit=5)
+    assert any(item["path"] == str(summary_path.resolve()) for item in refreshed)
+    missing = codex_retrieval.search_index("Legacy Opportunity Marker", limit=5)
+    assert not any(item["path"] == str(topic_path.resolve()) for item in missing)
+
+
 def test_dashboard_sync_rebuilds_when_topic_board_changes_without_events(sample_env) -> None:
     dashboard_sync, codex_memory, _review_plane, _coordination_plane, _runtime_state, _local_broker, _watcher = reload_modules()
 

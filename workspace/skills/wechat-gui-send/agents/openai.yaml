@@ -1,0 +1,7 @@
+interface:
+  display_name: "WeChat GUI Send"
+  short_description: "Prepare and confirm WeChat GUI sends."
+  default_prompt: "Use $wechat-gui-send to prepare WeChat direct messages for confirmation and GUI delivery."
+
+policy:
+  allow_implicit_invocation: true

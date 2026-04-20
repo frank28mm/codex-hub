@@ -21,6 +21,7 @@ EXPECTED_SKILLS = {
     "office-hours",
     "plan-ceo-review",
     "plan-eng-review",
+    "wechat-gui-send",
 }
 
 
@@ -215,3 +216,11 @@ def test_phase4_skills_cover_distinct_roles() -> None:
 
     assert "Claude perspective" in claude_consult
     assert "What changed versus the current framing" in claude_consult
+
+
+def test_wechat_gui_send_skill_mentions_prepare_then_confirm_runtime() -> None:
+    skill = _read_skill("wechat-gui-send")
+
+    assert "prepare -> confirm send" in skill
+    assert "Computer Use" in skill
+    assert "Use the WeChat search field to paste the recipient name for fast targeting." in skill

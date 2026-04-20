@@ -2266,7 +2266,26 @@ def cmd_refresh_index(_args: argparse.Namespace) -> int:
                 module = None
         if module and hasattr(module, func_name):
             getattr(module, func_name)(sync_runtime=True)
-    print(json.dumps({"changed": True, "projects": [item["project_name"] for item in entries]}, ensure_ascii=False))
+    retrieval_sync: dict[str, Any] | None = None
+    retrieval_sync_error = ""
+    try:
+        try:
+            from ops import codex_retrieval as retrieval_module
+        except ImportError:  # pragma: no cover
+            import codex_retrieval as retrieval_module  # type: ignore
+
+        retrieval_sync = retrieval_module.sync_index()
+    except Exception as exc:  # pragma: no cover
+        retrieval_sync_error = f"{type(exc).__name__}: {exc}"
+
+    payload: dict[str, Any] = {"changed": True, "projects": [item["project_name"] for item in entries]}
+    if retrieval_sync is not None:
+        payload["retrieval_sync"] = retrieval_sync
+    if retrieval_sync_error:
+        payload["retrieval_sync_error"] = retrieval_sync_error
+        print(json.dumps(payload, ensure_ascii=False))
+        return 1
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 

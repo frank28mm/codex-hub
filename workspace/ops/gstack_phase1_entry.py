@@ -479,6 +479,40 @@ SECOND_OPINION_MAX_PLAN_STEPS = 5
 SECOND_OPINION_MAX_CHANGED_FILES = 12
 SECOND_OPINION_MAX_DIFF_LINES = 18
 SECOND_OPINION_MAX_ARTIFACT_PREVIEW_LINES = 5
+SUPERPOWERS_CLONE_PATH = Path.home() / ".codex" / "superpowers"
+SUPERPOWERS_DISCOVERY_PATH = Path.home() / ".agents" / "skills" / "superpowers"
+SUPERPOWERS_SKILL_MAP: dict[str, list[str]] = {
+    "plan-eng-review": [
+        "using-superpowers",
+        "writing-plans",
+        "executing-plans",
+    ],
+    "investigate": [
+        "using-superpowers",
+        "systematic-debugging",
+        "verification-before-completion",
+    ],
+    "review": [
+        "using-superpowers",
+        "requesting-code-review",
+        "verification-before-completion",
+    ],
+    "qa": [
+        "using-superpowers",
+        "test-driven-development",
+        "verification-before-completion",
+    ],
+    "document-release": [
+        "using-superpowers",
+        "finishing-a-development-branch",
+        "verification-before-completion",
+    ],
+    "ship": [
+        "using-superpowers",
+        "finishing-a-development-branch",
+        "verification-before-completion",
+    ],
+}
 
 
 def _run_text_command(
@@ -516,6 +550,68 @@ def _trim_diff_excerpt(text: str, limit: int) -> list[str]:
         if len(kept) >= limit:
             break
     return kept
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for item in items:
+        value = str(item).strip()
+        if value and value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def detect_superpowers_installation() -> dict[str, Any]:
+    clone_path = SUPERPOWERS_CLONE_PATH
+    clone_skills_path = clone_path / "skills"
+    discovery_path = SUPERPOWERS_DISCOVERY_PATH
+    clone_ready = clone_skills_path.exists()
+    discovery_ready = discovery_path.exists()
+    discovery_target = ""
+    if discovery_ready:
+        try:
+            discovery_target = str(discovery_path.resolve())
+        except OSError:
+            discovery_target = ""
+    return {
+        "clone_path": str(clone_path),
+        "clone_skills_path": str(clone_skills_path),
+        "clone_ready": clone_ready,
+        "discovery_path": str(discovery_path),
+        "discovery_ready": discovery_ready,
+        "discovery_target": discovery_target,
+        "available": bool(clone_ready and discovery_ready),
+    }
+
+
+def build_superpowers_execution_assist(suggested_path: list[str]) -> dict[str, Any]:
+    relevant_path = [
+        str(item).strip()
+        for item in suggested_path
+        if str(item).strip() in SUPERPOWERS_SKILL_MAP
+    ]
+    if not relevant_path:
+        return {}
+    recommended_skills: list[str] = []
+    for skill in relevant_path:
+        recommended_skills.extend(SUPERPOWERS_SKILL_MAP.get(skill, []))
+    installation = detect_superpowers_installation()
+    return {
+        "layer": "superpowers",
+        "available": bool(installation.get("available")),
+        "matched_workflow_skills": list(relevant_path),
+        "recommended_skills": _dedupe_preserve_order(recommended_skills),
+        "rationale": (
+            "当前请求已经进入编程相关的评审、调试、验证或收口阶段；"
+            "这类步骤可以调用已安装的 superpowers 作为执行方法层。"
+        ),
+        "boundaries": [
+            "只在编程实现、review、测试、收口时作为执行层使用。",
+            "项目板、记忆、bridge、harness、writeback 仍由 Codex Hub 负责。",
+            "不要让 superpowers 接管非编程类系统任务或跨平台调度。",
+        ],
+        "installation": installation,
+    }
 
 
 def _categorize_changed_files(changed_files: list[str]) -> dict[str, list[str]]:
@@ -1306,6 +1402,7 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             "suggested_path": [],
             "assistant_message": "当前没有足够输入，无法判断是否适合进入 gstack 工作流。",
             "initial_action_plan": [],
+            "external_execution_assists": [],
         }
 
     for skill in ENTRY_ORDER:
@@ -1347,6 +1444,7 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             "suggested_path": [],
             "assistant_message": "这条请求更适合直接执行，不默认触发 gstack 工作流。",
             "initial_action_plan": ["按用户要求直接执行，不额外进入 gstack 工作流。"],
+            "external_execution_assists": [],
         }
 
     if (
@@ -1363,6 +1461,7 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
             "suggested_path": [],
             "assistant_message": "当前没有命中已落地的 gstack 工作流层。",
             "initial_action_plan": [],
+            "external_execution_assists": [],
         }
 
     suggested_path = [skill for skill in ENTRY_ORDER if skill in matched_entry]
@@ -1480,6 +1579,11 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
         plan = build_chain_plan(suggested_path)
         stage = "entry"
 
+    execution_assists = []
+    superpowers_assist = build_superpowers_execution_assist(suggested_path)
+    if superpowers_assist:
+        execution_assists.append(superpowers_assist)
+
     return {
         "status": "workflow-recommended",
         "recognized_stage": stage,
@@ -1487,6 +1591,7 @@ def detect_workflow_path(prompt: str) -> dict[str, Any]:
         "suggested_path": suggested_path,
         "assistant_message": message,
         "initial_action_plan": plan,
+        "external_execution_assists": execution_assists,
     }
 
 
