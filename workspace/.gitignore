@@ -9,6 +9,7 @@ __pycache__/
 *.lock
 tmp_*.png
 tmp_*.jpg
+.codex_vendor/
 
 # Generated ops/runtime reports
 reports/ops/workspace-hub-daily/

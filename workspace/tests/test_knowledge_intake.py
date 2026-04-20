@@ -755,3 +755,23 @@ def test_seed_curated_sources_writes_clip_notes(monkeypatch, tmp_path: Path) -> 
     assert "source_type: curated-external" in text
     assert "routing_hints:" in text
     assert "cross-border-commerce" in text
+
+
+def test_cmd_fetch_url_prints_captured_article(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        knowledge_intake,
+        "fetch_html_excerpt",
+        lambda url: {
+            "title": "微信公众号文章标题",
+            "excerpt": "这里是网页正文摘录。",
+            "fetched_url": url,
+            "status_code": 200,
+        },
+    )
+
+    rc = knowledge_intake.cmd_fetch_url(type("Args", (), {"url": "https://mp.weixin.qq.com/s/demo"})())
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["title"] == "微信公众号文章标题"
+    assert payload["fetched_url"] == "https://mp.weixin.qq.com/s/demo"

@@ -1957,6 +1957,12 @@ def cmd_seed_curated_sources(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fetch_url(args: argparse.Namespace) -> int:
+    payload = fetch_html_excerpt(str(args.url or "").strip())
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Daily knowledge intake for clips and PDFs")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1985,6 +1991,10 @@ def build_parser() -> argparse.ArgumentParser:
     curated_cmd = subparsers.add_parser("seed-curated-sources")
     curated_cmd.add_argument("--seed-id", action="append", default=[])
     curated_cmd.set_defaults(func=cmd_seed_curated_sources)
+
+    fetch_url_cmd = subparsers.add_parser("fetch-url")
+    fetch_url_cmd.add_argument("--url", required=True)
+    fetch_url_cmd.set_defaults(func=cmd_fetch_url)
     return parser
 
 

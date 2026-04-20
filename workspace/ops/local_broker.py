@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -623,6 +624,85 @@ def _command_result(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         engine_lease=engine_lease,
         **payload,
     )
+
+
+URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+WECHAT_PUBLIC_ARTICLE_DOMAINS = {"mp.weixin.qq.com"}
+
+
+def _trim_url_candidate(value: str) -> str:
+    return str(value or "").strip().rstrip("，。；;,)")
+
+
+def _extract_prompt_urls(prompt: str) -> list[str]:
+    seen: set[str] = set()
+    results: list[str] = []
+    for match in URL_RE.findall(str(prompt or "")):
+        url = _trim_url_candidate(match)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        results.append(url)
+    return results
+
+
+def _should_hydrate_prompt_url(url: str) -> bool:
+    parsed = urlparse(str(url or "").strip())
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower() in WECHAT_PUBLIC_ARTICLE_DOMAINS
+
+
+def _fetch_prompt_url_context(url: str) -> dict[str, Any]:
+    try:
+        from ops import knowledge_intake
+    except ImportError:  # pragma: no cover
+        import knowledge_intake  # type: ignore
+
+    payload = knowledge_intake.fetch_html_excerpt(url)
+    return {
+        "url": str(url).strip(),
+        "title": str(payload.get("title") or "").strip(),
+        "excerpt": str(payload.get("excerpt") or "").strip(),
+        "fetched_url": str(payload.get("fetched_url") or url).strip(),
+    }
+
+
+def _augment_prompt_with_url_context(prompt: str) -> tuple[str, list[dict[str, Any]]]:
+    source = str(prompt or "").strip()
+    if not source:
+        return source, []
+    contexts: list[dict[str, Any]] = []
+    for url in _extract_prompt_urls(source)[:2]:
+        if not _should_hydrate_prompt_url(url):
+            continue
+        try:
+            context = _fetch_prompt_url_context(url)
+        except Exception:
+            continue
+        if not str(context.get("excerpt") or "").strip():
+            continue
+        contexts.append(context)
+    if not contexts:
+        return source, []
+    appendix_parts = []
+    for index, context in enumerate(contexts, start=1):
+        appendix_parts.append(
+            "\n".join(
+                [
+                    f"链接材料 {index}",
+                    f"- url: {context['fetched_url']}",
+                    f"- title: {context['title'] or 'Untitled'}",
+                    "",
+                    "网页正文摘录：",
+                    context["excerpt"][:2200].strip(),
+                ]
+            ).strip()
+        )
+    augmented = (
+        source
+        + "\n\n以下是系统自动抓取的链接正文摘要，请直接基于这些内容阅读和回答，不要再说无法读取链接：\n\n"
+        + "\n\n---\n\n".join(appendix_parts)
+    )
+    return augmented, contexts
 
 
 def _extract_prefixed_json(text: str, prefix: str) -> dict[str, Any] | None:
@@ -2288,6 +2368,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
 
 def cmd_command_center(args: argparse.Namespace) -> int:
     action = args.action
+    prompt = getattr(args, "prompt", "")
+    augmented_prompt, prompt_url_context = _augment_prompt_with_url_context(prompt)
     if action in {"codex-exec", "codex-resume", "engine-exec", "engine-resume"}:
         blocked = _pause_block_response("command_center", project_name=getattr(args, "project_name", ""))
         if blocked:
@@ -2314,7 +2396,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
     elif action == "codex-exec":
         command = (
         _start_codex_command(
-            prompt=args.prompt,
+            prompt=augmented_prompt,
             project_name=getattr(args, "project_name", ""),
             no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
             execution_profile=execution_profile,
@@ -2332,7 +2414,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
         )
         if _should_use_start_codex(execution_profile)
         else _codex_exec_command(
-                prompt=args.prompt,
+                prompt=augmented_prompt,
                 execution_profile=execution_profile,
                 model=getattr(args, "model", ""),
                 reasoning_effort=getattr(args, "reasoning_effort", ""),
@@ -2346,7 +2428,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
     elif action == "codex-resume":
         command = (
         _start_codex_command(
-            prompt=args.prompt,
+            prompt=augmented_prompt,
             project_name=getattr(args, "project_name", ""),
             session_id=args.session_id,
             no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
@@ -2365,7 +2447,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
         )
         if _should_use_start_codex(execution_profile)
         else _codex_exec_command(
-                prompt=args.prompt,
+                prompt=augmented_prompt,
                 session_id=args.session_id,
                 execution_profile=execution_profile,
                 model=getattr(args, "model", ""),
@@ -2389,7 +2471,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             "engine_exec",
             _run(
                 _start_claude_hub_command(
-                    prompt=args.prompt,
+                    prompt=augmented_prompt,
                     engine_name=normalized_engine,
                     project_name=getattr(args, "project_name", ""),
                     no_auto_resume=bool(getattr(args, "no_auto_resume", False)),
@@ -2419,7 +2501,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             "engine_resume",
             _run(
                 _start_claude_hub_command(
-                    prompt=args.prompt,
+                    prompt=augmented_prompt,
                     engine_name=normalized_engine,
                     project_name=getattr(args, "project_name", ""),
                     session_id=args.session_id,
@@ -2456,6 +2538,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             timeout_seconds=payload.get("timeout_seconds"),
             error=payload.get("error", ""),
             error_type=payload.get("error_type", ""),
+            prompt_url_context=prompt_url_context,
             launch_context=payload.get("launch_context"),
             finalize_launch=payload.get("finalize_launch"),
             engine_lease=payload.get("engine_lease"),
