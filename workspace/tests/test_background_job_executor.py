@@ -710,6 +710,128 @@ def test_board_job_projector_reads_pointer_harness_frontmatter_when_task_is_unre
     assert payload["implementation_tracks"][0]["execution_packets"][0]["kind"] == "shell"
 
 
+def test_board_job_projector_supports_pointer_research_family(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    pointer_name = "SampleProj-ResearchFamilyHarness.md"
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-RESEARCH-FAMILY",
+                "父ID": "",
+                "来源": "manual_long_task",
+                "范围": "长任务",
+                "事项": "持续补跨平台市场样本与社区趋势。",
+                "状态": "doing",
+                "交付物": "样本池与趋势补充",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "补 Reddit 和社区趋势。",
+                "更新时间": "2026-04-25",
+                "指向": pointer_name,
+            }
+        ],
+    )
+    (sample_env["vault_root"] / "01_working" / pointer_name).write_text(
+        "---\n"
+        "harness:\n"
+        "  enabled: true\n"
+        "  family: commerce_market_watch\n"
+        "---\n\n"
+        "# Research Pointer Family\n",
+        encoding="utf-8",
+    )
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(board_job_projector, "TASK_JOB_SPECS", {})
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-RESEARCH-FAMILY")
+
+    assert payload["task_family"] == "commerce_market_watch"
+    assert payload["family_source"] == "pointer_family"
+    assert payload["family_resolution_reason"] == "harness.family"
+    assert payload["executor_kind"] == "research_brief"
+    assert payload["program_spec"]["loop_policy"]["keep_alive_on_success"] is True
+    assert payload["program_spec"]["loop_policy"]["on_success"] == "await_external_event"
+
+
+def test_board_job_projector_keeps_waiting_external_handoff_task_runnable(sample_env, monkeypatch) -> None:
+    from ops import board_job_projector as projector_module
+
+    seed_sample_project_board(sample_env)
+    board_job_projector = importlib.reload(projector_module)
+    monkeypatch.setattr(
+        board_job_projector,
+        "TASK_JOB_SPECS",
+        {
+            "SP-EXEC-01": {
+                "job_slug": "sample-background-job",
+                "executor_kind": "research_brief",
+                "automation_mode": "background_assist",
+                "allowed_actions": ["read", "write_report"],
+                "delivery_targets": ["board", "report"],
+                "gate_policy": "none",
+                "max_rounds": 2,
+                "time_budget_minutes": 10,
+                "acceptance_criteria": ["Produce a sample brief."],
+            }
+        },
+    )
+    save_project_rows(
+        sample_env,
+        [
+            {
+                "ID": "SP-EXEC-01",
+                "父ID": "",
+                "来源": "project",
+                "范围": "automation",
+                "事项": "Run Sample background job",
+                "状态": "doing",
+                "交付物": "sample brief",
+                "审核状态": "",
+                "审核人": "",
+                "审核结论": "",
+                "审核时间": "",
+                "下一步": "wait for next market pulse",
+                "更新时间": "2026-03-28T12:05:00+08:00",
+                "指向": "SampleProj-项目板.md",
+            }
+        ],
+    )
+    legacy_root = sample_env["workspace_root"] / "reports" / "ops" / "background-jobs" / "sample-background-job"
+    legacy_bundle = board_job_projector.workspace_job_schema.handoff_bundle_paths(legacy_root)
+    board_job_projector.workspace_job_schema.write_json_file(
+        legacy_bundle["task_spec_path"],
+        {
+            "task_id": "SP-EXEC-01",
+            "program_id": "legacy-program",
+            "objective": "Legacy objective",
+            "scope_type": "project",
+            "scope_ref": "SampleProj",
+            "approval_required": False,
+            "approval_state": "not-required",
+            "stage": "handoff",
+            "stage_plan": ["discover", "frame", "execute", "verify", "adapt", "handoff"],
+            "wake_policy": {"manual_wake": True},
+            "iteration_count": 2,
+            "current_focus": "",
+            "subgoals": [{"summary": "Produce a sample brief.", "status": "completed"}],
+            "updated_at": "2026-03-28T12:00:00+08:00",
+            "last_run_id": "legacy-run",
+            "last_evaluation": {"current_stage": "verify", "next_stage": "handoff", "decision": "retry"},
+            "stage_history": [],
+            "last_decision": "retry",
+            "continuation_outcome": "await_external_event",
+        },
+    )
+
+    payload = board_job_projector.project_background_job("SampleProj", "SP-EXEC-01")
+
+    assert payload["task_status"] == "doing"
+
+
 def test_board_job_projector_isolates_identity_and_artifacts_per_task(sample_env, monkeypatch) -> None:
     from ops import board_job_projector as projector_module
 
@@ -1023,6 +1145,43 @@ def test_evaluate_program_iteration_marks_done_after_verify_without_pending_subg
     assert evaluation["decision"] == "done"
     assert evaluation["next_stage"] == "handoff"
     assert evaluation["acceptance_status"] == "accepted"
+    assert updated_subgoals[0]["status"] == "completed"
+
+
+def test_evaluate_program_iteration_keeps_market_watch_alive_after_success(sample_env) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    evaluation, updated_subgoals = background_job_executor.evaluate_program_iteration(
+        {
+            "task_id": "SP-EXEC-RESEARCH",
+            "program_spec": {
+                "loop_policy": {
+                    "keep_alive_on_success": True,
+                    "on_success": "await_external_event",
+                    "success_reason": "market_watch_continues",
+                }
+            },
+        },
+        scaffold={
+            "task_spec": {
+                "stage": "verify",
+                "current_focus": "",
+                "subgoals": [{"summary": "Collect community trend signals.", "status": "completed"}],
+                "scope_type": "project",
+                "scope_ref": "SampleProj",
+            }
+        },
+        execution_status="ok",
+        delivery_status="delivered",
+        gate_state={"status": "approved"},
+    )
+
+    assert evaluation["decision"] == "retry"
+    assert evaluation["next_stage"] == "verify"
+    assert evaluation["acceptance_status"] == "awaiting-external"
+    assert evaluation["continuation_outcome"] == "await_external_event"
+    assert evaluation["continuation_reason"] == "market_watch_continues"
     assert updated_subgoals[0]["status"] == "completed"
 
 
@@ -1654,6 +1813,45 @@ def test_derive_harness_observability_marks_orphaned_active_run(sample_env) -> N
     assert payload["last_decision"] == "retry"
 
 
+def test_derive_harness_observability_keeps_market_watch_alive_without_pending_subgoals(sample_env) -> None:
+    from ops import background_job_executor as executor_module
+
+    background_job_executor = importlib.reload(executor_module)
+    job = {
+        "job_id": "board-job.sampleproj.sp-exec-research.sample-market-watch",
+        "project_name": "SampleProj",
+        "task_id": "SP-EXEC-RESEARCH",
+        "task_status": "doing",
+        "executor_kind": "research_brief",
+        "next_action": "等待下一轮补样或显式唤醒后继续。",
+        "program_spec": {
+            "loop_policy": {
+                "keep_alive_on_success": True,
+                "on_success": "await_external_event",
+            }
+        },
+    }
+
+    payload = background_job_executor.derive_harness_observability(
+        job,
+        task_spec={
+            "stage": "verify",
+            "current_focus": "Collect community trend signals.",
+            "last_decision": "retry",
+            "continuation_outcome": "await_external_event",
+            "continuation_reason": "market_watch_continues",
+            "subgoals": [{"summary": "Collect community trend signals.", "status": "completed"}],
+        },
+        wake_status={"running": {}, "pending": {}},
+        last_run={"execution_outcome": {"status": "ok"}},
+        gate_event={},
+    )
+
+    assert payload["harness_state"] == "waiting_external"
+    assert payload["continuation_outcome"] == "await_external_event"
+    assert payload["continuation_reason"] == "market_watch_continues"
+
+
 def test_projected_job_status_exposes_observability(sample_env, monkeypatch) -> None:
     from ops import background_job_executor as executor_module
 
@@ -1804,6 +2002,8 @@ def test_job_status_payload_flattens_harness_observability(sample_env, monkeypat
                 "next_action": "先处理审批阻塞",
                 "next_wake_at": "2026-03-31T09:30:00+08:00",
                 "blocked_reason": "awaiting_gate",
+                "continuation_outcome": "approval_required",
+                "continuation_reason": "awaiting_gate",
                 "current_stage": "verify",
                 "current_focus": "IM contract",
                 "last_run_id": "run-1",
@@ -1816,6 +2016,8 @@ def test_job_status_payload_flattens_harness_observability(sample_env, monkeypat
                 "next_action": "先处理审批阻塞",
                 "next_wake_at": "2026-03-31T09:30:00+08:00",
                 "blocked_reason": "awaiting_gate",
+                "continuation_outcome": "approval_required",
+                "continuation_reason": "awaiting_gate",
                 "current_stage": "verify",
                 "current_focus": "IM contract",
                 "last_run_id": "run-1",
@@ -1925,6 +2127,8 @@ def test_job_status_payload_flattens_harness_observability(sample_env, monkeypat
     assert payload["next_action"] == "先处理审批阻塞"
     assert payload["next_wake_at"] == "2026-03-31T09:30:00+08:00"
     assert payload["blocked_reason"] == "awaiting_gate"
+    assert payload["continuation_outcome"] == "approval_required"
+    assert payload["continuation_reason"] == "awaiting_gate"
     assert payload["current_focus"] == "IM contract"
     assert payload["pending_subgoal_count"] == 1
     assert payload["running_stale"] is False

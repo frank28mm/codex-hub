@@ -477,6 +477,8 @@ def finalize_program_iteration(
     task_spec["stage"] = str(evaluation.get("next_stage", previous_stage)).strip() or previous_stage
     task_spec["last_decision"] = str(evaluation.get("decision", "")).strip()
     task_spec["last_evaluation"] = dict(evaluation)
+    task_spec["continuation_outcome"] = str(evaluation.get("continuation_outcome", "")).strip()
+    task_spec["continuation_reason"] = str(evaluation.get("continuation_reason", "")).strip()
     task_spec["last_run_id"] = str(scaffold.get("run_id", "")).strip() or str(task_spec.get("last_run_id", "")).strip()
     task_spec["updated_at"] = iso_now_local()
     stage_history = list(task_spec.get("stage_history", []))
@@ -574,6 +576,41 @@ def _target_files_exist(target_files: list[str]) -> bool:
     return bool(paths) and all(Path(item).exists() for item in paths)
 
 
+def _loop_policy(job: dict[str, Any]) -> dict[str, Any]:
+    policy = program_spec(job).get("loop_policy", {})
+    return dict(policy) if isinstance(policy, dict) else {}
+
+
+def _keep_alive_on_success(job: dict[str, Any], *, continuation_outcome: str) -> bool:
+    policy = _loop_policy(job)
+    if not bool(policy.get("keep_alive_on_success", False)):
+        return False
+    return str(continuation_outcome or "").strip() in {
+        "await_external_event",
+        "retry_later",
+        "continue_now",
+        "continue_next_track",
+    }
+
+
+def _apply_loop_policy_success_override(
+    job: dict[str, Any],
+    *,
+    continuation_outcome: str,
+    continuation_reason: str,
+) -> tuple[str, str]:
+    policy = _loop_policy(job)
+    if not bool(policy.get("keep_alive_on_success", False)):
+        return continuation_outcome, continuation_reason
+    if str(continuation_outcome or "").strip() != "done":
+        return continuation_outcome, continuation_reason
+    success_outcome = str(policy.get("on_success", "await_external_event")).strip() or "await_external_event"
+    success_reason = (
+        str(policy.get("success_reason", "")).strip() or continuation_reason or "loop_policy_success_keepalive"
+    )
+    return success_outcome, success_reason
+
+
 def evaluate_program_iteration(
     job: dict[str, Any],
     *,
@@ -599,9 +636,13 @@ def evaluate_program_iteration(
     execution_metadata = dict(execution_metadata or {})
     recovery_decision = str(execution_metadata.get("recovery_decision", "")).strip()
     recovery_reason = str(execution_metadata.get("recovery_reason", "")).strip()
+    continuation_outcome = ""
+    continuation_reason = ""
     if gate_status == "awaiting_gate":
         decision = "gate"
         acceptance_status = "awaiting-gate"
+        continuation_outcome = "approval_required"
+        continuation_reason = "awaiting_gate"
     elif recovery_decision in {"retry", "adapt", "blocked"}:
         decision = recovery_decision
         acceptance_status = {
@@ -609,18 +650,40 @@ def evaluate_program_iteration(
             "adapt": "needs-adaptation",
             "blocked": "blocked",
         }[recovery_decision]
+        continuation_outcome = {
+            "retry": "retry_later",
+            "adapt": "continue_now",
+            "blocked": "unsafe_to_continue",
+        }[recovery_decision]
+        continuation_reason = recovery_reason or recovery_decision
     elif execution_status != "ok":
         decision = "adapt" if current_stage in {"execute", "verify", "adapt", "handoff"} else "blocked"
         acceptance_status = "needs-adaptation" if decision == "adapt" else "blocked"
+        continuation_outcome = "continue_now" if decision == "adapt" else "unsafe_to_continue"
+        continuation_reason = str(execution_metadata.get("failure_kind", "")).strip() or decision
     elif delivery_status == "not-delivered":
         decision = "adapt"
         acceptance_status = "needs-adaptation"
+        continuation_outcome = "continue_now"
+        continuation_reason = "delivery_not_delivered"
     elif current_stage in {"adapt", "verify", "handoff"} and pending_count == 0:
         decision = "done"
         acceptance_status = "accepted"
+        continuation_outcome = "done"
+        continuation_reason = "loop_complete"
     else:
         decision = "continue"
         acceptance_status = "criteria-met" if pending_count == 0 else "criteria-pending"
+        continuation_outcome = "continue_now"
+        continuation_reason = "subgoals_remaining" if pending_count else "advance_stage"
+    continuation_outcome, continuation_reason = _apply_loop_policy_success_override(
+        job,
+        continuation_outcome=continuation_outcome,
+        continuation_reason=continuation_reason,
+    )
+    if continuation_outcome == "await_external_event":
+        decision = "retry"
+        acceptance_status = "awaiting-external"
     next_stage = workspace_job_schema.next_program_stage(
         current_stage,
         decision=decision,
@@ -644,6 +707,8 @@ def evaluate_program_iteration(
             "execution_failure_kind": str(execution_metadata.get("failure_kind", "")).strip(),
         },
     ).to_dict()
+    evaluation["continuation_outcome"] = continuation_outcome
+    evaluation["continuation_reason"] = continuation_reason
     return evaluation, updated_subgoals
 
 
@@ -3963,6 +4028,17 @@ def derive_harness_observability(
     task_status = codex_memory.normalize_task_status(job.get("task_status", "todo"))
     current_stage = str(current_task_spec.get("stage", "")).strip() or "discover"
     last_decision = str(current_task_spec.get("last_decision", "")).strip()
+    last_evaluation = (
+        dict(current_task_spec.get("last_evaluation", {}))
+        if isinstance(current_task_spec.get("last_evaluation"), dict)
+        else {}
+    )
+    continuation_outcome = str(current_task_spec.get("continuation_outcome", "")).strip() or str(
+        last_evaluation.get("continuation_outcome", "")
+    ).strip()
+    continuation_reason = str(current_task_spec.get("continuation_reason", "")).strip() or str(
+        last_evaluation.get("continuation_reason", "")
+    ).strip()
     completed_subgoal_count = _completed_subgoal_count(current_task_spec)
     pending_subgoal_count = _pending_subgoal_count(current_task_spec)
     next_wake_at = str(pending.get("requested_at", "")).strip()
@@ -4000,7 +4076,11 @@ def derive_harness_observability(
     elif task_status == "blocked":
         harness_state = "blocked"
         blocked_reason = "task_blocked"
-    elif last_decision == "done" or pending_subgoal_count == 0 or current_stage == "handoff":
+    elif (
+        last_decision == "done"
+        or current_stage == "handoff"
+        or (pending_subgoal_count == 0 and not _keep_alive_on_success(job, continuation_outcome=continuation_outcome))
+    ):
         harness_state = "done"
     elif task_status == "done":
         harness_state = "done"
@@ -4013,6 +4093,9 @@ def derive_harness_observability(
             harness_state = "needs_adapt"
         else:
             harness_state = "ready"
+
+    if harness_state not in {"running", "queued", "stalled", "blocked"} and continuation_outcome == "await_external_event":
+        harness_state = "waiting_external"
 
     execution_outcome = dict(current_last_run.get("execution_outcome", {}) or {})
     last_execution_status = str(execution_outcome.get("status", "")).strip()
@@ -4027,6 +4110,8 @@ def derive_harness_observability(
             last_decision = "done"
         elif harness_state == "needs_adapt":
             last_decision = "adapt"
+        elif harness_state == "waiting_external":
+            last_decision = "retry"
         elif harness_state in {"queued", "running", "ready"}:
             last_decision = "continue"
 
@@ -4056,6 +4141,8 @@ def derive_harness_observability(
         "next_action": next_action,
         "next_wake_at": next_wake_at,
         "blocked_reason": blocked_reason,
+        "continuation_outcome": continuation_outcome,
+        "continuation_reason": continuation_reason,
         "completed_subgoal_count": completed_subgoal_count,
         "pending_subgoal_count": pending_subgoal_count,
         "current_focus": str(current_task_spec.get("current_focus", "")).strip(),
@@ -4082,6 +4169,8 @@ def _status_payload_from_observability(
         "next_action": str(observability.get("next_action", "")).strip(),
         "next_wake_at": str(observability.get("next_wake_at", "")).strip(),
         "blocked_reason": str(observability.get("blocked_reason", "")).strip(),
+        "continuation_outcome": str(observability.get("continuation_outcome", "")).strip(),
+        "continuation_reason": str(observability.get("continuation_reason", "")).strip(),
         "current_stage": str(observability.get("current_stage", "")).strip(),
         "current_focus": str(observability.get("current_focus", "")).strip(),
         "last_run_id": str(observability.get("last_run_id", "")).strip(),
@@ -4168,6 +4257,10 @@ def job_status_payload(job: dict[str, Any]) -> dict[str, Any]:
         or str(observability.get("next_wake_at", "")).strip(),
         "blocked_reason": str(status_payload.get("blocked_reason", "")).strip()
         or str(observability.get("blocked_reason", "")).strip(),
+        "continuation_outcome": str(status_payload.get("continuation_outcome", "")).strip()
+        or str(observability.get("continuation_outcome", "")).strip(),
+        "continuation_reason": str(status_payload.get("continuation_reason", "")).strip()
+        or str(observability.get("continuation_reason", "")).strip(),
         "current_stage": str(observability.get("current_stage", "")).strip(),
         "current_focus": str(observability.get("current_focus", "")).strip(),
         "last_run_id": str(observability.get("last_run_id", "")).strip(),

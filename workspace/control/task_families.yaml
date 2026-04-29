@@ -409,3 +409,33 @@ families:
       safety_boundary: generic_manual_long_task
       task_family: generic_manual_long_task
       family_source: registry_fallback
+
+  commerce_market_watch:
+    family_id: commerce_market_watch
+    match_rules:
+      sources: []
+      scopes: []
+      keywords_any: []
+      keywords_all: []
+      regex_any: []
+    program_defaults:
+      executor_kind: research_brief
+      automation_mode: background_assist
+      allowed_actions: [read, write_report, write_board]
+      delivery_targets: [board, report]
+      gate_policy: none
+      max_rounds: 3
+      time_budget_minutes: 20
+      loop_policy:
+        keep_alive_on_success: true
+        on_success: await_external_event
+        success_reason: market_watch_continues
+    stop_conditions:
+      - approval_required
+      - blocked
+      - human_choice_required
+      - needs_context
+    metadata_defaults:
+      safety_boundary: commerce_market_watch
+      task_family: commerce_market_watch
+      family_source: registry
