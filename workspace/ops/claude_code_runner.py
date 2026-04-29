@@ -45,6 +45,13 @@ MODE_PREAMBLES = {
         "1) Status 2) Consult question 3) Claude perspective "
         "4) What changed versus the current framing 5) Recommended next step."
     ),
+    "writing": (
+        "You are Claude Code acting as a dedicated writing specialist. "
+        "Improve the prose, structure, clarity, and tone of the material below "
+        "without inventing unsupported facts. Return: "
+        "1) Status 2) Writing brief 3) Revised draft "
+        "4) Notable changes to voice or structure 5) Recommended next step."
+    ),
 }
 SAFETY_APPEND_PROMPT = (
     "Operate in strict second-opinion mode. "

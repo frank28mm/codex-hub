@@ -8,6 +8,7 @@ EXPECTED_SKILLS = {
     "careful",
     "claude-challenge",
     "claude-consult",
+    "claude-writing",
     "claude-review",
     "document-release",
     "freeze",
@@ -207,6 +208,7 @@ def test_phase4_skills_cover_distinct_roles() -> None:
     claude_review = _read_skill("claude-review")
     claude_challenge = _read_skill("claude-challenge")
     claude_consult = _read_skill("claude-consult")
+    claude_writing = _read_skill("claude-writing")
 
     assert "Claude assessment" in claude_review
     assert "Agreement or disagreement" in claude_review
@@ -216,6 +218,17 @@ def test_phase4_skills_cover_distinct_roles() -> None:
 
     assert "Claude perspective" in claude_consult
     assert "What changed versus the current framing" in claude_consult
+
+    assert "dedicated writing specialist" in claude_writing
+    assert "Revised draft" in claude_writing
+
+
+def test_claude_writing_skill_references_platform_style_library() -> None:
+    skill = _read_skill("claude-writing")
+    assert "references/platform-style-library.md" in skill
+    assert "references/platform-style-profiles.yaml" in skill
+    assert (SKILL_ROOT / "claude-writing" / "references" / "platform-style-library.md").exists()
+    assert (SKILL_ROOT / "claude-writing" / "references" / "platform-style-profiles.yaml").exists()
 
 
 def test_wechat_gui_send_skill_mentions_prepare_then_confirm_runtime() -> None:
