@@ -10,6 +10,14 @@ __pycache__/
 tmp_*.png
 tmp_*.jpg
 .codex_vendor/
+.claude/
+
+# Generated local OCR/article scratch artifacts
+chds_*/
+chds_*.png
+[0-9]*_subtitle_sheet*.png
+[0-9]*_full_sheet_dense.png
+web-articles/
 
 # Generated ops/runtime reports
 reports/ops/workspace-hub-daily/
