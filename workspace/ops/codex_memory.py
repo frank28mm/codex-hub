@@ -372,6 +372,66 @@ def canonical_project_name(project_name: str) -> str:
     return workspace_hub_project.canonicalize(name)
 
 
+def project_prompt_registry(include_discovered: bool = True) -> list[dict[str, Any]]:
+    entries = list(load_registry())
+    if not include_discovered:
+        return entries
+    known_names = {str(item.get("project_name", "")).strip() for item in entries}
+    try:
+        for child in sorted(PROJECTS_ROOT.iterdir(), key=lambda path: path.name.lower()):
+            if not child.is_dir() or child.name.startswith(".") or child.name in known_names:
+                continue
+            entries.append(
+                {
+                    "project_name": child.name,
+                    "aliases": default_aliases(child.name),
+                    "path": str(child),
+                }
+            )
+    except FileNotFoundError:
+        pass
+    return entries
+
+
+def _project_prompt_match_score(prompt: str, candidate: str) -> tuple[int, int] | None:
+    normalized_prompt = str(prompt or "").strip().lower()
+    normalized_candidate = str(candidate or "").strip().lower()
+    if not normalized_prompt or not normalized_candidate:
+        return None
+    boundary_pattern = re.compile(rf"(?<![a-z0-9_-]){re.escape(normalized_candidate)}(?![a-z0-9_-])")
+    if boundary_pattern.search(normalized_prompt):
+        return (2, len(normalized_candidate))
+    if normalized_candidate in normalized_prompt:
+        return (1, len(normalized_candidate))
+    return None
+
+
+def resolve_project_from_prompt(prompt: str, *, include_discovered: bool = True) -> str:
+    normalized_prompt = str(prompt or "").strip()
+    if not normalized_prompt:
+        return ""
+    hits: dict[str, tuple[int, int]] = {}
+    for item in project_prompt_registry(include_discovered=include_discovered):
+        project_name = str(item.get("project_name", "")).strip()
+        if not project_name:
+            continue
+        best_score: tuple[int, int] | None = None
+        candidates = [project_name, *[str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]]
+        for candidate in candidates:
+            score = _project_prompt_match_score(normalized_prompt, candidate)
+            if score is None:
+                continue
+            if best_score is None or score > best_score:
+                best_score = score
+        if best_score is not None:
+            hits[project_name] = best_score
+    if not hits:
+        return ""
+    best_score = max(hits.values())
+    winners = sorted(project_name for project_name, score in hits.items() if score == best_score)
+    return winners[0] if len(winners) == 1 else ""
+
+
 def normalize_vault_path(value: str | Path) -> str:
     _refresh_roots()
     raw = str(value or "").strip()
@@ -2312,8 +2372,8 @@ def cmd_register_launch(args: argparse.Namespace) -> int:
             "source_thread_name": args.source_thread_name or "",
             "source_thread_label": args.source_thread_label or "",
             "source_message_id": args.source_message_id or "",
-            "engine_name": args.engine_name or "codex",
-            "entry_surface": args.entry_surface or "",
+            "engine_name": getattr(args, "engine_name", "") or "codex",
+            "entry_surface": getattr(args, "entry_surface", "") or "",
         }
         data["bindings"].append(binding)
         save_bindings(data)
@@ -2446,6 +2506,16 @@ def cmd_resolve_board_binding(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resolve_project_from_prompt(args: argparse.Namespace) -> int:
+    print(resolve_project_from_prompt(args.prompt or ""))
+    return 0
+
+
+def cmd_canonicalize_project_name(args: argparse.Namespace) -> int:
+    print(canonical_project_name(args.project_name or ""))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex workspace memory utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2486,6 +2556,14 @@ def build_parser() -> argparse.ArgumentParser:
     finalize.add_argument("--summary-file", default="")
     finalize.add_argument("--final-status", choices=["completed", "aborted", "failed"], default="completed")
     finalize.set_defaults(func=cmd_finalize_launch)
+
+    resolve_project = subparsers.add_parser("resolve-project-from-prompt")
+    resolve_project.add_argument("--prompt", default="")
+    resolve_project.set_defaults(func=cmd_resolve_project_from_prompt)
+
+    canonicalize_project = subparsers.add_parser("canonicalize-project-name")
+    canonicalize_project.add_argument("--project-name", required=True)
+    canonicalize_project.set_defaults(func=cmd_canonicalize_project_name)
 
     resolve_binding = subparsers.add_parser("resolve-board-binding")
     resolve_binding.add_argument("--project-name", required=True)

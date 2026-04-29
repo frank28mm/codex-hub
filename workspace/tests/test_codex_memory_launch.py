@@ -62,6 +62,21 @@ def test_workspace_lock_is_reentrant(sample_env) -> None:
     assert entered == ["outer", "inner"]
 
 
+def test_resolve_project_from_prompt_prefers_hyphenated_boundary_match(sample_env, monkeypatch) -> None:
+    module = importlib.reload(codex_memory)
+    monkeypatch.setattr(
+        module,
+        "project_prompt_registry",
+        lambda include_discovered=True: [
+            {"project_name": "TINT", "aliases": ["tint"]},
+            {"project_name": "TINT-Core", "aliases": ["tint-core"]},
+        ],
+    )
+
+    assert module.resolve_project_from_prompt("继续 TC-LT-01，推进 TINT-Core cutover。") == "TINT-Core"
+    assert module.resolve_project_from_prompt("继续推进 TINT 的前端主线。") == "TINT"
+
+
 def test_invalid_sync_timeout_env_falls_back_to_default(sample_env, monkeypatch) -> None:
     monkeypatch.setenv("WORKSPACE_HUB_SYNC_TRIGGER_TIMEOUT_SECONDS", "oops")
 

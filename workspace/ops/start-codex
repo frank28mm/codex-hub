@@ -163,78 +163,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 resolve_project_from_prompt() {
-  python3 - "$REGISTRY_MD" "$PROMPT" "$PROJECTS_ROOT" <<'PY'
-import json, re, sys
-from pathlib import Path
-
-path, prompt, projects_root = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    text = open(path, "r", encoding="utf-8").read()
-except FileNotFoundError:
-    text = ""
-data = []
-if text:
-    match = re.search(r"<!-- PROJECT_REGISTRY_DATA_START -->\s*```json\s*(.*?)\s*```\s*<!-- PROJECT_REGISTRY_DATA_END -->", text, re.S)
-    if match:
-        try:
-            data = json.loads(match.group(1))
-        except Exception:
-            data = []
-known = {item.get("project_name", ""): item for item in data if item.get("project_name")}
-try:
-    for child in sorted(Path(projects_root).iterdir(), key=lambda item: item.name.lower()):
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        if child.name not in known:
-            known[child.name] = {
-                "project_name": child.name,
-                "aliases": [child.name.lower()] if child.name.lower() != child.name else [],
-            }
-except FileNotFoundError:
-    pass
-prompt_l = prompt.lower()
-hits = []
-for item in known.values():
-    names = [item.get("project_name", "")] + list(item.get("aliases", []))
-    for name in names:
-        if name and name.lower() in prompt_l:
-            hits.append(item["project_name"])
-            break
-hits = sorted(set(hits))
-print(hits[0] if len(hits) == 1 else "")
-PY
+  python3 "$MEMORY_TOOL" resolve-project-from-prompt --prompt "$PROMPT"
 }
 
 canonicalize_project_name() {
-  python3 - "$REGISTRY_MD" "$1" <<'PY'
-import json, re, sys
-
-path, project = sys.argv[1], sys.argv[2]
-project = project.strip()
-if not project:
-    print("")
-    raise SystemExit(0)
-try:
-    text = open(path, "r", encoding="utf-8").read()
-except FileNotFoundError:
-    text = ""
-data = []
-if text:
-    match = re.search(r"<!-- PROJECT_REGISTRY_DATA_START -->\s*```json\s*(.*?)\s*```\s*<!-- PROJECT_REGISTRY_DATA_END -->", text, re.S)
-    if match:
-        try:
-            data = json.loads(match.group(1))
-        except Exception:
-            data = []
-project_l = project.lower()
-for item in data:
-    names = [item.get("project_name", "")] + list(item.get("aliases", []))
-    for name in names:
-        if name and name.lower() == project_l:
-            print(item.get("project_name", project))
-            raise SystemExit(0)
-print(project)
-PY
+  python3 "$MEMORY_TOOL" canonicalize-project-name --project-name "$1"
 }
 
 resolve_resume_context() {

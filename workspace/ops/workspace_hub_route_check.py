@@ -73,6 +73,7 @@ class RouteCase:
 
 
 def default_cases() -> list[RouteCase]:
+    # Public route checks stay product-facing; prefix-collision regressions live in unit tests.
     return [
         RouteCase(
             name="workspace-system-project",
