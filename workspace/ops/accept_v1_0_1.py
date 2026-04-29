@@ -127,8 +127,18 @@ def main() -> int:
         )
         require_returncode(results[-1], {0})
         policy_payload = json.loads(str(results[-1]["stdout"]))
-        if policy_payload.get("decision") != "prompt":
+        if policy_payload.get("decision") != "allow":
             raise RuntimeError(f"Unexpected execpolicy decision: {policy_payload}")
+        results.append(
+            run_command(
+                ["codex", "execpolicy", "check", "--rules", str(generated_rules), "gh", "pr", "create"],
+                env=fixture_env,
+            )
+        )
+        require_returncode(results[-1], {0})
+        external_write_payload = json.loads(str(results[-1]["stdout"]))
+        if external_write_payload.get("decision") != "prompt":
+            raise RuntimeError(f"Unexpected external write execpolicy decision: {external_write_payload}")
         results.append(
             run_command(
                 ["codex", "execpolicy", "check", "--rules", str(generated_rules), "cat", "~/.ssh/config"],

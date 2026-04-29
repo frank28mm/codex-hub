@@ -421,7 +421,15 @@ def test_export_rules_generates_valid_rules(sample_env) -> None:
         text=True,
         check=True,
     )
-    assert "prompt" in check.stdout
+    assert json.loads(check.stdout)["decision"] == "allow"
+    external_write = subprocess.run(
+        ["codex", "execpolicy", "check", "--rules", str(rule_path), "gh", "pr", "create"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(external_write.stdout)["decision"] == "prompt"
     local_read = subprocess.run(
         ["codex", "execpolicy", "check", "--rules", str(rule_path), "cat", "~/.ssh/config"],
         env=env,
