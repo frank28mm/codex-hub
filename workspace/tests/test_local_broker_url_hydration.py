@@ -17,6 +17,9 @@ def test_augment_prompt_with_url_context_embeds_fetched_excerpt(monkeypatch) -> 
             "title": "测试文章",
             "excerpt": "这是自动抓取到的正文摘录。",
             "fetched_url": url,
+            "content_status": "captured",
+            "blocked_reason": "",
+            "reader_mode": "http_html",
         },
     )
 
@@ -25,6 +28,6 @@ def test_augment_prompt_with_url_context_embeds_fetched_excerpt(monkeypatch) -> 
     )
 
     assert len(contexts) == 1
-    assert "系统自动抓取的链接正文摘要" in prompt
+    assert "系统自动读取的链接材料" in prompt
     assert "测试文章" in prompt
     assert "这是自动抓取到的正文摘录。" in prompt

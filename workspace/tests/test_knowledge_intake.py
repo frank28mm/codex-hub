@@ -761,11 +761,17 @@ def test_cmd_fetch_url_prints_captured_article(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         knowledge_intake,
         "fetch_html_excerpt",
-        lambda url: {
+        lambda url, persist_artifact=False: {
+            "ok": True,
             "title": "微信公众号文章标题",
             "excerpt": "这里是网页正文摘录。",
             "fetched_url": url,
             "status_code": 200,
+            "content_status": "captured",
+            "blocked_reason": "",
+            "reader_mode": "http_html",
+            "fallback_used": False,
+            "artifact_json_path": "/tmp/public-article/latest.json",
         },
     )
 

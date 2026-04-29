@@ -1946,6 +1946,7 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
             row["project_name"] = binding.get("project_name", "") or row.get("project_name", "")
             row["session_id"] = binding.get("session_id", "") or row.get("session_id", "")
         if lease:
+            lease_metadata = dict(lease.get("metadata") or {})
             row["lease_state"] = str(lease.get("state") or "").strip()
             row["lease_started_at"] = str(lease.get("started_at") or "").strip()
             row["lease_last_progress_at"] = str(lease.get("last_progress_at") or "").strip()
@@ -1953,6 +1954,12 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
             row["lease_stale_after_seconds"] = int(lease.get("stale_after_seconds") or 0)
             row["lease_last_delivery_phase"] = str(lease.get("last_delivery_phase") or "").strip()
             row["lease_last_error"] = str(lease.get("last_error") or "").strip()
+            row["lease_recovery_state"] = str(lease_metadata.get("recovery_state") or "").strip()
+            row["lease_recovery_count"] = int(lease_metadata.get("recovery_count") or 0)
+            row["lease_last_recovery_at"] = str(lease_metadata.get("last_recovery_at") or "").strip()
+            row["lease_last_recovery_reason"] = str(lease_metadata.get("last_recovery_reason") or "").strip()
+            row["lease_max_retries"] = int(lease_metadata.get("max_retries") or 0)
+            row["lease_final_failure_notified"] = bool(lease_metadata.get("final_failure_notified"))
             row["project_name"] = str(lease.get("project_name") or row.get("project_name") or "").strip()
             row["topic_name"] = str(lease.get("topic_name") or row.get("topic_name") or "").strip()
             row["session_id"] = str(lease.get("session_id") or row.get("session_id") or "").strip()
@@ -1972,7 +1979,7 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
         lease_stale_after_seconds = max(0, int(row.get("lease_stale_after_seconds") or 0))
         pending_request = bool(user_request_at and (not terminal_at or terminal_at < user_request_at))
         execution_state = "idle"
-        if lease_state in {"running", "approval_pending", "reported", "failed", "completed"}:
+        if lease_state in {"running", "approval_pending", "reported", "failed", "completed", "retrying", "abandoned"}:
             execution_state = "reported" if lease_state == "completed" else lease_state
         elif row.get("last_terminal_phase") == "error":
             execution_state = "failed"
@@ -1984,10 +1991,10 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
             execution_state = "pending"
         binding_required = bool(row.get("chat_type") == "group" and not row.get("project_name"))
         ack_pending = bool(
-            execution_state == "running"
+            execution_state in {"running", "retrying"}
             and str(row.get("lease_last_delivery_phase") or "").strip() == "ack"
         ) or bool(pending_request and ack_at and ack_at >= user_request_at)
-        awaiting_report = execution_state == "running" or bool(
+        awaiting_report = execution_state in {"running", "retrying"} or bool(
             pending_request and last_report_at and last_report_at >= user_request_at
         )
         last_user_request_age_seconds = age_seconds(user_request_at)
@@ -1995,12 +2002,16 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
         last_report_age_seconds = age_seconds(str(row.get("last_report_at") or "").strip())
         lease_last_progress_age_seconds = age_seconds(lease_last_progress_at or lease_started_at)
         attention_reason = ""
-        if execution_state == "failed":
+        if execution_state == "abandoned":
+            attention_reason = "recovery_abandoned"
+        elif execution_state == "failed":
             attention_reason = "last_execution_failed"
         elif binding_required:
             attention_reason = "binding_required"
         elif execution_state == "approval_pending" or pending_approvals:
             attention_reason = "approval_pending"
+        elif execution_state == "retrying":
+            attention_reason = "recovery_retrying"
         elif (
             execution_state == "running"
             and lease_last_progress_age_seconds is not None
@@ -2053,6 +2064,12 @@ def fetch_bridge_conversations(*, bridge: str = "feishu", limit: int = 50) -> li
                 "lease_stale_after_seconds": lease_stale_after_seconds,
                 "lease_last_delivery_phase": str(row.get("lease_last_delivery_phase") or "").strip(),
                 "lease_last_error": str(row.get("lease_last_error") or "").strip(),
+                "lease_recovery_state": str(row.get("lease_recovery_state") or "").strip(),
+                "lease_recovery_count": int(row.get("lease_recovery_count") or 0),
+                "lease_last_recovery_at": str(row.get("lease_last_recovery_at") or "").strip(),
+                "lease_last_recovery_reason": str(row.get("lease_last_recovery_reason") or "").strip(),
+                "lease_max_retries": int(row.get("lease_max_retries") or 0),
+                "lease_final_failure_notified": bool(row.get("lease_final_failure_notified")),
                 "approval_pending": bool(pending_approvals),
                 "pending_approval_count": len(pending_approvals),
                 "pending_approval_token": str(pending_token.get("token") or "").strip(),
@@ -2086,6 +2103,8 @@ def fetch_bridge_continuity_status(*, bridge: str = "feishu", limit: int = 50) -
     shared_session_count = 0
     response_delayed_count = 0
     progress_stalled_count = 0
+    retrying_count = 0
+    abandoned_count = 0
 
     bindings_by_session: dict[str, list[dict[str, Any]]] = {}
     for binding in bindings:
@@ -2130,18 +2149,23 @@ def fetch_bridge_continuity_status(*, bridge: str = "feishu", limit: int = 50) -
 
     for row in conversations:
         attention_reason = str(row.get("attention_reason") or "").strip()
-        if attention_reason not in {"response_delayed", "progress_stalled"}:
+        if attention_reason not in {"response_delayed", "progress_stalled", "recovery_retrying", "recovery_abandoned"}:
             continue
-        if row.get("stale_thread"):
+        if attention_reason in {"response_delayed", "progress_stalled"} and row.get("stale_thread"):
             continue
         if attention_reason == "response_delayed":
             response_delayed_count += 1
-        else:
+        elif attention_reason == "progress_stalled":
             progress_stalled_count += 1
+        elif attention_reason == "recovery_retrying":
+            retrying_count += 1
+        else:
+            abandoned_count += 1
         issues.append(
             {
                 "issue_type": attention_reason,
                 "severity": "warning",
+                "bridge": bridge,
                 "chat_ref": str(row.get("chat_ref") or "").strip(),
                 "project_name": str(row.get("project_name") or "").strip(),
                 "topic_name": str(row.get("topic_name") or "").strip(),
@@ -2166,6 +2190,8 @@ def fetch_bridge_continuity_status(*, bridge: str = "feishu", limit: int = 50) -
         "awaiting_report_count": progress_stalled_count,
         "response_delayed_count": response_delayed_count,
         "progress_stalled_count": progress_stalled_count,
+        "retrying_count": retrying_count,
+        "abandoned_count": abandoned_count,
         "issues": issues,
     }
 
@@ -2482,6 +2508,8 @@ def bridge_runtime_snapshot(*, bridge: str = "feishu") -> dict[str, Any]:
             "shared_session_count": int(continuity.get("shared_session_count", 0) or 0),
             "response_delayed_count": int(continuity.get("response_delayed_count", 0) or 0),
             "progress_stalled_count": int(continuity.get("progress_stalled_count", 0) or 0),
+            "retrying_count": int(continuity.get("retrying_count", 0) or 0),
+            "abandoned_count": int(continuity.get("abandoned_count", 0) or 0),
         }
     )
     last_event_at = _prefer_latest_iso(

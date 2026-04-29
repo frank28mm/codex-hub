@@ -790,6 +790,10 @@ def evaluate_checks(checks: dict[str, Any]) -> dict[str, Any]:
             continuity_parts.append(f"response_delayed={bridge_continuity.get('response_delayed_count', 0)}")
         if int(bridge_continuity.get("progress_stalled_count", 0) or 0) > 0:
             continuity_parts.append(f"progress_stalled={bridge_continuity.get('progress_stalled_count', 0)}")
+        if int(bridge_continuity.get("retrying_count", 0) or 0) > 0:
+            continuity_parts.append(f"retrying={bridge_continuity.get('retrying_count', 0)}")
+        if int(bridge_continuity.get("abandoned_count", 0) or 0) > 0:
+            continuity_parts.append(f"abandoned={bridge_continuity.get('abandoned_count', 0)}")
         detail = ", ".join(continuity_parts) or f"issue_count={bridge_continuity.get('issue_count', 0)}"
         alerts.append(
             build_alert(
@@ -886,7 +890,9 @@ def evaluate_checks(checks: dict[str, Any]) -> dict[str, Any]:
                 else (
                     f"shared_session={bridge_continuity.get('shared_session_count', 0)}, "
                     f"response_delayed={bridge_continuity.get('response_delayed_count', 0)}, "
-                    f"progress_stalled={bridge_continuity.get('progress_stalled_count', 0)}"
+                    f"progress_stalled={bridge_continuity.get('progress_stalled_count', 0)}, "
+                    f"retrying={bridge_continuity.get('retrying_count', 0)}, "
+                    f"abandoned={bridge_continuity.get('abandoned_count', 0)}"
                 )
             ),
             parent_id="WH-OPS-01",
@@ -1222,7 +1228,9 @@ def render_health_report(
             f"issue_count=`{checks.get('bridge_continuity', {}).get('issue_count', 0)}` "
             f"shared_session=`{checks.get('bridge_continuity', {}).get('shared_session_count', 0)}` "
             f"response_delayed=`{checks.get('bridge_continuity', {}).get('response_delayed_count', 0)}` "
-            f"progress_stalled=`{checks.get('bridge_continuity', {}).get('progress_stalled_count', 0)}`"
+            f"progress_stalled=`{checks.get('bridge_continuity', {}).get('progress_stalled_count', 0)}` "
+            f"retrying=`{checks.get('bridge_continuity', {}).get('retrying_count', 0)}` "
+            f"abandoned=`{checks.get('bridge_continuity', {}).get('abandoned_count', 0)}`"
         ),
         f"- official scheduler：type=`{checks['official_scheduler'].get('type')}` configured=`{checks['official_scheduler'].get('configured')}` active=`{checks['official_scheduler'].get('active')}` run_count=`{checks['official_scheduler'].get('run_count')}` direct_run_count=`{checks['official_scheduler'].get('direct_run_count')}` verified_run_count=`{checks['official_scheduler'].get('verified_run_count')}` last_run_at=`{checks['official_scheduler'].get('last_run_at')}` next_run_at=`{checks['official_scheduler'].get('next_run_at')}`",
         f"- Codex automation：configured=`{checks.get('codex_automation', {}).get('configured')}` active=`{checks.get('codex_automation', {}).get('active')}` runtime_status=`{checks.get('codex_automation', {}).get('runtime_status')}`",

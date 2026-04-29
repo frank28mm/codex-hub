@@ -165,6 +165,8 @@ def test_health_check_evaluate_checks_flags_bridge_continuity(sample_env) -> Non
             "shared_session_count": 1,
             "response_delayed_count": 1,
             "progress_stalled_count": 0,
+            "retrying_count": 1,
+            "abandoned_count": 0,
             "issues": [
                 {"issue_type": "shared_session_across_chats", "summary": "session drift"},
                 {"issue_type": "response_delayed", "summary": "response drift"},
@@ -191,6 +193,7 @@ def test_health_check_evaluate_checks_flags_bridge_continuity(sample_env) -> Non
     alert = next(item for item in result["alerts"] if item["alert_key"] == "health.bridge.continuity")
     assert alert["severity"] == "warning"
     assert "shared_session=1" in alert["current_summary"]
+    assert "retrying=1" in alert["current_summary"]
     row = next(item for item in result["rows"] if item["ID"] == "WH-HC-07")
     assert row["状态"] == "doing"
     assert "response_delayed=1" in row["阻塞/依赖"]

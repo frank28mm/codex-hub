@@ -17,10 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
 import yaml
 from pypdf import PdfReader
-from bs4 import BeautifulSoup
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -37,6 +35,7 @@ try:
         replace_or_append_marked_section,
         write_text,
     )
+    from ops import public_article_reader
 except ImportError:  # pragma: no cover
     from codex_memory import (  # type: ignore
         PROJECTS_ROOT,
@@ -48,6 +47,7 @@ except ImportError:  # pragma: no cover
         replace_or_append_marked_section,
         write_text,
     )
+    import public_article_reader  # type: ignore
 
 SITE_CONFIG_PATH = REPO_ROOT / "control" / "site.yaml"
 
@@ -924,48 +924,8 @@ def curated_source_path(seed_id: str, title: str) -> Path:
     return CURATED_SOURCE_ROOT / f"{base}.md"
 
 
-def fetch_html_excerpt(url: str) -> dict[str, Any]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36 CodexHubKnowledgeIntake/1.0",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    }
-    response = requests.get(url, headers=headers, timeout=25)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-    for selector in ("script", "style", "noscript", "header", "footer", "nav", "aside", "form"):
-        for node in soup.select(selector):
-            node.decompose()
-    root = soup.find("article") or soup.find("main") or soup.body or soup
-    title = ""
-    if soup.title and soup.title.text.strip():
-        title = soup.title.text.strip()
-    og_title = soup.find("meta", attrs={"property": "og:title"})
-    if og_title and og_title.get("content", "").strip():
-        title = og_title["content"].strip()
-    description = ""
-    og_description = soup.find("meta", attrs={"property": "og:description"})
-    if og_description and og_description.get("content", "").strip():
-        description = og_description["content"].strip()
-    elif soup.find("meta", attrs={"name": "description"}) and soup.find("meta", attrs={"name": "description"}).get("content", "").strip():
-        description = soup.find("meta", attrs={"name": "description"})["content"].strip()
-    parts: list[str] = []
-    for node in root.find_all(["h1", "h2", "h3", "p", "li"], limit=180):
-        text = " ".join(node.get_text(" ", strip=True).split())
-        if len(text) < 30:
-            continue
-        lowered = text.lower()
-        if any(blocked in lowered for blocked in ("cookie", "subscribe", "sign up", "advertisement", "sponsored")):
-            continue
-        parts.append(text)
-    excerpt = "\n\n".join(parts[:60]).strip()
-    if description and description not in excerpt:
-        excerpt = f"{description}\n\n{excerpt}".strip()
-    return {
-        "title": title or url,
-        "excerpt": excerpt[:6000].strip(),
-        "fetched_url": response.url,
-        "status_code": response.status_code,
-    }
+def fetch_html_excerpt(url: str, *, persist_artifact: bool = False) -> dict[str, Any]:
+    return public_article_reader.read_url(url, persist_artifact_result=persist_artifact)
 
 
 def seed_curated_sources(*, seed_ids: list[str] | None = None) -> dict[str, Any]:
@@ -1958,7 +1918,7 @@ def cmd_seed_curated_sources(args: argparse.Namespace) -> int:
 
 
 def cmd_fetch_url(args: argparse.Namespace) -> int:
-    payload = fetch_html_excerpt(str(args.url or "").strip())
+    payload = fetch_html_excerpt(str(args.url or "").strip(), persist_artifact=True)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 

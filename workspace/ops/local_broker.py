@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from ops import assistant_branding, background_job_executor, codex_memory, codex_models, engine_adapter, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
+    from ops import assistant_branding, background_job_executor, codex_memory, codex_models, engine_adapter, feishu_agent, feishu_callback_executor, material_router, opencli_agent, opencli_policy, project_pause, public_article_reader, runtime_ingestion, runtime_state, workspace_hub_project, workspace_job_schema
 except ImportError:  # pragma: no cover
     import assistant_branding  # type: ignore
     import background_job_executor  # type: ignore
@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover
     import opencli_agent  # type: ignore
     import opencli_policy  # type: ignore
     import project_pause  # type: ignore
+    import public_article_reader  # type: ignore
     import runtime_ingestion  # type: ignore
     import runtime_state  # type: ignore
     import workspace_hub_project  # type: ignore
@@ -631,78 +632,38 @@ WECHAT_PUBLIC_ARTICLE_DOMAINS = {"mp.weixin.qq.com"}
 
 
 def _trim_url_candidate(value: str) -> str:
-    return str(value or "").strip().rstrip("，。；;,)")
+    return public_article_reader.trim_url_candidate(value)
 
 
 def _extract_prompt_urls(prompt: str) -> list[str]:
-    seen: set[str] = set()
-    results: list[str] = []
-    for match in URL_RE.findall(str(prompt or "")):
-        url = _trim_url_candidate(match)
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        results.append(url)
-    return results
+    return public_article_reader.extract_urls(prompt)
 
 
 def _should_hydrate_prompt_url(url: str) -> bool:
-    parsed = urlparse(str(url or "").strip())
-    return parsed.scheme in {"http", "https"} and parsed.netloc.lower() in WECHAT_PUBLIC_ARTICLE_DOMAINS
+    return public_article_reader.should_auto_hydrate_url(
+        url,
+        allowed_domains={"mp.weixin.qq.com"},
+    )
 
 
 def _fetch_prompt_url_context(url: str) -> dict[str, Any]:
-    try:
-        from ops import knowledge_intake
-    except ImportError:  # pragma: no cover
-        import knowledge_intake  # type: ignore
+    return public_article_reader.read_url(url, persist_artifact_result=True)
 
-    payload = knowledge_intake.fetch_html_excerpt(url)
-    return {
-        "url": str(url).strip(),
-        "title": str(payload.get("title") or "").strip(),
-        "excerpt": str(payload.get("excerpt") or "").strip(),
-        "fetched_url": str(payload.get("fetched_url") or url).strip(),
-    }
+
+def _hydrate_prompt_with_url_context(prompt: str) -> dict[str, Any]:
+    return public_article_reader.hydrate_prompt(
+        prompt,
+        fetcher=_fetch_prompt_url_context,
+        should_hydrate=_should_hydrate_prompt_url,
+    )
 
 
 def _augment_prompt_with_url_context(prompt: str) -> tuple[str, list[dict[str, Any]]]:
-    source = str(prompt or "").strip()
-    if not source:
-        return source, []
-    contexts: list[dict[str, Any]] = []
-    for url in _extract_prompt_urls(source)[:2]:
-        if not _should_hydrate_prompt_url(url):
-            continue
-        try:
-            context = _fetch_prompt_url_context(url)
-        except Exception:
-            continue
-        if not str(context.get("excerpt") or "").strip():
-            continue
-        contexts.append(context)
-    if not contexts:
-        return source, []
-    appendix_parts = []
-    for index, context in enumerate(contexts, start=1):
-        appendix_parts.append(
-            "\n".join(
-                [
-                    f"链接材料 {index}",
-                    f"- url: {context['fetched_url']}",
-                    f"- title: {context['title'] or 'Untitled'}",
-                    "",
-                    "网页正文摘录：",
-                    context["excerpt"][:2200].strip(),
-                ]
-            ).strip()
-        )
-    augmented = (
-        source
-        + "\n\n以下是系统自动抓取的链接正文摘要，请直接基于这些内容阅读和回答，不要再说无法读取链接：\n\n"
-        + "\n\n---\n\n".join(appendix_parts)
+    payload = _hydrate_prompt_with_url_context(prompt)
+    return (
+        str(payload.get("augmented_prompt") or prompt or ""),
+        payload.get("contexts", []),
     )
-    return augmented, contexts
 
 
 def _extract_prefixed_json(text: str, prefix: str) -> dict[str, Any] | None:
@@ -2369,7 +2330,10 @@ def cmd_panel(args: argparse.Namespace) -> int:
 def cmd_command_center(args: argparse.Namespace) -> int:
     action = args.action
     prompt = getattr(args, "prompt", "")
-    augmented_prompt, prompt_url_context = _augment_prompt_with_url_context(prompt)
+    prompt_hydration = _hydrate_prompt_with_url_context(prompt)
+    augmented_prompt = str(prompt_hydration.get("augmented_prompt") or prompt or "")
+    prompt_url_context = prompt_hydration.get("contexts", [])
+    prompt_url_summary = prompt_hydration.get("summary", {})
     if action in {"codex-exec", "codex-resume", "engine-exec", "engine-resume"}:
         blocked = _pause_block_response("command_center", project_name=getattr(args, "project_name", ""))
         if blocked:
@@ -2539,6 +2503,7 @@ def cmd_command_center(args: argparse.Namespace) -> int:
             error=payload.get("error", ""),
             error_type=payload.get("error_type", ""),
             prompt_url_context=prompt_url_context,
+            prompt_url_summary=prompt_url_summary,
             launch_context=payload.get("launch_context"),
             finalize_launch=payload.get("finalize_launch"),
             engine_lease=payload.get("engine_lease"),
