@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Writing"
+  short_description: "Use Claude Code as a dedicated writing specialist for rewriting and polishing prose"
+  default_prompt: "Use $claude-writing to rewrite or polish this draft with stronger clarity, structure, and tone."

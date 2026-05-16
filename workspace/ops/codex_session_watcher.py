@@ -350,19 +350,7 @@ def auto_discover_projects() -> bool:
 
 
 def resolve_project_from_prompt(prompt: str) -> str:
-    prompt = prompt.strip()
-    if not prompt:
-        return ""
-    prompt_l = prompt.lower()
-    hits: list[str] = []
-    for item in load_registry():
-        names = [item.get("project_name", "")] + list(item.get("aliases", []))
-        for name in names:
-            if name and name.lower() in prompt_l:
-                hits.append(item["project_name"])
-                break
-    unique_hits = sorted(set(hits))
-    return unique_hits[0] if len(unique_hits) == 1 else ""
+    return codex_memory.resolve_project_from_prompt(prompt)
 
 
 def parse_iso(text: str) -> dt.datetime | None:

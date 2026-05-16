@@ -1,0 +1,105 @@
+version: 1
+
+profiles:
+  - profile_id: xiaohongshu_image_post
+    platform: 小红书
+    content_form: 图文
+    audience_relation: 陌生人公域
+    primary_goal: 让用户愿意停留、收藏、互动，并感到这是一条真实有用的分享
+    key_requirements:
+      - 标题、封面、前几行正文必须先讲清价值
+      - 真实性优先，不要像硬广
+      - 避免夸张误导和强站外导流
+      - 优先经验、清单、步骤、踩坑、对比
+    style_rules:
+      - 第一人称
+      - 场景具体
+      - 段落短
+      - 关键词明确
+      - 轻口语
+    structure_template:
+      - 标题先给场景与结果
+      - 开头先抛痛点或收益
+      - 正文按清单或步骤展开
+      - 结尾用轻互动收束
+    avoid:
+      - 企业公关腔
+      - 纯口号
+      - 标题党
+      - 强交易导向
+
+  - profile_id: wechat_public_article
+    platform: 微信公众号
+    content_form: 长文正文
+    audience_relation: 订阅关系下的深度阅读
+    primary_goal: 用一篇完整文章讲透一个问题，并形成可信、可转发的判断
+    key_requirements:
+      - 标题和封面仍重要，但正文结构与信息密度更关键
+      - 一篇文章聚焦一个核心主题
+      - 要有分节、论证、案例或结论
+      - 适合做深度分析与系统表达
+    style_rules:
+      - 可信
+      - 完整
+      - 分节清楚
+      - 信息密度高于社媒短帖
+      - 正式但不公文
+    structure_template:
+      - 标题说明主题
+      - 导语说明为何值得读
+      - 正文分节展开
+      - 结尾收束判断
+    avoid:
+      - 情绪化标题
+      - 信息密度太低
+      - 段落过碎
+      - 只有态度没有论证
+
+  - profile_id: wechat_public_teaser
+    platform: 微信公众号
+    content_form: 推送文案
+    audience_relation: 信息流卡片预览
+    primary_goal: 在标题、摘要、导语里讲清“为什么值得点开”
+    key_requirements:
+      - 任务不是讲透，而是提炼
+      - 标题、摘要、导语必须分工清楚
+      - 读者要在短时间内知道主题与收益
+    style_rules:
+      - 短
+      - 稳
+      - 准
+      - 信息判断优先
+      - 比朋友圈更专业
+    structure_template:
+      - 标题提炼主题和价值
+      - 摘要补充增量信息
+      - 导语点出打开后的收获
+    avoid:
+      - 标题过长
+      - 摘要重复标题
+      - 空泛宣传腔
+
+  - profile_id: wechat_moments_copy
+    platform: 微信朋友圈
+    content_form: 朋友圈文案
+    audience_relation: 熟人关系链
+    primary_goal: 让文案像本人真实发出的更新，而不是公域营销内容
+    key_requirements:
+      - 人味优先
+      - 一个场景、一个重点、一个情绪
+      - 不要太像广告或通稿
+    style_rules:
+      - 第一人称
+      - 短句
+      - 留白
+      - 场景感
+      - 轻互动
+    structure_template:
+      - 开头带出场景或感受
+      - 中间只讲一个重点
+      - 结尾轻收束
+    avoid:
+      - 硬广
+      - 过长说教
+      - 过度包装
+      - 公众号腔

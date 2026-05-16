@@ -64,29 +64,7 @@ def ensure_obsidian_background() -> None:
 
 
 def resolve_project_from_prompt(prompt: str) -> str:
-    prompt_l = str(prompt or "").lower()
-    if not prompt_l:
-        return ""
-    known: dict[str, dict[str, Any]] = {}
-    for item in codex_memory.load_registry():
-        project_name = str(item.get("project_name", "")).strip()
-        if project_name:
-            known[project_name] = item
-    try:
-        for child in sorted((WORKSPACE_ROOT / "projects").iterdir(), key=lambda item: item.name.lower()):
-            if child.is_dir() and not child.name.startswith(".") and child.name not in known:
-                known[child.name] = {"project_name": child.name, "aliases": [child.name.lower()]}
-    except FileNotFoundError:
-        pass
-    hits: list[str] = []
-    for item in known.values():
-        names = [str(item.get("project_name", "")).strip(), *[str(alias).strip() for alias in item.get("aliases", [])]]
-        for name in names:
-            if name and name.lower() in prompt_l:
-                hits.append(str(item.get("project_name", "")).strip())
-                break
-    hits = sorted({item for item in hits if item})
-    return hits[0] if len(hits) == 1 else ""
+    return codex_memory.resolve_project_from_prompt(prompt)
 
 
 def resolve_resume_context(

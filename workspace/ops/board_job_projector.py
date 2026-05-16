@@ -870,6 +870,9 @@ def _projected_task_status(row: dict[str, Any], task_spec: dict[str, Any]) -> st
         return task_status
     last_decision = str(task_spec.get("last_decision", "")).strip()
     stage = str(task_spec.get("stage", "")).strip()
+    continuation_outcome = str(task_spec.get("continuation_outcome", "")).strip()
+    if continuation_outcome in {"await_external_event", "retry_later", "continue_now", "continue_next_track"}:
+        return task_status
     if last_decision == "done" or stage == "handoff":
         return "done"
     if last_decision == "blocked":

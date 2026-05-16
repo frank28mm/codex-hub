@@ -21,6 +21,11 @@ def _runtime_env(env: dict[str, str] | None = None) -> dict[str, str]:
     return dict(env or os.environ)
 
 
+def _lark_cli_bin(env: dict[str, str] | None = None) -> str:
+    runtime = _runtime_env(env)
+    return str(runtime.get("WORKSPACE_HUB_LARK_CLI_BIN") or "").strip() or "lark-cli"
+
+
 def _backend_mode(env: dict[str, str] | None = None) -> str:
     value = str(_runtime_env(env).get("WORKSPACE_HUB_FEISHU_BACKEND") or "auto").strip().lower()
     return value or "auto"
@@ -49,8 +54,8 @@ def _normalize_domain(domain: str) -> str:
     return aliases.get(raw, raw)
 
 
-def _binary_available() -> bool:
-    return bool(shutil.which("lark-cli"))
+def _binary_available(env: dict[str, str] | None = None) -> bool:
+    return bool(shutil.which(_lark_cli_bin(env)))
 
 
 def backend_enabled(domain: str, env: dict[str, str] | None = None) -> bool:
@@ -61,7 +66,7 @@ def backend_enabled(domain: str, env: dict[str, str] | None = None) -> bool:
         return False
     if _normalize_domain(domain) not in _enabled_domains(env):
         return False
-    return _binary_available()
+    return _binary_available(env)
 
 
 def doc_backend_enabled(env: dict[str, str] | None = None) -> bool:
@@ -115,7 +120,7 @@ def _payload_items(payload: dict[str, Any]) -> list[Any]:
 
 
 def _run_lark_cli(args: list[str], *, input_text: str | None = None) -> dict[str, Any]:
-    command = ["lark-cli", *args]
+    command = [_lark_cli_bin(), *args]
     result = subprocess.run(
         command,
         text=True,

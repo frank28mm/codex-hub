@@ -60,7 +60,11 @@ def _parse_scalar(text: str) -> Any:
         try:
             return json.loads(value)
         except json.JSONDecodeError:
-            pass
+            if value.startswith("[") and value.endswith("]"):
+                inner = value[1:-1].strip()
+                if not inner:
+                    return []
+                return [_parse_scalar(item) for item in inner.split(",") if item.strip()]
     if re.fullmatch(r"-?\d+", value):
         try:
             return int(value)
@@ -216,7 +220,7 @@ def _dump_lines(value: Any, *, indent: int, allow_unicode: bool, sort_keys: bool
                 nested = _dump_lines(item, indent=indent + 2, allow_unicode=allow_unicode, sort_keys=sort_keys)
                 head = nested[0].lstrip()
                 lines.append(f"{prefix}- {head}")
-                lines.extend(prefix + "  " + line.lstrip() for line in nested[1:])
+                lines.extend(nested[1:])
             else:
                 lines.append(f"{prefix}- {_dump_scalar(item, allow_unicode=allow_unicode)}")
         return lines

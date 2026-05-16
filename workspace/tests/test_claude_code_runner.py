@@ -35,6 +35,12 @@ def test_render_prompt_uses_mode_preamble() -> None:
     assert "Challenge this rollout plan." in rendered
 
 
+def test_render_prompt_supports_writing_mode() -> None:
+    rendered = claude_code_runner.render_prompt("writing", "Rewrite this launch note.")
+    assert "dedicated writing specialist" in rendered
+    assert "Rewrite this launch note." in rendered
+
+
 def test_parse_json_output_returns_dict_only_for_valid_json_object() -> None:
     assert claude_code_runner.parse_json_output('{"status":"ok"}') == {"status": "ok"}
     assert claude_code_runner.parse_json_output('["not-an-object"]') is None
