@@ -34,6 +34,20 @@ This skill follows a strict `prepare -> confirm send` flow.
 11. Press `Return` to send the message.
 12. Record the send result with `ops.wechat_gui_send.record_execution_result(...)`.
 
+## WeChat App Operation Path
+
+macOS WeChat does not reliably expose chats, messages, contacts, or the input box through the Accessibility tree. Treat that as an app limitation, not as a Computer Use failure.
+
+Default to:
+
+1. Use Codex's OpenAI bundled `Computer Use` plugin against the local `WeChat.app`.
+2. Read the UI through Computer Use screenshots, visual recognition, local zoom/crops, and OCR when needed.
+3. Operate the UI with mouse clicks, scrolling, coordinates, and keyboard confirmation.
+4. Paste recipient names and message text through the system clipboard instead of typing directly into WeChat.
+5. Use Accessibility controls only when they are explicitly present and reliable.
+
+If screenshots are blank, transparent, black, or the WeChat window reports `sharing=0`, first troubleshoot Screen Recording permission, window sharing state, Computer Use plugin version, and WeChat render state before concluding that WeChat cannot be operated.
+
 ## Rules
 
 1. Direct chats only.
@@ -44,7 +58,7 @@ This skill follows a strict `prepare -> confirm send` flow.
 6. Prefer the search box over manual list navigation whenever possible.
 7. Use the system clipboard for recipient names and message text instead of GUI typing.
 8. Treat `Return` as the default send action.
-9. Prefer accessibility-tree controls over raw coordinates.
+9. Prefer the screenshot-visual path for WeChat chat content; use accessibility-tree controls only when they are present and reliable.
 10. Stop on missing controls, login screens, modals, or layout drift.
 11. Keep the first version fail-closed: one hard failure stops the remaining batch.
 

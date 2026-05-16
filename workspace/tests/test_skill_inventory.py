@@ -4,12 +4,17 @@ import re
 
 SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 EXPECTED_SKILLS = {
+    "audience-stage",
     "browse",
     "careful",
+    "channel-brief",
     "claude-challenge",
     "claude-consult",
     "claude-writing",
     "claude-review",
+    "claim-evidence",
+    "creator-truth",
+    "creator-workflow",
     "document-release",
     "freeze",
     "retro",
@@ -22,6 +27,9 @@ EXPECTED_SKILLS = {
     "office-hours",
     "plan-ceo-review",
     "plan-eng-review",
+    "product-truth",
+    "quality-gate",
+    "transaction-truth",
     "wechat-gui-send",
 }
 
@@ -237,3 +245,40 @@ def test_wechat_gui_send_skill_mentions_prepare_then_confirm_runtime() -> None:
     assert "prepare -> confirm send" in skill
     assert "Computer Use" in skill
     assert "Use the WeChat search field to paste the recipient name for fast targeting." in skill
+
+
+def test_creator_workflow_pack_is_public_safe() -> None:
+    pack = {
+        "creator-workflow",
+        "audience-stage",
+        "channel-brief",
+        "claim-evidence",
+        "creator-truth",
+        "product-truth",
+        "quality-gate",
+        "transaction-truth",
+    }
+    for name in pack:
+        text = _read_skill(name)
+        assert "Current stage" in text
+        assert "Recommended next step" in text
+        assert "/Users/frank" not in text
+        assert "TINT" not in text
+
+
+def test_creator_workflow_pack_covers_truth_brief_and_gate_layers() -> None:
+    assert "creator_truth" in _read_skill("creator-truth")
+    assert "product_truths" in _read_skill("product-truth")
+    assert "transaction truth" in _read_skill("transaction-truth").lower()
+    assert "relationship stage" in _read_skill("audience-stage")
+    assert "core claim" in _read_skill("claim-evidence")
+    assert "channel-ready brief" in _read_skill("channel-brief")
+    assert "release-blocking" in _read_skill("quality-gate")
+
+
+def test_getnote_agent_skill_is_packaged() -> None:
+    root = Path(__file__).resolve().parents[1] / ".agents" / "skills" / "getnote"
+    assert (root / "SKILL.md").exists()
+    assert (root / "README.md").exists()
+    assert (root / "references" / "save.md").exists()
+    assert "Get笔记" in (root / "SKILL.md").read_text(encoding="utf-8")
